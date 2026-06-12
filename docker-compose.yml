@@ -1,0 +1,160 @@
+# docker-compose.yml — GHW digital life (2 instances + Prometheus + Grafana)
+#
+# Phase 1 production: 2 个 GHW 实例 (alpha + bravo) 互联, 通过共享 peer registry
+# Prometheus scrape 2 实例, Grafana 显示对比
+#
+# 用法:
+#   docker compose up -d
+#   # 访问:
+#   #   http://localhost:8765  → GHW alpha (UI)
+#   #   http://localhost:8766  → GHW bravo (UI)
+#   #   http://localhost:9090  → Prometheus
+#   #   http://localhost:3000  → Grafana (admin / admin)
+#
+# 数据持久化:
+#   - ghw_alpha_data / ghw_bravo_data: SQLite + state.json + WAL
+#   - prometheus_data: Prometheus TSDB
+#   - grafana_data: dashboards
+#   - shared_peers: 共享 peer registry (alpha + bravo 都读)
+
+version: "3.9"
+
+services:
+  # ===== Shared peer registry (双方都读) =====
+  shared-peers:
+    image: alpine:3.19
+    container_name: ghw-shared-peers
+    command: >
+      sh -c "
+        echo '# GHW peer registry' > /shared/peers.txt &&
+        echo 'ghw_alpha.sock' >> /shared/peers.txt &&
+        echo 'ghw_bravo.sock' >> /shared/peers.txt &&
+        sleep infinity
+      "
+    volumes:
+      - shared_peers:/shared
+
+  # ===== GHW alpha (port 8765) =====
+  ghw-alpha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ghw-alpha
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - ghw_alpha_data:/data
+      - shared_peers:/shared:ro
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - GHW_AGENT_ID=alpha
+    depends_on:
+      - shared-peers
+    healthcheck:
+      test: ["CMD", "/app/ui_server", "--port", "8767", "--state", "/data/health.json", "--ui-dir", "/app/ui", "--cycles", "1", "--llm", "none"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    entrypoint: ["/app/ui_server"]
+    command:
+      - "--port"
+      - "8765"
+      - "--state"
+      - "/data/ui_state.json"
+      - "--ui-dir"
+      - "/app/ui"
+      - "--id"
+      - "alpha"
+      - "--peers-file"
+      - "/shared/peers.txt"
+      - "--llm"
+      - "deepseek"
+      - "--llm-model"
+      - "deepseek-chat"
+      - "--llm-key-env"
+      - "DEEPSEEK_API_KEY"
+
+  # ===== GHW bravo (port 8766) =====
+  ghw-bravo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ghw-bravo
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    volumes:
+      - ghw_bravo_data:/data
+      - shared_peers:/shared:ro
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - GHW_AGENT_ID=bravo
+    depends_on:
+      - shared-peers
+    healthcheck:
+      test: ["CMD", "/app/ui_server", "--port", "8767", "--state", "/data/health.json", "--ui-dir", "/app/ui", "--cycles", "1", "--llm", "none"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    entrypoint: ["/app/ui_server"]
+    command:
+      - "--port"
+      - "8766"
+      - "--state"
+      - "/data/ui_state.json"
+      - "--ui-dir"
+      - "/app/ui"
+      - "--id"
+      - "bravo"
+      - "--peers-file"
+      - "/shared/peers.txt"
+      - "--llm"
+      - "deepseek"
+      - "--llm-model"
+      - "deepseek-chat"
+      - "--llm-key-env"
+      - "DEEPSEEK_API_KEY"
+
+  # ===== Prometheus (scrape 2 instances) =====
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: ghw-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus-multi.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - ghw-alpha
+      - ghw-bravo
+
+  # ===== Grafana (dashboards) =====
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: ghw-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+volumes:
+  ghw_alpha_data:
+  ghw_bravo_data:
+  shared_peers:
+  prometheus_data:
+  grafana_data:

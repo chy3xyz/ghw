@@ -1,0 +1,92 @@
+# GHW (Goal-Harness-World) — Build Artifacts
+# Zig 0.17 dev
+
+# Compiled binaries (rebuild via `zig build`)
+zig-out/
+*.o
+*.obj
+*.so
+*.dylib
+*.dylib.dSYM/
+*.dSYM/
+
+# Root-level binary symlinks/executables (compile residue)
+/main
+/_main
+/memory_test
+/test_propose
+/ghw_link_test
+/embed_demo_v3
+/multi_agent_demo
+/sqlite_test
+/wasm_sandbox_test
+/daemon
+/ui_server
+/ui_server.new
+/root
+/root.dSYM/
+
+# Test fixtures (regenerate via examples)
+guest.wasm
+cimport_test.o
+
+# Zig build cache
+.zig-cache/
+.zig-cache-verify/
+/.zig-version
+
+# Runtime data (L3 persistence — generated, not source)
+/state.json
+/state.json.db
+/state.json.db-journal
+/state.json.db-shm
+/state.json.db-wal
+/state.json.wal
+/snapshot.tmp
+/ui_state.json
+/loop_state.json
+/peers.txt
+/sockets/
+
+# IM event logs (runtime)
+/data/
+
+# Non-GHW personal projects (小说 / 短剧 / 智能体 notes)
+/works/
+
+# Research papers / draft notes / dev-only docs (not shipped in v0.5.1)
+/dev/
+/docs/GHW数字生命范式/
+/docs/implementation_audit.md
+/docs/l6_paper.md
+/docs/IEEE论文.md
+/docs/arXiv.md
+/docs/paper.md
+/docs/deployment_plan.md
+/docs/范式变革论文-简版.md
+
+# macOS / editor cruft
+.DS_Store
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Verification scratch files
+.ghw_verify
+verify_*.txt
+.tmp/
+
+# Sensitive — never commit
+.env
+.env.local
+*.key
+*.pem
+*secret*
+credentials.json
+config.local.json
+
+# Build output of SDK C consumer
+ghw_c_test
+test_ghw_c

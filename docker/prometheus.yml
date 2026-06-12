@@ -1,0 +1,22 @@
+# Prometheus config for GHW digital life
+# Scrape /api/metrics from the GHW ui_server, every 15s
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: ghw-monitor
+
+scrape_configs:
+  - job_name: ghw
+    static_configs:
+      - targets:
+          - ghw:8765
+    metrics_path: /api/metrics
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

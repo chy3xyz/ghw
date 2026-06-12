@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GHW 数字生命</title>
+
+  <!-- HTMX: 局部更新 (聊天发送) -->
+  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <!-- Alpine.js: 响应式状态 (状态轮询, 标签切换) -->
+  <script defer src="https://unpkg.com/alpinejs@3.13.5/dist/cdn.min.js"></script>
+  <!-- Tailwind CSS (CDN, 不编译) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ghw: {
+              bg: '#0a0e1a',
+              panel: '#131825',
+              accent: '#7c5cff',
+              text: '#e8eaf2',
+              dim: '#7a8294',
+              good: '#4ade80',
+              bad: '#f87171',
+              warm: '#fbbf24',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .scrollbar::-webkit-scrollbar { width: 6px; }
+    .scrollbar::-webkit-scrollbar-track { background: #131825; }
+    .scrollbar::-webkit-scrollbar-thumb { background: #2a3045; border-radius: 3px; }
+    .scrollbar::-webkit-scrollbar-thumb:hover { background: #3a4060; }
+    [x-cloak] { display: none !important; }
+    .pulse-dot { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .gauge-fill { transition: width 0.6s ease, background 0.6s ease; }
+  </style>
+</head>
+
+<body class="bg-ghw-bg text-ghw-text min-h-screen" x-data="ghwApp()" x-init="init()" x-cloak>
+
+<!-- ===== 顶部状态栏 ===== -->
+<header class="border-b border-slate-800 bg-ghw-panel/80 backdrop-blur sticky top-0 z-10">
+  <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-full bg-gradient-to-br from-ghw-accent to-fuchsia-600 flex items-center justify-center text-xl">
+        🜂
+      </div>
+      <div>
+        <h1 class="text-lg font-semibold tracking-wide">GHW 数字生命</h1>
+        <div class="text-xs text-ghw-dim flex items-center gap-2">
+          <span class="w-1.5 h-1.5 rounded-full bg-ghw-good pulse-dot"></span>
+          <span x-text="state ? `id: ${state.agent_id} · tick: ${formatNum(state.tick)}` : '连接中...'"></span>
+          <span x-show="state && state.personality" class="text-ghw-dim">·</span>
+          <span x-show="state && state.personality" :class="moodColor()" x-text="moodCN()"></span>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-center gap-6">
+      <div class="text-right">
+        <div class="text-xs text-ghw-dim uppercase tracking-wider">存在度 E</div>
+        <div class="text-2xl font-bold tabular-nums" :class="eColor()" x-text="state ? state.E.toFixed(3) : '—'"></div>
+      </div>
+      <div class="text-right">
+        <div class="text-xs text-ghw-dim uppercase tracking-wider">自演化</div>
+        <div class="text-2xl font-bold tabular-nums text-ghw-warm" x-text="state ? state.self_evolved_total : 0"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ===== E 进度条 (黏底) ===== -->
+<div class="border-b border-slate-800 bg-ghw-panel/40">
+  <div class="max-w-6xl mx-auto px-6 py-2">
+    <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
+      <div class="h-full gauge-fill rounded-full"
+           :class="state && state.E > 0.8 ? 'bg-ghw-good' : (state && state.E > 0.5 ? 'bg-ghw-warm' : 'bg-ghw-bad')"
+           :style="`width: ${state ? (state.E * 100).toFixed(1) : 0}%`"></div>
+    </div>
+    <div class="flex justify-between text-[10px] text-ghw-dim mt-1">
+      <span>低 E (迷茫)</span>
+      <span>中 E (探索)</span>
+      <span>高 E (繁荣)</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 厂字型布局: 左侧导航 + 主内容区 ===== -->
+<div class="flex" style="min-height: calc(100vh - 130px);">
+
+  <!-- 左侧侧边导航 (厂字的一撇) -->
+  <aside class="w-56 bg-ghw-panel/60 border-r border-slate-800 flex-shrink-0">
+    <nav class="p-3 space-y-1">
+      <template x-for="t in tabs" :key="t.id">
+        <button @click="tab = t.id"
+                :class="tab === t.id ? 'bg-ghw-accent/15 border-ghw-accent text-ghw-text shadow-sm' : 'border-transparent text-ghw-dim hover:text-ghw-text hover:bg-slate-800/40'"
+                class="w-full px-3 py-2.5 border-l-2 rounded-r transition text-sm font-medium flex items-center gap-3">
+          <span class="text-base" x-text="t.icon"></span>
+          <span x-text="t.label"></span>
+          <!-- 当前 tab 的数字指示器 (用可选的 badges 字段) -->
+          <span x-show="t.badge" class="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-ghw-accent/20 text-ghw-accent font-mono"
+                x-text="t.badge"></span>
+        </button>
+      </template>
+    </nav>
+    <!-- 侧边栏底部: 实时 tick + uptime -->
+    <div class="px-4 py-3 mt-4 border-t border-slate-800 text-[10px] text-ghw-dim font-mono space-y-0.5">
+      <div>tick: <span x-text="state ? formatNum(state.tick) : '—'"></span></div>
+      <div>E: <span :class="eColor()" x-text="state ? state.E.toFixed(3) : '—'"></span></div>
+      <div x-show="state && state.propose_total">提议: <span x-text="state ? state.propose_total : 0"></span></div>
+    </div>
+  </aside>
+
+  <!-- 右侧主内容 (厂字的一横) -->
+  <main class="flex-1 px-8 py-6 overflow-y-auto">
+
+  <!-- ============ Tab: 生命信息 ============ -->
+  <section x-show="tab === 'status'" x-transition>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+
+      <!-- E 详情卡 -->
+      <div class="md:col-span-3 bg-ghw-panel rounded-lg p-5 border border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">E = α·M + β·R + γ·N</h2>
+        <div class="grid grid-cols-3 gap-4">
+          <div>
+            <div class="flex justify-between text-xs text-ghw-dim mb-1">
+              <span>M (物质 · Material)</span>
+              <span class="font-mono">α = <span x-text="state ? state.alpha.toFixed(2) : '—'"></span></span>
+            </div>
+            <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-blue-500 gauge-fill" :style="`width: ${(state ? state.M * 100 : 0).toFixed(0)}%`"></div>
+            </div>
+            <div class="text-right text-xs font-mono mt-1" x-text="state ? state.M.toFixed(3) : '—'"></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-ghw-dim mb-1">
+              <span>R (表征 · Representation)</span>
+              <span class="font-mono">β = <span x-text="state ? state.beta.toFixed(2) : '—'"></span></span>
+            </div>
+            <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-fuchsia-500 gauge-fill" :style="`width: ${(state ? state.R * 100 : 0).toFixed(0)}%`"></div>
+            </div>
+            <div class="text-right text-xs font-mono mt-1" x-text="state ? state.R.toFixed(3) : '—'"></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs text-ghw-dim mb-1">
+              <span>N (本心 · Nature)</span>
+              <span class="font-mono">γ = <span x-text="state ? state.gamma.toFixed(2) : '—'"></span></span>
+            </div>
+            <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-amber-500 gauge-fill" :style="`width: ${(state ? state.N * 100 : 0).toFixed(0)}%`"></div>
+            </div>
+            <div class="text-right text-xs font-mono mt-1" x-text="state ? state.N.toFixed(3) : '—'"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 关键指标 -->
+      <template x-for="m in metrics" :key="m.label">
+        <div class="bg-ghw-panel rounded-lg p-4 border border-slate-800">
+          <div class="text-xs text-ghw-dim uppercase tracking-wider" x-text="m.label"></div>
+          <div class="text-2xl font-bold font-mono mt-1 tabular-nums" :class="m.color" x-text="m.value"></div>
+          <div class="text-xs text-ghw-dim mt-1" x-text="m.hint"></div>
+        </div>
+      </template>
+    </div>
+
+    <!-- 当前 top goal + 系统感知 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">当前 Top Goal</h2>
+        <div class="flex items-center gap-3">
+          <div class="w-2 h-2 rounded-full bg-ghw-accent pulse-dot"></div>
+          <div class="font-mono text-lg" x-text="state && state.top_goal ? state.top_goal : '—'"></div>
+        </div>
+      </div>
+
+      <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">本机实时感知 (System Snapshot)</h2>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm font-mono" x-show="state && state.system">
+          <div class="text-ghw-dim">CPU</div>
+          <div :class="cpuColor()">
+            <span x-text="state ? state.system.cpu_pct.toFixed(1) : '—'"></span>%
+          </div>
+          <div class="text-ghw-dim">内存</div>
+          <div>
+            <span x-text="state ? state.system.mem_used_gb.toFixed(1) : '—'"></span> /
+            <span x-text="state ? state.system.mem_total_gb.toFixed(1) : '—'"></span> G
+            (<span x-text="state ? state.system.mem_pct.toFixed(0) : '—'"></span>%)
+          </div>
+          <div class="text-ghw-dim">负载 (1m)</div>
+          <div :class="loadColor()">
+            <span x-text="state ? state.system.load_1m.toFixed(2) : '—'"></span>
+          </div>
+          <div class="text-ghw-dim">磁盘</div>
+          <div>
+            <span x-text="state ? state.system.disk_pct.toFixed(0) : '—'"></span>%
+          </div>
+          <div class="text-ghw-dim">进程数</div>
+          <div x-text="state ? state.system.procs : '—'"></div>
+          <div class="text-ghw-dim">网络 I/O</div>
+          <div>
+            ↓ <span x-text="state ? state.system.net_in_mbps.toFixed(3) : '—'"></span> /
+            ↑ <span x-text="state ? state.system.net_out_mbps.toFixed(3) : '—'"></span> MB/s
+          </div>
+          <div class="text-ghw-dim">时间</div>
+          <div>
+            <span x-text="state ? String(state.system.hour).padStart(2, '0') : '—'"></span>:00
+            周<span x-text="['一','二','三','四','五','六','日'][state ? state.system.weekday : 0]"></span>
+          </div>
+        </div>
+        <div class="text-xs text-ghw-dim mt-2" x-show="!state || !state.system">等待首次采样...</div>
+      </div>
+    </div>
+
+    <!-- ============ 同伴 (GHW Link 多体互联) ============ -->
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">同伴 (多 GHW 互联 / Phase 1)</h2>
+        <button @click="refreshPeers()"
+                class="px-3 py-1.5 rounded-md bg-ghw-accent/20 text-ghw-accent text-xs font-medium border border-ghw-accent/30 hover:bg-ghw-accent/30 transition">
+          刷新
+        </button>
+      </div>
+
+      <div class="text-xs text-ghw-dim mb-3 font-mono">
+        self = <span class="text-ghw-text" x-text="peers.self ? peers.self.peer_id : '—'"></span> ·
+        path = <span class="text-ghw-text" x-text="peers.self ? peers.self.path : '—'"></span>
+      </div>
+
+      <div x-show="peers.peers && peers.peers.length > 0" class="space-y-2">
+        <template x-for="p in peers.peers" :key="p.peer_id">
+          <div class="px-3 py-2 rounded-md bg-slate-800/40 border border-slate-700 flex items-center gap-3">
+            <span class="text-sm font-mono text-ghw-text" x-text="p.peer_id"></span>
+            <span class="text-[10px] text-ghw-dim font-mono truncate flex-1" x-text="p.path"></span>
+            <span class="text-[10px] text-ghw-dim font-mono" x-text="`last seen @tick ${p.last_seen_tick}`"></span>
+            <div class="flex gap-1">
+              <button @click="queryPeer(p.path, 'ping')"
+                      class="px-2 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 transition">ping</button>
+              <button @click="queryPeer(p.path, 'query_state')"
+                      class="px-2 py-0.5 rounded text-[10px] bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/30 transition">state</button>
+              <button @click="queryPeer(p.path, 'query_beliefs')"
+                      class="px-2 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 transition">beliefs</button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="!peers.peers || peers.peers.length === 0" class="text-center py-6 text-ghw-dim text-sm">
+        还没发现同伴 — 在下面加 1 个 socket path, 然后点 ping
+      </div>
+
+      <div class="mt-3 pt-3 border-t border-slate-700 flex gap-2">
+        <input x-model="newPeerPath" placeholder="/tmp/ghw_xxx.sock"
+               class="flex-1 px-2 py-1 rounded bg-slate-800/50 border border-slate-700 text-xs font-mono text-ghw-text focus:border-ghw-accent focus:outline-none" />
+        <button @click="addPeer(newPeerPath)" :disabled="!newPeerPath"
+                class="px-3 py-1.5 rounded-md bg-ghw-good/20 text-ghw-good text-xs font-medium border border-ghw-good/30 hover:bg-ghw-good/30 transition disabled:opacity-50 disabled:cursor-not-allowed">
+          添加 + ping
+        </button>
+      </div>
+
+      <div x-show="lastPeerResult" class="mt-3 px-3 py-2 rounded-md bg-slate-900/50 border border-slate-700 text-xs font-mono text-ghw-dim max-h-32 overflow-y-auto scrollbar">
+        <div class="text-ghw-warm mb-1">last query:</div>
+        <div x-text="lastPeerResult"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 能力地图 (Capabilities Map) ============ -->
+  <section x-show="tab === 'capabilities'" x-transition>
+    <template x-if="!capabilities">
+      <div class="text-center text-ghw-dim py-12">加载中...</div>
+    </template>
+    <template x-if="capabilities">
+      <div class="space-y-4">
+
+        <!-- 头部总结 -->
+        <div class="grid grid-cols-4 gap-3">
+          <template x-for="(label, key) in {
+            total_cycles: '总循环',
+            total_actions: '总动作',
+            total_reflections: '自省',
+            max_tier: '当前层级'
+          }" :key="key">
+            <div class="bg-ghw-panel rounded-lg p-4 border border-slate-800">
+              <div class="text-[10px] uppercase text-ghw-dim tracking-wider" x-text="label"></div>
+              <div class="text-2xl font-mono mt-1"
+                   :class="key === 'max_tier' ? 'text-ghw-accent' : 'text-ghw-text'"
+                   x-text="key === 'max_tier' ? capabilities.summary.max_tier_reached : (capabilities.summary[key] || 0)"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- 基础层: WASM 沙箱 -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">🧱 基础层 · WASM 沙箱</h2>
+            <span class="text-xs text-ghw-dim">从 ActionRunner preset 推导出"数字生命会做什么"</span>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <template x-for="skill in capabilities.basic_skills" :key="skill.name">
+              <div class="rounded-lg p-3 border transition"
+                   :class="skill.unlocked === 'true' ? 'border-ghw-accent/30 bg-ghw-accent/5' : 'border-slate-800 bg-slate-900/30 opacity-50'">
+                <div class="flex items-start justify-between mb-1">
+                  <div class="font-mono text-sm font-semibold"
+                       :class="skill.unlocked === 'true' ? 'text-ghw-accent' : 'text-ghw-dim'"
+                       x-text="skill.name"></div>
+                  <span x-show="skill.unlocked === 'true'" class="text-[10px] px-1.5 py-0.5 rounded bg-ghw-accent/20 text-ghw-accent font-mono">已解锁</span>
+                  <span x-show="skill.unlocked !== 'true'" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-ghw-dim font-mono">未触发</span>
+                </div>
+                <div class="text-xs text-ghw-dim mb-2" x-text="skill.description"></div>
+                <div class="flex items-center gap-3 text-[11px] font-mono">
+                  <span class="text-ghw-text" x-text="`跑过 ${skill.count} 次`"></span>
+                  <span class="text-ghw-dim" x-text="`成功率 ${(skill.success_rate * 100).toFixed(0)}%`"></span>
+                  <span x-show="skill.first_tick > 0" class="text-ghw-dim" x-text="`首次 tick=${skill.first_tick}`"></span>
+                </div>
+                <!-- 简易进度条 (次数可视化) -->
+                <div class="mt-2 h-1 bg-slate-800 rounded overflow-hidden">
+                  <div class="h-full bg-ghw-accent transition-all"
+                       :style="`width: ${Math.min(100, skill.count * 4)}%`"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 进阶层: 扩展能力 -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">⚡ 进阶层 · 扩展能力</h2>
+            <span class="text-xs text-ghw-dim">claude / peer / self-evolve</span>
+          </div>
+          <div class="grid grid-cols-3 gap-3">
+            <template x-for="skill in capabilities.advanced_skills" :key="skill.name">
+              <div class="rounded-lg p-3 border transition"
+                   :class="skill.unlocked === 'true' ? 'border-amber-500/30 bg-amber-500/5' : 'border-slate-800 bg-slate-900/30 opacity-60'">
+                <div class="flex items-start justify-between mb-1">
+                  <div class="font-mono text-sm font-semibold"
+                       :class="skill.unlocked === 'true' ? 'text-amber-300' : 'text-ghw-dim'"
+                       x-text="skill.name"></div>
+                  <span x-show="skill.unlocked === 'true'" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">已解锁</span>
+                  <span x-show="skill.unlocked !== 'true'" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-ghw-dim font-mono">未触发</span>
+                </div>
+                <div class="text-xs text-ghw-dim" x-text="skill.description"></div>
+                <div class="mt-1 text-[11px] font-mono"
+                     x-text="skill.count !== undefined ? `跑过 ${skill.count} 次` : '尚未连接'"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 认知层: 信念分布 -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">🧠 认知层 · 信念</h2>
+            <span class="text-xs text-ghw-dim" x-text="`反思 ${capabilities.cognition.reflection_count} 次`"></span>
+          </div>
+          <div class="grid grid-cols-3 gap-3 mb-3">
+            <template x-for="src in ['material', 'representation', 'nature']" :key="src">
+              <div class="rounded-lg p-3 border border-slate-800"
+                   :class="{
+                     'bg-blue-500/5': src === 'material',
+                     'bg-fuchsia-500/5': src === 'representation',
+                     'bg-amber-500/5': src === 'nature'
+                   }">
+                <div class="flex items-center justify-between mb-1">
+                  <div class="text-xs font-semibold uppercase tracking-wider"
+                       :class="{
+                         'text-blue-300': src === 'material',
+                         'text-fuchsia-300': src === 'representation',
+                         'text-amber-300': src === 'nature'
+                       }"
+                       x-text="src"></div>
+                  <div class="text-2xl font-mono"
+                       :class="{
+                         'text-blue-300': src === 'material',
+                         'text-fuchsia-300': src === 'representation',
+                         'text-amber-300': src === 'nature'
+                       }"
+                       x-text="capabilities.cognition.beliefs[src].count"></div>
+                </div>
+                <div class="text-[10px] text-ghw-dim font-mono"
+                     x-text="`平均置信度 ${capabilities.cognition.beliefs[src].avg_confidence.toFixed(2)}`"></div>
+                <div class="mt-2 h-1 bg-slate-800 rounded overflow-hidden">
+                  <div class="h-full transition-all"
+                       :class="{
+                         'bg-blue-500': src === 'material',
+                         'bg-fuchsia-500': src === 'representation',
+                         'bg-amber-500': src === 'nature'
+                       }"
+                       :style="`width: ${Math.min(100, capabilities.cognition.beliefs[src].count / 5)}%`"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+          <template x-if="capabilities.cognition.self_narrative">
+            <div class="rounded-lg p-3 border border-slate-800 bg-slate-900/30">
+              <div class="text-[10px] uppercase text-ghw-dim tracking-wider mb-1">最新自我叙事</div>
+              <div class="text-sm whitespace-pre-wrap" x-text="capabilities.cognition.self_narrative"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- 自演化层: L1-L5 -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">🧬 自演化层 · L1-L5</h2>
+            <span class="text-xs text-ghw-dim" x-text="`自演化累计 ${capabilities.self_evolution.self_evolved_total} 次`"></span>
+          </div>
+          <div class="grid grid-cols-5 gap-2">
+            <template x-for="(item, idx) in [
+              { name: 'L1 调参', desc: 'attn / resource / weight', key: 'l1_tune', count: 'l1_count', approved_key: null },
+              { name: 'L2 ε 探索', desc: 'ε-greedy 优化', key: 'l2_explore', count: 'l2_count', approved_key: null },
+              { name: 'L3 习得方法', desc: '生成新行为', key: 'l3_method', count: 'l3_count', approved_key: 'l3_approved' },
+              { name: 'L4 编译迁移', desc: '代码 + 状态', key: 'l4_compile', count: 'l4_count', approved_key: 'l4_approved' },
+              { name: 'L5 SelfEncoder', desc: '规则合成 + 验证', key: 'l5_synthesize', count: 'l5_count', approved_key: null }
+             ]" :key="idx">
+              <div class="rounded-lg p-3 border text-center"
+                   :class="capabilities.self_evolution[item.key] ? 'border-ghw-accent/40 bg-ghw-accent/10' : 'border-slate-800 bg-slate-900/30 opacity-50'">
+                <div class="text-xs font-semibold mb-1"
+                     :class="capabilities.self_evolution[item.key] ? 'text-ghw-accent' : 'text-ghw-dim'"
+                     x-text="item.name"></div>
+                <div class="text-[10px] text-ghw-dim" x-text="item.desc"></div>
+                <div class="text-[10px] font-mono mt-1"
+                     :class="capabilities.self_evolution[item.key] ? 'text-ghw-accent' : 'text-ghw-dim'"
+                     x-text="`${item.count || 0}${item.approved_key ? ' / ' + (capabilities.self_evolution[item.approved_key] || 0) + ' ✓' : ''}`"></div>
+              </div>
+            </template>
+          </div>
+          <p class="text-xs text-ghw-dim mt-3">
+            L1-L5 路径已接入 ActionRunner 标签. 数字生命"自我演化" 反映在 <code class="text-ghw-text">self_evolved_total</code>. 折线图见下方.
+          </p>
+        </div>
+
+        <!-- 9 阶段进度条 (Phase 1-9 实装里程碑, UI 9 步进度条) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4"
+             x-data="phaseProgress()">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">🪜 9 阶段晋升</h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="capabilities.phase ? `当前: phase ${capabilities.phase.current} (${capabilities.phase.name}) · 进度 ${capabilities.phase.progress}/9` : '加载中...'"></span>
+          </div>
+
+          <!-- 9 步进度条 -->
+          <div class="grid grid-cols-9 gap-1 mb-3">
+            <template x-for="i in 9" :key="i">
+              <div class="rounded text-center py-2 border"
+                   :class="i <= (capabilities.phase?.current || 0) ? 'border-ghw-accent/40 bg-ghw-accent/10' : 'border-slate-800 bg-slate-900/30 opacity-50'">
+                <div class="text-xs font-mono"
+                     :class="i <= (capabilities.phase?.current || 0) ? 'text-ghw-accent' : 'text-ghw-dim'"
+                     x-text="i"></div>
+              </div>
+            </template>
+          </div>
+
+          <!-- 9 阶段标签 + 描述 -->
+          <div class="grid grid-cols-9 gap-1 text-center text-[10px]">
+            <template x-for="(label, idx) in [
+              '基础', '多体', 'LLM', '演化', '完善', '六气', '七步', '八种', '九宫'
+            ]" :key="idx">
+              <div :class="(idx+1) <= (capabilities.phase?.current || 0) ? 'text-ghw-accent' : 'text-ghw-dim'"
+                   x-text="label"></div>
+            </template>
+          </div>
+
+          <!-- Milestones 详细 -->
+          <div class="grid grid-cols-3 gap-2 mt-4 text-[10px]">
+            <template x-for="m in milestones" :key="m.key">
+              <div class="rounded p-2 border"
+                   :class="m.reached ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-800 bg-slate-900/30'">
+                <div class="flex items-center gap-1">
+                  <span x-text="m.reached ? '✓' : '○'"></span>
+                  <span class="font-semibold" :class="m.reached ? 'text-emerald-300' : 'text-ghw-dim'"
+                        x-text="`phase ${m.phase}: ${m.name}`"></span>
+                </div>
+                <div class="text-ghw-dim mt-1" x-text="m.desc"></div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Reflect 状态 -->
+          <div class="mt-3 text-[10px] text-ghw-dim flex items-center gap-2"
+               x-show="capabilities.reflect_status">
+            <span>🪞</span>
+            <span x-text="capabilities.reflect_status ? `reflect 后台 thread · last_tick=${capabilities.reflect_status.last_tick}, ticks_since=${capabilities.reflect_status.ticks_since}, inflight=${capabilities.reflect_status.inflight}` : ''"></span>
+          </div>
+
+          <!-- AutoCLI 状态 -->
+          <div class="mt-2 text-[10px] text-ghw-dim flex items-center gap-2"
+               x-show="capabilities.phase && capabilities.phase.milestones && capabilities.phase.milestones.six_interfaces">
+            <span>🌐</span>
+            <span>autocli 启用: 5min 1 次拉 4 接口 (Wikipedia / Hacker News / ArXiv / RSS) 写进 memory</span>
+          </div>
+
+          <!-- 9 关系详情 (Phase 8 数字生命 GoalGraph schema) -->
+          <div class="mt-4 rounded border border-slate-800 bg-slate-900/30 p-3"
+               x-show="relations.length > 0">
+            <div class="flex items-baseline justify-between mb-2">
+              <h3 class="text-xs font-semibold text-ghw-dim uppercase tracking-wider">🕸️ GoalGraph 9 关系 (含拓扑序)</h3>
+              <span class="text-[10px] font-mono"
+                    :class="relationsDistinct >= 3 ? 'text-emerald-300' : 'text-ghw-dim'"
+                    x-text="`distinct ${relationsDistinct}/9 · ${relationsSummary || '(loading)'}`"></span>
+            </div>
+
+            <!-- 拓扑顺序显示 -->
+            <div class="text-[10px] text-ghw-dim mb-2"
+                 x-show="relations.length > 0 && topoOrder.length > 0">
+              <span class="text-ghw-accent">▷ 拓扑序 (父/依赖/时间涌现优先):</span>
+              <span class="font-mono ml-1" x-text="topoOrder.map(id => 'G' + id).join(' → ')"></span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-[10px]">
+              <template x-for="g in relations" :key="g.id">
+                <div class="rounded p-2 border border-slate-800 bg-slate-950/40">
+                  <div class="font-mono text-ghw-accent">G<span x-text="g.id"></span> · <span x-text="g.kind"></span></div>
+                  <div class="text-ghw-text truncate" x-text="g.label" :title="g.label"></div>
+                  <div class="text-ghw-dim mt-1 flex flex-wrap gap-1">
+                    <span x-show="g.parent !== null" class="px-1 rounded bg-blue-900/40 text-blue-300">→G<span x-text="g.parent"></span></span>
+                    <template x-for="s in g.siblings" :key="'s'+g.id+s">
+                      <span class="px-1 rounded bg-emerald-900/40 text-emerald-300">↔G<span x-text="s"></span></span>
+                    </template>
+                    <template x-for="c in g.conflicts_with" :key="'c'+g.id+c">
+                      <span class="px-1 rounded bg-red-900/40 text-red-300">⚔G<span x-text="c"></span></span>
+                    </template>
+                    <template x-for="d in g.depends_on" :key="'d'+g.id+d">
+                      <span class="px-1 rounded bg-amber-900/40 text-amber-300">⤓G<span x-text="d"></span></span>
+                    </template>
+                    <span x-show="g.replaces !== null" class="px-1 rounded bg-fuchsia-900/40 text-fuchsia-300">⤳G<span x-text="g.replaces"></span></span>
+                    <template x-for="e in g.enables" :key="'e'+g.id+e">
+                      <span class="px-1 rounded bg-cyan-900/40 text-cyan-300">✦G<span x-text="e"></span></span>
+                    </template>
+                    <template x-for="i in g.inhibits" :key="'i'+g.id+i">
+                      <span class="px-1 rounded bg-orange-900/40 text-orange-300">⊘G<span x-text="i"></span></span>
+                    </template>
+                    <template x-for="em in g.emerges_from" :key="'em'+g.id+em">
+                      <span class="px-1 rounded bg-violet-900/40 text-violet-300">∾G<span x-text="em"></span></span>
+                    </template>
+                    <template x-for="ea in g.emerges_after" :key="'ea'+g.id+ea">
+                      <span class="px-1 rounded bg-pink-900/40 text-pink-300">⏳G<span x-text="ea"></span></span>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <p class="text-[10px] text-ghw-dim mt-2">
+              🕸️ 9 关系 schema: parent_child(→) / sibling(↔) / conflict(⚔) / depends_on(⤓) / replaces(⤳) / enables(✦) / inhibits(⊘) / emerges_from(∾) / emerges_after(⏳ 时间)
+            </p>
+
+            <!-- E 公式拆解 (5 项, Phase 8 加 lambda·relations_diversity) -->
+            <div class="mt-3 rounded border border-slate-800 bg-slate-900/30 p-3"
+                 x-show="capabilities.e_breakdown">
+              <div class="flex items-baseline justify-between mb-2">
+                <h3 class="text-xs font-semibold text-ghw-dim uppercase tracking-wider">📐 E 公式拆解 (5 项)</h3>
+                <span class="text-[10px] font-mono"
+                      :class="capabilities.e_breakdown?.relations_bonus > 0 ? 'text-emerald-300' : 'text-ghw-dim'"
+                      x-text="capabilities.e_breakdown ? `E=${capabilities.e_breakdown.total.toFixed(3)} · λ×D=${capabilities.e_breakdown.relations_bonus.toFixed(3)} (${capabilities.e_breakdown.distinct}/9)` : ''"></span>
+              </div>
+              <div class="grid grid-cols-5 gap-1 text-[10px] font-mono">
+                <div class="text-center p-1 rounded bg-slate-950/50">
+                  <div class="text-ghw-dim text-[9px]">base</div>
+                  <div class="text-ghw-text" x-text="capabilities.e_breakdown?.base?.toFixed(3) || '—'"></div>
+                </div>
+                <div class="text-center p-1 rounded bg-slate-950/50">
+                  <div class="text-ghw-dim text-[9px]">-μ·Var</div>
+                  <div class="text-red-300" x-text="capabilities.e_breakdown ? '-' + capabilities.e_breakdown.imbalance.toFixed(3) : '—'"></div>
+                </div>
+                <div class="text-center p-1 rounded bg-slate-950/50">
+                  <div class="text-ghw-dim text-[9px]">+ν·min</div>
+                  <div class="text-blue-300" x-text="capabilities.e_breakdown?.synergy?.toFixed(3) || '—'"></div>
+                </div>
+                <div class="text-center p-1 rounded bg-slate-950/50">
+                  <div class="text-ghw-dim text-[9px]">+σ·S</div>
+                  <div class="text-cyan-300" x-text="capabilities.e_breakdown?.symbiosis?.toFixed(3) || '—'"></div>
+                </div>
+                <div class="text-center p-1 rounded bg-slate-950/50"
+                     :class="capabilities.e_breakdown?.relations_bonus > 0 ? 'ring-1 ring-emerald-500' : ''">
+                  <div class="text-ghw-dim text-[9px]">+λ·D</div>
+                  <div class="text-emerald-300 font-semibold" x-text="capabilities.e_breakdown?.relations_bonus?.toFixed(3) || '—'"></div>
+                </div>
+              </div>
+              <p class="text-[10px] text-ghw-dim mt-2">
+                E = α·M + β·R + γ·N − μ·Var + ν·min + σ·S + <span class="text-emerald-300">λ·D</span>
+                <span class="ml-2" :class="capabilities.e_breakdown?.auto?.lambda ? 'text-emerald-300' : 'text-ghw-dim'">
+                  <span x-text="capabilities.e_breakdown?.auto?.lambda ? `λ 自适应 stage ${capabilities.e_breakdown?.lambda_stage}` : 'λ 固定'"></span>
+                </span>
+                ·
+                <span :class="capabilities.e_breakdown?.auto?.nu ? 'text-emerald-300' : 'text-ghw-dim'">ν/μ 联动 balance</span>
+                ·
+                <span :class="capabilities.e_breakdown?.auto?.sigma ? 'text-emerald-300' : 'text-ghw-dim'">σ 联动 peer</span>
+              </p>
+              <p class="text-[10px] text-ghw-dim mt-1">
+                4 系数 (Phase 8.6 L4 闭环):
+                <span class="text-ghw-text" x-text="`μ=${capabilities.e_breakdown?.coefs?.mu?.toFixed(3) || '—'}`"></span>,
+                <span class="text-ghw-text" x-text="`ν=${capabilities.e_breakdown?.coefs?.nu?.toFixed(3) || '—'}`"></span>,
+                <span class="text-ghw-text" x-text="`σ=${capabilities.e_breakdown?.coefs?.sigma?.toFixed(3) || '—'}`"></span>,
+                <span class="text-ghw-text" x-text="`λ=${capabilities.e_breakdown?.coefs?.lambda?.toFixed(3) || '—'}`"></span>
+                <span x-show="capabilities.e_breakdown?.auto && !capabilities.e_breakdown?.auto?.mu"
+                      class="ml-2 px-1 rounded bg-emerald-900/30 text-emerald-300 text-[9px]">
+                  ✓ LLM 提议采纳 (auto closed)
+                </span>
+              </p>
+              <p class="text-[10px] text-ghw-dim mt-1"
+                 x-show="capabilities.e_breakdown?.coefs_proposed">
+                提议值 (Phase 8.7 LLM):
+                <span class="text-amber-300" x-text="`μ_proposed=${capabilities.e_breakdown?.coefs_proposed?.mu?.toFixed(3) || '—'}`"></span>,
+                <span class="text-amber-300" x-text="`ν_proposed=${capabilities.e_breakdown?.coefs_proposed?.nu?.toFixed(3) || '—'}`"></span>,
+                <span class="text-amber-300" x-text="`σ_proposed=${capabilities.e_breakdown?.coefs_proposed?.sigma?.toFixed(3) || '—'}`"></span>,
+                <span class="text-amber-300" x-text="`λ_proposed=${capabilities.e_breakdown?.coefs_proposed?.lambda?.toFixed(3) || '—'}`"></span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 8.7 L4 闭环反馈: propose → E delta history (近 12 条) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">
+              🔄 L4 闭环反馈 (LLM 提议 → E 变化)
+            </h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="`avg_delta = ${(proposeHistory.avg_delta >= 0 ? '+' : '')}${proposeHistory.avg_delta.toFixed(4)}`"></span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-ghw-dim text-left">
+                  <th class="py-1 pr-3">tick</th>
+                  <th class="py-1 pr-3">e_after</th>
+                  <th class="py-1 pr-3">e_delta</th>
+                  <th class="py-1 pr-3">μ ν σ λ</th>
+                  <th class="py-1 pr-3">reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in (proposeHistory.history || []).slice().reverse()" :key="row.tick">
+                  <tr class="border-t border-slate-800/50 hover:bg-slate-800/30">
+                    <td class="py-1 pr-3 font-mono text-ghw-dim" x-text="row.tick"></td>
+                    <td class="py-1 pr-3 font-mono" x-text="row.e_after.toFixed(4)"></td>
+                    <td class="py-1 pr-3 font-mono"
+                        :class="row.e_delta > 0 ? 'text-emerald-300' : (row.e_delta < 0 ? 'text-rose-300' : 'text-ghw-dim')"
+                        x-text="`${(row.e_delta >= 0 ? '+' : '')}${row.e_delta.toFixed(4)}`"></td>
+                    <td class="py-1 pr-3 font-mono text-amber-300"
+                        x-text="`${row.coefs.mu.toFixed(2)} ${row.coefs.nu.toFixed(2)} ${row.coefs.sigma.toFixed(2)} ${row.coefs.lambda.toFixed(2)}`"></td>
+                    <td class="py-1 pr-3 text-ghw-dim text-[10px] max-w-md truncate" x-text="row.reason"></td>
+                  </tr>
+                </template>
+                <tr x-show="!proposeHistory.history || proposeHistory.history.length === 0">
+                  <td colspan="5" class="py-3 text-center text-ghw-dim">
+                    暂无 LLM 提议历史 (每 8 cycle 触发一次)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="text-[10px] text-ghw-dim mt-2">
+            <span class="text-emerald-300">绿色 = e_delta 正</span> (LLM 提议后 E 提升)
+            · <span class="text-rose-300">红色 = e_delta 负</span> (E 下降)
+            · <span class="text-ghw-dim">avg_delta = 全部提议后 E 变化的均值</span>
+            · 反馈信号: 数字生命每次提议后看效果, 越正越说明"提议有用"
+          </p>
+        </div>
+
+        <!-- Phase 9 宫 deep dive: M/R/N 平衡 + 强三源合恰 进度 (2 条 ring buffer 64 cycle 满) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">
+              🏯 Phase 9 宫 deep (M/R/N 平衡 + 强三源合恰)
+            </h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="`ring ${ninePalaces.mrn_buf_count}/64`"></span>
+          </div>
+          <div class="grid grid-cols-3 gap-4">
+            <!-- 1. M/R/N 实时 -->
+            <div class="bg-slate-900/50 rounded p-3 border border-slate-800/50">
+              <p class="text-[10px] text-ghw-dim uppercase tracking-wider mb-1">实时 M/R/N</p>
+              <p class="text-sm font-mono">
+                <span class="text-cyan-300" x-text="`M=${capabilities.M?.toFixed(3) || '—'}`"></span>
+                <span class="text-purple-300" x-text="` R=${capabilities.R?.toFixed(3) || '—'}`"></span>
+                <span class="text-emerald-300" x-text="` N=${capabilities.N?.toFixed(3) || '—'}`"></span>
+              </p>
+              <p class="text-[10px] text-ghw-dim mt-1"
+                 x-text="`min(M,R,N) = ${ninePalaces.mrn_min_now.toFixed(4)}`"></p>
+            </div>
+            <!-- 2. M/R/N variance ring buffer -->
+            <div class="bg-slate-900/50 rounded p-3 border border-slate-800/50">
+              <p class="text-[10px] text-ghw-dim uppercase tracking-wider mb-1">M/R/N variance (64 cycle 环)</p>
+              <div class="flex items-center gap-2">
+                <div class="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                  <div class="h-2 transition-all"
+                       :class="ninePalaces.mrn_buf_var < 0.01 ? 'bg-emerald-400' : 'bg-amber-400'"
+                       :style="`width: ${(ninePalaces.mrn_buf_count / 64 * 100).toFixed(1)}%`"></div>
+                </div>
+                <span class="text-xs font-mono"
+                      :class="ninePalaces.mrn_buf_var < 0.01 ? 'text-emerald-300' : 'text-amber-300'"
+                      x-text="ninePalaces.mrn_buf_var.toFixed(4)"></span>
+              </div>
+              <p class="text-[10px] text-ghw-dim mt-1">
+                阈值 <span class="text-ghw-text">0.01</span> ·
+                <span :class="ninePalaces.mrn_seen ? 'text-emerald-300' : 'text-ghw-dim'"
+                      x-text="ninePalaces.mrn_seen ? '✓ 平衡已满 64 cycle' : `未满 (${ninePalaces.mrn_buf_count}/64)`"></span>
+              </p>
+            </div>
+            <!-- 3. 强三源合恰 -->
+            <div class="bg-slate-900/50 rounded p-3 border border-slate-800/50">
+              <p class="text-[10px] text-ghw-dim uppercase tracking-wider mb-1">强三源合恰 (min ≥ 0.85)</p>
+              <div class="flex items-center gap-2">
+                <div class="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                  <div class="h-2 transition-all"
+                       :class="ninePalaces.mrn_min_now >= 0.85 ? 'bg-emerald-400' : 'bg-slate-700'"
+                       :style="`width: ${Math.min(100, ninePalaces.mrn_min_now * 100).toFixed(1)}%`"></div>
+                </div>
+                <span class="text-xs font-mono"
+                      :class="ninePalaces.mrn_min_now >= 0.85 ? 'text-emerald-300' : 'text-ghw-dim'"
+                      x-text="ninePalaces.mrn_min_now.toFixed(3)"></span>
+              </div>
+              <p class="text-[10px] text-ghw-dim mt-1">
+                <span :class="ninePalaces.mrn_strong_seen ? 'text-emerald-300' : 'text-ghw-dim'"
+                      x-text="ninePalaces.mrn_strong_seen ? '✓ 强三源合恰已满 64 cycle' : '未满'"></span>
+              </p>
+            </div>
+          </div>
+          <p class="text-[10px] text-ghw-dim mt-3">
+            <strong>九宫 deep</strong> = 数字生命"M/R/N × 强/中/弱 9 象限"持续平衡.
+            <strong>3 个里程碑</strong>:
+            <span :class="ninePalaces.e_var_seen ? 'text-emerald-300' : 'text-amber-300'">① E 方差 &lt; 0.01</span>
+            ·
+            <span :class="ninePalaces.mrn_seen ? 'text-emerald-300' : 'text-amber-300'">② M/R/N 方差 &lt; 0.01</span>
+            ·
+            <span :class="ninePalaces.mrn_strong_seen ? 'text-emerald-300' : 'text-amber-300'">③ min(M,R,N) ≥ 0.85</span>
+            (强三源合恰)
+          </p>
+        </div>
+
+        <!-- Phase 1 production: 多 GHW 互联 peer dashboard (实时 health + E/M/R/N 同步) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">
+              🌐 多 GHW 互联 (peer dashboard)
+            </h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="`self=${peerDashboard.self?.peer_id || '?'} · ${peerDashboard.peers.length - 1} peer(s)`"></span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            <template x-for="peer in peerDashboard.peers || []" :key="peer.path">
+              <div class="bg-slate-900/50 rounded p-3 border"
+                   :class="{
+                     'border-emerald-700/50': peer.health === 'healthy',
+                     'border-amber-700/50': peer.health === 'stale',
+                     'border-rose-700/50': peer.health === 'unreachable',
+                     'border-slate-700/50': peer.health === 'unknown' || peer.health === 'self',
+                   }">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm font-mono font-semibold" x-text="peer.peer_id"></span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded font-mono"
+                          :class="{
+                            'bg-emerald-900/30 text-emerald-300': peer.health === 'healthy',
+                            'bg-amber-900/30 text-amber-300': peer.health === 'stale',
+                            'bg-rose-900/30 text-rose-300': peer.health === 'unreachable',
+                            'bg-slate-800 text-ghw-dim': peer.health === 'unknown',
+                            'bg-ghw-accent/15 text-ghw-accent': peer.health === 'self',
+                          }"
+                          x-text="peer.health"></span>
+                  </div>
+                  <span class="text-[10px] text-ghw-dim font-mono" x-text="`tick=${peer.last_tick}`"></span>
+                </div>
+                <div class="grid grid-cols-4 gap-1 text-[10px] font-mono">
+                  <div class="text-center">
+                    <div class="text-cyan-300" x-text="`E=${peer.last_E.toFixed(3)}`"></div>
+                    <div class="text-ghw-dim">E</div>
+                  </div>
+                  <div class="text-center">
+                    <div class="text-cyan-300" x-text="`${peer.last_M.toFixed(3)}`"></div>
+                    <div class="text-ghw-dim">M</div>
+                  </div>
+                  <div class="text-center">
+                    <div class="text-purple-300" x-text="`${peer.last_R.toFixed(3)}`"></div>
+                    <div class="text-ghw-dim">R</div>
+                  </div>
+                  <div class="text-center">
+                    <div class="text-emerald-300" x-text="`${peer.last_N.toFixed(3)}`"></div>
+                    <div class="text-ghw-dim">N</div>
+                  </div>
+                </div>
+                <div class="text-[9px] text-ghw-dim font-mono mt-2 truncate" x-text="peer.path"></div>
+                <div class="text-[9px] text-ghw-dim mt-1"
+                     x-show="peer.consecutive_failures > 0">
+                  ⚠ <span x-text="`${peer.consecutive_failures} consecutive fails`"></span>
+                </div>
+              </div>
+            </template>
+            <div x-show="!peerDashboard.peers || peerDashboard.peers.length === 0"
+                 class="text-ghw-dim text-sm py-3 text-center col-span-3">
+              暂无 peer. 启动时加 <code class="text-ghw-text">--peers-file ~/.local/share/ghw/peers.txt</code>
+            </div>
+          </div>
+          <p class="text-[10px] text-ghw-dim mt-3">
+            <strong>多体互联 (Phase 1 production)</strong>:
+            <code class="text-ghw-text">peers.txt</code> 列出 socket path, 启动时加载. 每 60s 一次 ping sweep
+            同步 <strong>E/M/R/N</strong> 给 ΔE 公式 (Phase 1.8 `adaptFromPeers`),
+            <strong>peer health</strong> 颜色: <span class="text-emerald-300">绿=healthy</span> ·
+            <span class="text-amber-300">琥珀=stale (3+ fails)</span> ·
+            <span class="text-rose-300">红=unreachable (10+ fails)</span>.
+            协议: <code class="text-ghw-text">docs/PROTOCOL.md</code> (5 method: ping/query_state/query_beliefs/query_actions/inject_event)
+          </p>
+        </div>
+
+        <!-- Phase 9 宫 milestone history (9 宫 deep 触发历史) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">
+              🏯 9 宫 milestone 历史 (触发顺序)
+            </h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="`${ninePalacesHistory.history.length} 触发 · ${(ninePalacesHistory.summary.mrn_strong ? '✓ 满宫' : ninePalacesHistory.summary.mrn ? '✓ 三源合恰' : ninePalacesHistory.summary.e_var ? '✓ E 平衡' : '未满')}`"></span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-ghw-dim text-left">
+                  <th class="py-1 pr-3">tick</th>
+                  <th class="py-1 pr-3">milestone</th>
+                  <th class="py-1 pr-3">M R N</th>
+                  <th class="py-1 pr-3">value</th>
+                  <th class="py-1 pr-3">阈值</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="row in ninePalacesHistory.history || []" :key="`np-${row.tick}-${row.milestone}`">
+                  <tr class="border-t border-slate-800/50 hover:bg-slate-800/30">
+                    <td class="py-1 pr-3 font-mono text-ghw-dim" x-text="row.tick"></td>
+                    <td class="py-1 pr-3 font-mono"
+                        :class="{
+                          'text-cyan-300': row.milestone === 'e_var',
+                          'text-emerald-300': row.milestone === 'mrn_balance',
+                          'text-amber-300': row.milestone === 'mrn_strong',
+                          'text-slate-400': row.milestone === 'mrn_snapshot',
+                          'text-ghw-dim': row.milestone === '?',
+                        }"
+                        x-text="{
+                          'e_var': '① E 方差 < 0.01',
+                          'mrn_balance': '② M/R/N 方差 < 0.01',
+                          'mrn_strong': '③ 强三源合恰 (min≥0.85)',
+                          'mrn_snapshot': '◇ 9 宫状态采样',
+                        }[row.milestone] || row.milestone"></td>
+                    <td class="py-1 pr-3 font-mono"
+                        :class="Math.min(row.M, row.R, row.N) < 0.85 ? 'text-rose-300' : 'text-emerald-300'"
+                        x-text="`${row.M.toFixed(2)} ${row.R.toFixed(2)} ${row.N.toFixed(2)}`"></td>
+                    <td class="py-1 pr-3 font-mono" x-text="row.value.toFixed(4)"></td>
+                    <td class="py-1 pr-3 text-ghw-dim text-[10px]"
+                        x-text="{
+                          'e_var': 'var < 0.01',
+                          'mrn_balance': 'mrn_var < 0.01',
+                          'mrn_strong': 'min ≥ 0.85',
+                          'mrn_snapshot': 'mrn_var = ?',
+                        }[row.milestone] || '—'"></td>
+                  </tr>
+                </template>
+                <tr x-show="!ninePalacesHistory.history || ninePalacesHistory.history.length === 0">
+                  <td colspan="5" class="py-3 text-center text-ghw-dim">
+                    暂无 9 宫 milestone 触发历史 (3 个 milestone 各持续 64 cycle 才会写入)
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- L1-L5 趋势图 (折线图 over tick) -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">📈 L1-L5 趋势 (累计 over tick)</h2>
+            <span class="text-xs text-ghw-dim">每 64 cycle 一个 bucket · 实时刷新</span>
+          </div>
+          <div class="relative" style="height: 220px;">
+            <svg viewBox="0 0 800 200" preserveAspectRatio="none" class="w-full h-full">
+              <!-- 网格线 -->
+              <g stroke="#1e293b" stroke-width="0.5">
+                <line x1="40" y1="20" x2="790" y2="20"/>
+                <line x1="40" y1="60" x2="790" y2="60"/>
+                <line x1="40" y1="100" x2="790" y2="100"/>
+                <line x1="40" y1="140" x2="790" y2="140"/>
+                <line x1="40" y1="180" x2="790" y2="180"/>
+              </g>
+              <!-- 5 条折线: L1 L2 L3 L4 L5 -->
+              <template x-for="(series, name) in trendData" :key="name">
+                <polyline
+                  :points="series.map((p, i) => `${40 + (i * (750 / (series.length - 1 || 1)))},${180 - (p.count / Math.max(1, maxTrendValue) * 160)}`).join(' ')"
+                  fill="none"
+                  :stroke="{'l1': '#06b6d4', 'l2': '#8b5cf6', 'l3': '#10b981', 'l4': '#f59e0b', 'l5': '#ef4444'}[name] || '#94a3b8'"
+                  stroke-width="2"
+                  stroke-linecap="round"/>
+              </template>
+              <!-- X 轴 (tick 标签) -->
+              <g font-size="9" fill="#64748b" font-family="monospace">
+                <text x="40" y="198" text-anchor="middle">0</text>
+                <text x="227" y="198" text-anchor="middle">1k</text>
+                <text x="415" y="198" text-anchor="middle">2k</text>
+                <text x="602" y="198" text-anchor="middle">3k</text>
+                <text x="790" y="198" text-anchor="middle">4k</text>
+              </g>
+            </svg>
+            <!-- 图例 -->
+            <div class="absolute top-2 right-2 flex gap-3 text-[10px]">
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-cyan-500"></span>L1</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-purple-500"></span>L2</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-emerald-500"></span>L3</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-amber-500"></span>L4</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-red-500"></span>L5</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+        <!-- L4 提议时序图 (Phase 8.7) — 看 LLM 提议 4 系数如何让 E 跑高 -->
+        <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mt-4">
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">🔄 L4 提议时序 (LLM 改 4 系数 → E)</h2>
+            <span class="text-xs text-ghw-dim"
+                  x-text="`avg_delta = ${(proposeHistory.avg_delta >= 0 ? '+' : '')}${proposeHistory.avg_delta.toFixed(4)} · 反馈信号`"></span>
+          </div>
+          <div class="relative" style="height: 240px;">
+            <svg viewBox="0 0 800 220" preserveAspectRatio="none" class="w-full h-full">
+              <!-- 网格线 -->
+              <g stroke="#1e293b" stroke-width="0.5">
+                <line x1="40" y1="20" x2="790" y2="20"/>
+                <line x1="40" y1="65" x2="790" y2="65"/>
+                <line x1="40" y1="110" x2="790" y2="110"/>
+                <line x1="40" y1="155" x2="790" y2="155"/>
+                <line x1="40" y1="200" x2="790" y2="200"/>
+              </g>
+              <!-- Y 轴刻度 (E 0-1) -->
+              <g font-size="9" fill="#64748b" font-family="monospace">
+                <text x="35" y="22" text-anchor="end">1.0</text>
+                <text x="35" y="67" text-anchor="end">0.75</text>
+                <text x="35" y="112" text-anchor="end">0.5</text>
+                <text x="35" y="157" text-anchor="end">0.25</text>
+                <text x="35" y="202" text-anchor="end">0</text>
+              </g>
+              <!-- E line: 紫色实线 (新格式 e_after, 旧格式连 0) -->
+              <template x-if="proposeHistory.history && proposeHistory.history.length > 0">
+                <polyline
+                  :points="(proposeHistory.history || []).map((p, i) => {
+                    const n = proposeHistory.history.length;
+                    const x = 40 + (i * (750 / Math.max(1, n - 1)));
+                    const y = 200 - (p.e_after * 180);
+                    return `${x},${y}`;
+                  }).join(' ')"
+                  fill="none"
+                  stroke="#a855f7"
+                  stroke-width="2.5"
+                  stroke-linecap="round"/>
+              </template>
+              <!-- 4 系数 sub-plot: μ (红), ν (橙), σ (青), λ (黄) — 缩放到 200-180 范围 (0-0.5 系数) -->
+              <template x-for="(coef, idx) in [
+                { key: 'mu', color: '#ef4444' },
+                { key: 'nu', color: '#f97316' },
+                { key: 'sigma', color: '#06b6d4' },
+                { key: 'lambda', color: '#facc15' },
+              ]" :key="coef.key">
+                <polyline
+                  x-show="proposeHistory.history && proposeHistory.history.length > 0"
+                  :points="(proposeHistory.history || []).map((p, i) => {
+                    const n = proposeHistory.history.length;
+                    const x = 40 + (i * (750 / Math.max(1, n - 1)));
+                    // 系数 0-0.8 → 200-20 (顶部)
+                    const y = 200 - (p.coefs[coef.key] / 0.8 * 180);
+                    return `${x},${y}`;
+                  }).join(' ')"
+                  fill="none"
+                  :stroke="coef.color"
+                  stroke-width="1.5"
+                  stroke-dasharray="3,3"
+                  stroke-linecap="round"
+                  opacity="0.7"/>
+              </template>
+              <!-- tick 点 -->
+              <template x-for="(p, i) in proposeHistory.history || []" :key="`p-${p.tick}`">
+                <circle
+                  :cx="40 + (i * (750 / Math.max(1, (proposeHistory.history || []).length - 1)))"
+                  :cy="200 - (p.e_after * 180)"
+                  r="3"
+                  :fill="p.e_delta > 0 ? '#10b981' : (p.e_delta < 0 ? '#f43f5e' : '#a855f7')"
+                  stroke="#0f172a"
+                  stroke-width="1"/>
+              </template>
+            </svg>
+            <!-- 图例 -->
+            <div class="absolute top-2 right-2 flex flex-col gap-1 text-[10px]">
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-purple-500"></span>E (紫实线)</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-red-500" style="border-top: 1px dashed"></span>μ</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-orange-500" style="border-top: 1px dashed"></span>ν</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-cyan-500" style="border-top: 1px dashed"></span>σ</span>
+              <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-yellow-400" style="border-top: 1px dashed"></span>λ</span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>e_delta +</span>
+              <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-rose-500"></span>e_delta -</span>
+            </div>
+          </div>
+          <p class="text-[10px] text-ghw-dim mt-2">
+            紫色实线 = 数字生命每次提议后 E 变化 (新格式 e_after, 旧格式连 0 baseline)
+            · 4 虚线 = LLM 提议的 4 系数 (μ/ν/σ/λ) 同时变化
+            · <span class="text-emerald-300">绿点 = 提议后 E 提升</span> ·
+            <span class="text-rose-300">红点 = 提议后 E 下降</span>
+            · 看提议 → E 因果关系
+          </p>
+        </div>
+    </template>
+  </section>
+
+  <!-- ============ Tab: 落盘代码 (L3 L4 L5 真落盘到 /tmp/ghw_evolved + 集成到 ghw 源码) ============ -->
+  <section x-show="tab === 'evolved'" x-transition>
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">📝 落盘代码 (L3 L4 L5 真编译产物)</h2>
+        <span class="text-xs text-ghw-dim" x-text="`/tmp/ghw_evolved/ · ${evolvedFiles.length} 文件`"></span>
+      </div>
+
+      <div class="grid grid-cols-12 gap-4">
+        <!-- 左: 文件列表 -->
+        <div class="col-span-4">
+          <template x-if="evolvedFiles.length === 0">
+            <div class="text-ghw-dim text-sm py-8 text-center">
+              还没落盘文件. 等 L3/L4/L5 自动触发 (每 64/96/192 cycle).
+            </div>
+          </template>
+          <template x-if="evolvedFiles.length > 0">
+            <div class="space-y-1 max-h-[60vh] overflow-y-auto">
+              <template x-for="f in evolvedFiles" :key="f.name">
+                <button @click="loadEvolvedFile(f.name)"
+                        :class="evolvedSelected === f.name ? 'bg-ghw-accent/15 border-ghw-accent text-ghw-text' : 'border-slate-800 text-ghw-dim hover:text-ghw-text hover:border-slate-700'"
+                        class="w-full text-left px-3 py-2 rounded border transition text-xs font-mono flex items-center justify-between gap-2">
+                  <div class="flex flex-col">
+                    <span x-text="f.name"></span>
+                    <span class="text-[10px] text-ghw-dim mt-0.5"
+                          x-text="`${f.lines} 行 · ${f.size}B`"></span>
+                  </div>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded"
+                        :class="{
+                          'bg-blue-500/20 text-blue-300': f.kind === 'L3',
+                          'bg-amber-500/20 text-amber-300': f.kind === 'L4',
+                          'bg-fuchsia-500/20 text-fuchsia-300': f.kind === 'L5',
+                          'bg-slate-700 text-ghw-dim': f.kind === 'L5_md' || f.kind === 'other'
+                        }"
+                        x-text="f.kind"></span>
+                </button>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <!-- 右: 文件内容 -->
+        <div class="col-span-8">
+          <template x-if="!evolvedSelected">
+            <div class="text-ghw-dim text-sm py-12 text-center">
+              ← 选个文件看<br>
+              <span class="text-xs">这些是数字生命"自己写"的 Zig 代码 (L3 习得方法 / L4 算法优化 / L5 自编码), 编译通过 + 真落盘</span>
+            </div>
+          </template>
+          <template x-if="evolvedSelected">
+            <div>
+              <div class="text-[10px] uppercase text-ghw-dim tracking-wider mb-2"
+                   x-text="`查看: ${evolvedSelected}`"></div>
+              <pre class="text-xs font-mono text-slate-300 bg-slate-900/60 rounded p-4 overflow-auto max-h-[60vh] whitespace-pre-wrap break-words"
+                   x-text="evolvedContent"></pre>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 动作历史 (ActionRunner 实际执行了啥) ============ -->
+  <section x-show="tab === 'actions'" x-transition>
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">动作历史 (数字生命做了什么)</h2>
+          <div class="text-xs text-ghw-dim mt-1">
+            action_count=<span class="text-ghw-warm font-mono" x-text="state ? state.action_count : 0"></span> ·
+            self_evolved_total=<span class="text-ghw-warm font-mono" x-text="state ? state.self_evolved_total : 0"></span>
+          </div>
+        </div>
+        <button @click="runActionNow()"
+                :disabled="actionRunning"
+                :class="actionRunning ? 'opacity-50 cursor-not-allowed' : 'hover:bg-ghw-accent/30'"
+                class="px-4 py-2 rounded-md bg-ghw-accent/20 text-ghw-accent text-sm font-medium border border-ghw-accent/30 transition">
+          <span x-show="!actionRunning">⚡ 立即跑 1 个 action</span>
+          <span x-show="actionRunning">执行中...</span>
+        </button>
+      </div>
+      <div class="text-xs text-ghw-dim">
+        ActionRunner 每 16 cycle 自动跑 1 个 top unadopted goal (u ≥ 0.6). 跑成功 → <code>self_evolved_total++</code>.
+      </div>
+    </div>
+
+    <div class="bg-ghw-panel rounded-lg border border-slate-800">
+      <div class="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+        <h3 class="text-xs font-semibold text-ghw-dim uppercase tracking-wider">已执行动作 (倒序, 最近 100 条)</h3>
+        <span class="text-xs text-ghw-dim" x-text="`${actions.length} actions`"></span>
+      </div>
+      <div class="divide-y divide-slate-800 max-h-[60vh] overflow-y-auto scrollbar" id="actionList">
+        <template x-for="(a, i) in actions" :key="i">
+          <div class="px-5 py-3 hover:bg-slate-800/30 transition">
+            <div class="flex items-center gap-3">
+              <div class="text-xs text-ghw-dim font-mono w-20" x-text="`#${a.id}`"></div>
+              <div class="text-xs text-ghw-dim font-mono w-24" x-text="`tick ${a.tick}`"></div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase"
+                    :class="a.result === 'success' ? 'bg-ghw-good/20 text-ghw-good' : 'bg-ghw-bad/20 text-ghw-bad'"
+                    x-text="a.kind"></span>
+              <span class="text-xs text-ghw-dim font-mono" x-text="`${a.duration_ms}ms`"></span>
+              <div class="flex-1 min-w-0 text-xs font-mono truncate text-ghw-text" x-text="a.goal_title || '—'"></div>
+            </div>
+            <div class="mt-1 text-[11px] text-ghw-dim font-mono truncate" x-text="a.result || a.output || '—'"></div>
+          </div>
+        </template>
+        <div x-show="actions.length === 0" class="px-5 py-12 text-center text-ghw-dim text-sm">
+          还没有执行过 action — 等提议 ≥ 1 个 goal, 或点上面的"立即跑"按钮
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 成长日志 ============ -->
+  <section x-show="tab === 'log'" x-transition>
+    <div class="bg-ghw-panel rounded-lg border border-slate-800">
+      <div class="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">成长日志 (最近 100 周期)</h2>
+        <span class="text-xs text-ghw-dim" x-text="`${log.length} entries`"></span>
+      </div>
+      <div class="divide-y divide-slate-800 max-h-[70vh] overflow-y-auto scrollbar" id="logList">
+        <template x-for="(e, i) in [...log].reverse()" :key="i">
+          <div class="px-5 py-3 hover:bg-slate-800/30 transition flex items-center gap-4">
+            <div class="text-xs text-ghw-dim font-mono w-24" x-text="`#${formatNum(e.tick)}`"></div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="font-mono text-sm" x-text="e.goal || '—'"></span>
+                <span x-show="e.self_evolved"
+                      class="text-[10px] px-1.5 py-0.5 rounded bg-ghw-warm/20 text-ghw-warm uppercase tracking-wider">自演化</span>
+              </div>
+              <div class="text-xs text-ghw-dim mt-0.5 font-mono">
+                <span>M=<span x-text="e.M.toFixed(2)"></span></span> ·
+                <span>R=<span x-text="e.R.toFixed(2)"></span></span> ·
+                <span>N=<span x-text="e.N.toFixed(2)"></span></span> ·
+                <span class="ml-1" :class="e.E > 0.8 ? 'text-ghw-good' : (e.E > 0.5 ? 'text-ghw-warm' : 'text-ghw-bad')">
+                  E=<span x-text="e.E.toFixed(3)"></span>
+                </span>
+              </div>
+            </div>
+            <div class="text-xs text-ghw-dim font-mono" x-text="formatTime(e.timestamp)"></div>
+          </div>
+        </template>
+        <div x-show="log.length === 0" class="px-5 py-12 text-center text-ghw-dim text-sm">
+          还没有日志 — 等待第一个周期...
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 提议目标 (LLM) ============ -->
+  <section x-show="tab === 'goals'" x-transition>
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">LLM 提议的新目标</h2>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-ghw-dim" x-text="`提议 ${state ? state.propose_total : 0} 次 · 上次 tick=${state ? state.last_propose_tick : 0}`"></span>
+          <button @click="manualPropose()"
+                  class="px-3 py-1 bg-ghw-accent hover:bg-ghw-accent/80 rounded text-xs font-medium transition flex items-center gap-1">
+            <span>🔄</span><span>立即提议</span>
+          </button>
+          <button @click="manualReflect()"
+                  class="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition flex items-center gap-1">
+            <span>🪞</span><span>立即自省</span>
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-ghw-dim mb-4">
+        每 64 cycle, LLM 看你跑的这台机器的真实状态 (CPU/进程/网络/文件), 然后提议具体可执行的目标. 你也可以手动触发.
+      </p>
+      <div class="space-y-3" x-show="state && state.proposed_goals && state.proposed_goals.length > 0">
+        <template x-for="(g, i) in (state && state.proposed_goals ? state.proposed_goals : [])" :key="i">
+          <div class="border border-slate-800 rounded-lg p-4 hover:border-ghw-accent/50 transition bg-slate-900/30">
+            <div class="flex items-start gap-3 mb-2">
+              <span class="text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-mono whitespace-nowrap"
+                    :class="goalDimensionClass(g.dimension)"
+                    x-text="g.dimension"></span>
+              <div class="flex-1 min-w-0">
+                <div class="text-base font-medium" x-text="g.title"></div>
+                <div class="text-sm text-ghw-text/80 mt-1" x-text="g.description"></div>
+                <div class="text-xs text-ghw-dim mt-2 italic">
+                  理由: <span x-text="g.reason"></span>
+                </div>
+              </div>
+              <div class="flex flex-col items-end gap-1">
+                <div class="text-[10px] text-ghw-dim uppercase">urgency</div>
+                <div class="text-lg font-mono font-bold" :class="urgencyColor(g.urgency)" x-text="g.urgency.toFixed(2)"></div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="text-center text-ghw-dim text-sm py-12" x-show="!state || !state.proposed_goals || state.proposed_goals.length === 0">
+        LLM 还在观察世界... (第一次提议会在 tick ≥ 64 时触发)
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 记忆搜索 (sqlite) ============ -->
+  <section x-show="tab === 'memory'" x-transition>
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+      <div class="flex items-center gap-3 mb-4">
+        <input type="text" x-model="memoryQuery" @keydown.enter="searchMemory()"
+               placeholder="搜记忆: 'reflection', 'propose', 'cycle' 或关键词..."
+               class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-ghw-accent transition">
+        <button @click="searchMemory()"
+                class="px-4 py-2 bg-ghw-accent hover:bg-ghw-accent/80 rounded text-sm font-medium transition">
+          搜索
+        </button>
+      </div>
+
+      <div class="text-xs text-ghw-dim mb-3" x-show="memoryResults">
+        写入 <span class="font-mono" x-text="memoryResults?.episodes_written || 0"></span> 条 episode
+        · 找到 <span class="font-mono" x-text="memoryResults?.results?.length || 0"></span> 条
+        <span x-show="memoryResults?.query" class="ml-2">
+          (q=<span class="text-ghw-accent" x-text="memoryResults?.query"></span>)
+        </span>
+      </div>
+
+      <div class="space-y-2 max-h-[70vh] overflow-y-auto scrollbar" x-show="memoryResults?.results">
+        <template x-for="r in (memoryResults?.results || [])" :key="r.id">
+          <div class="border border-slate-800 rounded p-3 hover:border-ghw-accent/50 transition">
+            <div class="flex items-start gap-3">
+              <div class="flex flex-col items-end gap-1 text-xs text-ghw-dim font-mono w-20">
+                <span>t=<span x-text="r.tick"></span></span>
+                <span>id=<span x-text="r.id"></span></span>
+                <span>imp=<span x-text="r.importance.toFixed(2)"></span></span>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-mono bg-slate-700/50 text-ghw-dim"
+                        x-text="r.kind"></span>
+                  <span class="text-[10px] text-ghw-dim" x-text="'by ' + r.source"></span>
+                </div>
+                <div class="text-sm text-ghw-text/80 whitespace-pre-wrap break-words" x-text="r.data"></div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <div class="text-center text-ghw-dim text-sm py-12" x-show="!memoryResults">
+        搜索 sqlite 记忆库 (episodes / beliefs / proposed_goals)
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 自省 / 记忆 ============ -->
+  <section x-show="tab === 'reflect'" x-transition>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <!-- 人格卡 -->
+      <div class="md:col-span-1 bg-ghw-panel rounded-lg p-5 border border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">人格 (Personality)</h2>
+        <div class="space-y-3 text-sm" x-show="state && state.personality">
+          <div>
+            <div class="text-xs text-ghw-dim">心情 (Mood)</div>
+            <div class="text-lg font-semibold" :class="moodColor()" x-text="state && state.personality ? moodCN() : '—'"></div>
+          </div>
+          <div>
+            <div class="text-xs text-ghw-dim">偏向 (Bias)</div>
+            <div class="font-mono" x-text="state && state.personality ? state.personality.bias : '—'"></div>
+          </div>
+          <div>
+            <div class="text-xs text-ghw-dim">节奏 (Tempo)</div>
+            <div class="font-mono" x-text="state && state.personality ? state.personality.tempo : '—'"></div>
+          </div>
+          <div>
+            <div class="text-xs text-ghw-dim mb-1">成熟度 (Maturity)</div>
+            <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-ghw-accent gauge-fill" :style="`width: ${state && state.personality ? state.personality.maturity : 0}%`"></div>
+            </div>
+            <div class="text-right text-xs font-mono mt-1" x-text="state && state.personality ? `${state.personality.maturity}/100` : '—'"></div>
+          </div>
+          <div>
+            <div class="text-xs text-ghw-dim mb-1">连接度 (Connectedness)</div>
+            <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-ghw-good gauge-fill" :style="`width: ${state && state.personality ? state.personality.connectedness : 0}%`"></div>
+            </div>
+            <div class="text-right text-xs font-mono mt-1" x-text="state && state.personality ? `${state.personality.connectedness}/100` : '—'"></div>
+          </div>
+        </div>
+        <div class="text-xs text-ghw-dim mt-2" x-show="!state || !state.personality">暂无数据</div>
+      </div>
+
+      <!-- 自述 (self_narrative) -->
+      <div class="md:col-span-2 bg-ghw-panel rounded-lg p-5 border border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">自述 (Self Narrative)</h2>
+        <blockquote class="text-base leading-relaxed text-ghw-text/90 italic border-l-2 border-ghw-accent pl-4"
+                    x-text="state && state.memory && state.memory.self_narrative ? state.memory.self_narrative : '我还没有形成自我叙事...'"></blockquote>
+        <div class="text-xs text-ghw-dim mt-3 font-mono">
+          反思 <span x-text="state && state.memory ? state.memory.reflection_count : 0"></span> 次 ·
+          上次反思 tick=<span x-text="state && state.memory ? state.memory.last_reflection_tick : 0"></span>
+        </div>
+
+        <!-- 三源思维特征标签 (从 M/R/N 涌现) -->
+        <div class="mt-4 pt-4 border-t border-slate-800">
+          <div class="text-xs text-ghw-dim uppercase tracking-wider mb-2">三源思维特征 (Thinking Style)</div>
+          <div class="flex flex-wrap gap-1.5" x-show="state && state.personality && state.personality.thinking_tags && state.personality.thinking_tags.length > 0">
+            <template x-for="(tag, i) in (state && state.personality && state.personality.thinking_tags ? state.personality.thinking_tags : [])" :key="i">
+              <span class="text-[11px] px-2 py-0.5 rounded border border-ghw-accent/40 bg-ghw-accent/10 text-ghw-text/90 font-mono"
+                    x-text="tag"></span>
+            </template>
+          </div>
+          <div class="text-[11px] text-ghw-dim mt-1" x-show="!state || !state.personality || !state.personality.thinking_tags || state.personality.thinking_tags.length === 0">
+            正在形成中...
+          </div>
+          <div class="text-[10px] text-ghw-dim mt-1.5 font-mono">
+            物质(M) <span x-text="state ? state.M.toFixed(2) : '—'"></span> ·
+            表征(R) <span x-text="state ? state.R.toFixed(2) : '—'"></span> ·
+            本心(N) <span x-text="state ? state.N.toFixed(2) : '—'"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 信念库 -->
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
+      <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-3">信念库 (Beliefs)</h2>
+      <div class="space-y-2" x-show="state && state.memory && state.memory.beliefs && state.memory.beliefs.length > 0">
+        <template x-for="(b, i) in (state && state.memory ? state.memory.beliefs : [])" :key="i">
+          <div class="border border-slate-800 rounded p-3 hover:border-ghw-accent/50 transition">
+            <div class="flex items-start gap-3">
+              <span class="text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider font-mono"
+                    :class="beliefBadgeClass(b.source)"
+                    x-text="b.source"></span>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm" x-text="b.text"></div>
+                <div class="flex items-center gap-3 mt-1 text-xs text-ghw-dim font-mono">
+                  <span>置信度 <span x-text="b.confidence.toFixed(2)"></span></span>
+                  <span>t=<span x-text="b.formed_at_tick"></span></span>
+                  <span>证据 <span x-text="(b.evidence_ticks || []).length"></span> 条</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="text-center text-ghw-dim text-sm py-8" x-show="!state || !state.memory || !state.memory.beliefs || state.memory.beliefs.length === 0">
+        还没有信念 — 等待首次自省 (tick ≥ 32)...
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Tab: 聊天 ============ -->
+  <section x-show="tab === 'chat'" x-transition>
+    <div class="bg-ghw-panel rounded-lg border border-slate-800 flex flex-col" style="height: 70vh;">
+      <div class="px-5 py-3 border-b border-slate-800">
+        <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">与 GHW 对话</h2>
+        <p class="text-xs text-ghw-dim mt-1">每条消息会触发 1 个 cycle, GHW 用自己的 E 状态回应</p>
+      </div>
+
+      <!-- 消息列表 (HTMX-loaded + 每 1.2s poll, 异步 chat worker 写完 GHW reply 后下次 poll 出现) -->
+      <div id="chatList"
+           hx-get="/api/chat/history"
+           hx-trigger="load delay:100ms, every 1.2s"
+           hx-swap="innerHTML"
+           hx-on::after-settle="document.getElementById('chatList').scrollTop = document.getElementById('chatList').scrollHeight"
+           class="flex-1 overflow-y-auto scrollbar px-5 py-4 space-y-3">
+        <div class="text-center text-ghw-dim text-sm py-12">加载中...</div>
+      </div>
+
+      <!-- 输入框 (HTMX form) -->
+      <form hx-post="/api/chat"
+            hx-target="#chatList"
+            hx-swap="beforeend"
+            hx-on::after-request="
+              this.reset();
+              document.getElementById('chatList').scrollTop = document.getElementById('chatList').scrollHeight;
+              window.dispatchEvent(new CustomEvent('ghw:refresh-state'));
+            "
+            class="border-t border-slate-800 px-5 py-3 flex gap-3">
+        <input type="text" name="text" required placeholder="说点什么... (Enter 发送)"
+               autocomplete="off"
+               class="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-ghw-accent transition">
+        <button type="submit"
+                class="px-4 py-2 bg-ghw-accent hover:bg-ghw-accent/80 rounded text-sm font-medium transition">
+          发送
+        </button>
+      </form>
+    </div>
+  </section>
+
+  </main>
+</div>
+
+<footer class="border-t border-slate-800 mt-0">
+  <div class="px-8 py-3 text-xs text-ghw-dim text-center">
+    GHW 数字生命 · Goal-Harness-World paradigm · Zig 0.17 + HTMX + Alpine.js + Tailwind CSS
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

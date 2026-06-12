@@ -1,0 +1,30 @@
+# Prometheus config for GHW (multi-instance)
+# Scrape 2 GHW instances every 15s
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: ghw-monitor
+
+scrape_configs:
+  - job_name: ghw-alpha
+    static_configs:
+      - targets:
+          - ghw-alpha:8765
+    metrics_path: /api/metrics
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  - job_name: ghw-bravo
+    static_configs:
+      - targets:
+          - ghw-bravo:8766
+    metrics_path: /api/metrics
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
