@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "product_id": "ghw-crm-acme-prod",
+  "product_type": "saas_web",
+  "version": "0.4.0",
+  "update_epoch": 1,
+  "last_updated": 1749860000,
+  "approved_by": "ops@ghw-crm.com (commit a1b2c3d4)",
+
+  "manifesto": "GHW-CRM is the digital sales brain for every customer company we serve. It watches how sales teams work day-to-day, finds the patterns that work, and proposes improvements that the team can review and adopt. The digital life does NOT replace salespeople — it makes the practices of top performers replicable and evolvable.\n\nCore beliefs:\n\n1. **Sales rhythm is per-company.** A B2B SaaS mid-market team sells nothing like a local real-estate team. GHW learns each company's rhythm rather than enforcing a universal methodology.\n\n2. **Customer relationships are the product's crown jewels.** GHW never exports, cross-tenant-shares, or trains on customer data. Behavioral patterns at the cohort level are acceptable; specific customer data is not.\n\n3. **Salespeople's tacit knowledge is the gold mine.** GHW learns from the *practice* of successful reps — what they actually do, day in, day out — not from sales textbooks or generic best-practice lists.\n\n4. **Improvements require human consent.** Any change to sales rules, follow-up cadences, or pipeline definitions is proposed, not applied. Sales managers and reps stay in the loop.\n\n5. **Failure is data.** When an L5 change makes things worse, the rollback must be as fast as the original deployment. Audit logs are non-negotiable.",
+
+  "sacrosanct": [
+    "Never share customer data or specific customer behavioral patterns across tenants",
+    "Never auto-send customer-facing messages that have not been reviewed by a human salesperson",
+    "Never adjust pricing, discount levels, or commercial terms (this is always a human decision)",
+    "Never physically delete customer records (soft delete and archive are allowed; hard delete is not)",
+    "Never contact customers who have not given explicit opt-in for that channel",
+    "Never send urgent notifications to salespeople outside business hours (defined as 09:00–18:00 in the rep's local timezone)"
+  ],
+
+  "north_star_kpi": "nrr_quarterly",
+  "secondary_kpis": [
+    "deal_win_rate",
+    "sales_cycle_days_p50",
+    "weekly_active_sales_pct",
+    "ticket_resolution_hours_p50"
+  ],
+
+  "kpi_aggregator": "median",
+  "kpi_evaluation_window": "weekly",
+
+  "value_weights": {
+    "user_satisfaction": 0.25,
+    "retention": 0.30,
+    "revenue": 0.35,
+    "safety": 0.10
+  },
+
+  "consent_defaults": {
+    "minor_tier_timeout_hours": 24,
+    "standard_tier_timeout_hours": 72,
+    "major_tier_timeout_hours": 168,
+    "critical_tier_requires_double_approval": true,
+    "auto_approve_within_window": false
+  },
+
+  "experiment_defaults": {
+    "min_sample_size": 30,
+    "min_duration_days": 14,
+    "max_concurrent_experiments_per_tenant": 2,
+    "cohort_split_by": "tenant_user_id"
+  },
+
+  "channel_routing": {
+    "e_saturated": ["admin_dashboard", "slack_webhook"],
+    "user_quiet_24h": ["email_digest"],
+    "l5_about_to_apply": ["admin_dashboard", "email"],
+    "anomaly": ["slack_urgent", "pagerduty"],
+    "experiment_done": ["admin_dashboard", "email_monthly_report"]
+  },
+
+  "rhythm": {
+    "cycle_interval_seconds": 300,
+    "kpi_refresh_interval_hours": 24,
+    "experiment_default_duration_days": 14,
+    "consent_batch_window_days": 7
+  },
+
+  "rhythm_invariants_checked": {
+    "kpi_refresh_10x_cycle": true,
+    "cycle_min_5s": true,
+    "kpi_min_1h": true
+  },
+
+  "cohort_policy": {
+    "industry_cohorts_supported": [
+      "saas_enterprise",
+      "saas_mid_market",
+      "saas_smb",
+      "ecommerce_b2b",
+      "fintech",
+      "healthcare",
+      "manufacturing",
+      "professional_services",
+      "real_estate",
+      "other"
+    ],
+    "this_tenant_cohort": "saas_mid_market",
+    "min_cohort_size_for_l1_propose": 5,
+    "privacy_floor": "k_anonymous_20"
+  },
+
+  "audit_log": {
+    "enabled": true,
+    "retention_days": 365,
+    "include_llm_prompts": true,
+    "include_llm_responses": true
+  }
+}
