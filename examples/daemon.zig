@@ -26,6 +26,9 @@ const goal_mod = ghw.goal;
 const harness = ghw.harness;
 const SelfEncoder = harness.self_encoder.SelfEncoder;
 const SelfEvolutionGuard = harness.self_evolution.SelfEvolutionGuard;
+const Memory = harness.memory.Memory;
+const EpisodeKind = harness.memory.EpisodeKind;
+const Reflection = harness.reflection.Reflection;
 const agent_mod = ghw.agent;
 
 const F = ghw.util.F;
@@ -444,6 +447,10 @@ fn reportToJson(alloc: std.mem.Allocator, report: CycleReport) ![]u8 {
     });
 }
 
+fn weakestDim(agent: *agent_mod.GHWAgent) u8 {
+    return Memory.weakestDim(agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature);
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     // 安装 SIGTERM/SIGINT/SIGHUP → graceful shutdown
     installSignalHandlers();
@@ -491,6 +498,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var agent = try GHWAgent.init(alloc, cfg.id, cfg.dim, .{ 3, 3, 3 }, cfg.seed);
     defer agent.deinit();
 
+    // P3: 自传体记忆 — 每个 cycle 自动 recordAt, 供 LLM 通道连续
+    var memory = Memory.init(alloc, cfg.seed);
+    defer memory.deinit();
+
+    // P6: TaskQueue + 记忆写回 + 世界上下文 (LLM 目标提议)
+    var task_queue = harness.human_symbiosis.TaskQueue.init(alloc);
+    defer task_queue.deinit();
+    // P9: HumanSignal + HumanGSP 反馈闭环
+    var human_gsp = harness.human_symbiosis.HumanGSP.init(alloc);
+    defer human_gsp.deinit();
+    var human_signal = harness.human_symbiosis.HumanSignal.init(alloc);
+    defer human_signal.deinit();
+    try human_gsp.register("human");
+    try human_gsp.register("llm_proposer");
+    try human_gsp.register("system");
+    var value_tracker = harness.human_symbiosis.ValueTrendTracker{};
+    agent.bindTaskQueue(&task_queue);
+    agent.bindMemory(&memory, io);
+    var world_ctx = harness.world_context.WorldContext.init(alloc, io, init.environ);
+    defer world_ctx.deinit();
+
     // ===== L3 真应用: state_in → 实际恢复 agent 状态 =====
     var snapshot_tick: u64 = 0;
     if (cfg.state_in) |path| {
@@ -516,6 +544,40 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 );
             } else |err| {
                 std.debug.print("[daemon] state parse 失败: {t}, 用默认\n", .{err});
+            }
+            // P4: 恢复自传体记忆 (beliefs + episodes)
+            if (memory.loadFromJson(io, json)) |loaded| {
+                if (loaded) {
+                    std.debug.print("[daemon] 记忆恢复: beliefs={d} episodes={d}\n", .{
+                        memory.beliefs.items.len, memory.episodes.items.len,
+                    });
+                }
+            } else |err| {
+                std.debug.print("[daemon] memory loadFromJson 失败: {t}\n", .{err});
+            }
+            if (task_queue.loadFromJson(json)) |loaded| {
+                if (loaded) {
+                    std.debug.print("[daemon] TaskQueue 恢复: pending={d} tasks={d}\n", .{
+                        task_queue.pending_count, task_queue.tasks.items.len,
+                    });
+                }
+            } else |err| {
+                std.debug.print("[daemon] task_queue loadFromJson 失败: {t}\n", .{err});
+            }
+            if (human_gsp.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[daemon] HumanGSP 恢复: peers={d}\n", .{human_gsp.peers.count()});
+            } else |err| {
+                std.debug.print("[daemon] human_gsp loadFromJson 失败: {t}\n", .{err});
+            }
+            if (human_signal.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[daemon] HumanSignal 恢复: feedbacks={d}\n", .{human_signal.total_count});
+            } else |err| {
+                std.debug.print("[daemon] human_signal loadFromJson 失败: {t}\n", .{err});
+            }
+            if (value_tracker.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[daemon] ValueTrendTracker 恢复: count={d}\n", .{value_tracker.count});
+            } else |err| {
+                std.debug.print("[daemon] value_tracker loadFromJson 失败: {t}\n", .{err});
             }
         } else |err| {
             std.debug.print("[daemon] state-in readFile 失败: {t}\n", .{err});
@@ -647,9 +709,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         cl.deinit();
     };
 
-    // 可选: LLM 提议器 (仅当 --llm=anthropic/openai 时启用)
+    // 可选: LLM 提议器 + 周期 Reflection (仅当 --llm=anthropic/openai 时启用)
     var http_llm_opt: ?harness.http_llm.HttpLLM = null;
+    var llm_chat: ?harness.llm.LLMChat = null;
     var proposer_opt: ?harness.rule_proposer.RuleProposer = null;
+    var goal_proposer_opt: ?harness.goal_proposer.LLMGoalProposer = null;
+    var reflection_opt: ?Reflection = null;
     var encoder_opt: ?SelfEncoder = null;
     var guard_opt: ?SelfEvolutionGuard = null;
     defer {
@@ -670,13 +735,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             };
             http_llm_opt = http_llm;
+            llm_chat = http_llm.asChat();
             var enc = SelfEncoder.init(alloc);
             enc.loadBuiltInRules() catch {};
             encoder_opt = enc;
             const grd = SelfEvolutionGuard.init(alloc);
             guard_opt = grd;
-            proposer_opt = harness.rule_proposer.RuleProposer.init(alloc, http_llm.asChat());
-            std.debug.print("[daemon] LLM enabled: anthropic {s}\n", .{cfg.llm_model});
+            proposer_opt = harness.rule_proposer.RuleProposer.init(alloc, llm_chat.?);
+            proposer_opt.?.setMemory(&memory);
+            reflection_opt = Reflection.init(alloc, &llm_chat.?, cfg.llm_model);
+            goal_proposer_opt = harness.goal_proposer.LLMGoalProposer.init(alloc, &llm_chat.?, cfg.llm_model);
+            goal_proposer_opt.?.setMemory(&memory);
+            agent.bindRuleLib(&encoder_opt.?);
+            std.debug.print("[daemon] LLM enabled: anthropic {s} (memory+rules+reflect+goals)\n", .{cfg.llm_model});
         }
     } else if (std.mem.eql(u8, cfg.llm_provider, "openai")) {
         const key_opt = std.process.Environ.getPosix(init.environ, cfg.llm_api_key_env);
@@ -690,13 +761,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             };
             http_llm_opt = http_llm;
+            llm_chat = http_llm.asChat();
             var enc = SelfEncoder.init(alloc);
             enc.loadBuiltInRules() catch {};
             encoder_opt = enc;
             const grd = SelfEvolutionGuard.init(alloc);
             guard_opt = grd;
-            proposer_opt = harness.rule_proposer.RuleProposer.init(alloc, http_llm.asChat());
-            std.debug.print("[daemon] LLM enabled: openai {s}\n", .{cfg.llm_model});
+            proposer_opt = harness.rule_proposer.RuleProposer.init(alloc, llm_chat.?);
+            proposer_opt.?.setMemory(&memory);
+            reflection_opt = Reflection.init(alloc, &llm_chat.?, cfg.llm_model);
+            goal_proposer_opt = harness.goal_proposer.LLMGoalProposer.init(alloc, &llm_chat.?, cfg.llm_model);
+            goal_proposer_opt.?.setMemory(&memory);
+            agent.bindRuleLib(&encoder_opt.?);
+            std.debug.print("[daemon] LLM enabled: openai {s} (memory+rules+reflect+goals)\n", .{cfg.llm_model});
         }
     }
 
@@ -723,6 +800,106 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
 
         if (report.self_evolved) self_evolve_count += 1;
+
+        // P3: 每个 cycle 写入情节记忆 (闭环: 长跑不再失忆)
+        {
+            const delta_e = report.e_after - report.e_before;
+            const goal_name = if (report.top_goal) |g| @tagName(g.kind) else "none";
+            const kind: EpisodeKind = if (report.self_evolved) .self_evolution else .system_event;
+            const summary = std.fmt.allocPrint(alloc, "cycle {d}: goal={s} E={d:.3} dE={d:.3}", .{
+                tick, goal_name, report.e_after, delta_e,
+            }) catch null;
+            if (summary) |s| {
+                defer alloc.free(s);
+                memory.recordAt(io, kind, tick, s, null, weakestDim(&agent), delta_e) catch {};
+            }
+        }
+
+        // P4: 周期 Reflection (每 32 agent tick, LLM 更新叙事+信念)
+        if (reflection_opt) |*refl| {
+            if (refl.shouldReflect(&agent)) {
+                _ = refl.reflect(&agent, &memory, io) catch |err| {
+                    std.debug.print("[daemon] reflection failed: {t}\n", .{err});
+                };
+                const rs = std.fmt.allocPrint(alloc, "reflection tick={d} narrative_len={d}", .{
+                    agent.tick, memory.self_narrative.len,
+                }) catch null;
+                if (rs) |s| {
+                    defer alloc.free(s);
+                    memory.recordAt(io, .reflection, agent.tick, s, null, weakestDim(&agent), report.e_after - report.e_before) catch {};
+                }
+            }
+        }
+
+        // P6: LLM 目标提议 → TaskQueue (每 auto_every tick)
+        if (goal_proposer_opt) |*gp| {
+            const since_propose = agent.tick -% gp.last_propose_at_tick;
+            if (since_propose >= gp.auto_every or gp.last_propose_at_tick == 0) {
+                const ws = world_ctx.collectCached(300 * std.time.ns_per_s) catch null;
+                if (ws) |snap| propose_blk: {
+                    const owned = world_ctx.dupSnapshot(snap) catch |err| {
+                        std.debug.print("[daemon] dupSnapshot failed: {t}\n", .{err});
+                        break :propose_blk;
+                    };
+                    defer owned.deinit();
+                    gp.last_propose_at_tick = agent.tick;
+                    var prop_result = gp.proposeAndAdopt(&world_ctx, owned, &agent, &task_queue, io) catch |err| {
+                        std.debug.print("[daemon] goal proposeAndAdopt failed: {t}\n", .{err});
+                        break :propose_blk;
+                    };
+                    defer prop_result.deinit();
+                    std.debug.print("[daemon] goal propose tick={d}: goals={d} queue_pending={d}\n", .{
+                        agent.tick, prop_result.goals.len, task_queue.pending_count,
+                    });
+                    const ep = std.fmt.allocPrint(alloc, "goals={d} pending={d}", .{
+                        prop_result.goals.len, task_queue.pending_count,
+                    }) catch null;
+                    if (ep) |s| {
+                        defer alloc.free(s);
+                        memory.recordAt(io, .llm_proposal, agent.tick, s, null, weakestDim(&agent), report.e_after - report.e_before) catch {};
+                    }
+                }
+            }
+        }
+
+        // P9: 失衡时自动 balance 任务 (GSP 选人)
+        if (agent.tick > 0 and agent.tick % 128 == 0) {
+            const analysis = harness.balance_seeker.BalanceSeeker.analyze(agent.ed);
+            if (analysis.isImbalanced()) {
+                const weak = analysis.weakest;
+                const partner = harness.balance_seeker.BalanceSeeker.selectWeakPartner(agent.ed, &human_gsp) orelse
+                    human_gsp.selectMostTrusted(weak) orelse null;
+                if (partner) |p| {
+                    var balance_task = harness.balance_seeker.BalanceSeeker.proposeBalanceTask(agent.ed, weak, p, alloc) catch null;
+                    if (balance_task) |*bt| {
+                        defer bt.deinit();
+                        _ = task_queue.submitWithSource(bt.title, bt.description, p, bt.priority, bt.required_dimension, bt.cycles_allocated, .balance) catch {};
+                    }
+                }
+            }
+        }
+
+        // P6/P9: 执行 pending 任务 + 启发式人类反馈
+        if (agent.tick > 0 and agent.tick % 32 == 0) {
+            const ts: u64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
+            const fb_ctx = harness.task_feedback.Context{
+                .queue = &task_queue,
+                .gsp = &human_gsp,
+                .signal = &human_signal,
+            };
+            if (harness.task_feedback.runNextPendingWithFeedback(&agent, &fb_ctx, alloc, ts)) |ran| {
+                if (ran) |r| {
+                    std.debug.print("[daemon] task #{d} 「{s}」完成 ΔE={d:.3}\n", .{
+                        r.task_id, r.title, r.actual_delta_e,
+                    });
+                }
+            } else |err| {
+                std.debug.print("[daemon] runNextPending failed: {t}\n", .{err});
+            }
+        }
+
+        // P11: 人类 value_score 趋势采样
+        value_tracker.record(harness.human_symbiosis.computeScore(&human_signal, &task_queue, &human_gsp));
 
         // ===== Loop Engine 4-phase PDCA (Boris) =====
         if (loop_engine_opt) |*le| {
@@ -780,6 +957,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
                                     };
                                     defer prop_result.deinit();
                                     llm_propose_count += 1;
+                                    const prop_summary = std.fmt.allocPrint(alloc, "force_l4: accepted={d} rejected={d}", .{
+                                        prop_result.accepted, prop_result.rejected,
+                                    }) catch null;
+                                    if (prop_summary) |ps| {
+                                        defer alloc.free(ps);
+                                        memory.recordAt(io, .llm_proposal, tick, ps, null, weakestDim(&agent), 0) catch {};
+                                    }
                                 }
                             }
                         }
@@ -849,7 +1033,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
             // 2. 每 16 cycle 写 snapshot
             if (tick > 0 and tick % 16 == 0) {
-                writeSnapshot(alloc, io, &agent, path, agent.tick, self_evolve_count) catch |err| {
+                writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, path, agent.tick, self_evolve_count) catch |err| {
                     if (cfg.log_every != 0) std.debug.print("[daemon] snapshot 失败: {t}\n", .{err});
                 };
 
@@ -929,12 +1113,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
 
-        // LLM 提议触发: 当 E 跌穿阈值, 让 LLM 提议新规则
-        if (proposer_opt != null and agent.ed.e() < cfg.rule_propose_threshold) {
-            if (proposer_opt) |*p| {
-                if (encoder_opt) |*enc| {
-                    if (guard_opt) |*grd| {
-                        p.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "explore", "llm-propose-trigger", -0.05);
+        // LLM 提议触发: E 跌穿 / KPI 下滑 / 人类价值下滑
+        if (proposer_opt) |*p| {
+            if (encoder_opt) |*enc| {
+                if (guard_opt) |*grd| {
+                    p.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "explore", "llm-propose-trigger", -0.05);
+                    p.setKpiTrend(agent.ed.kpiTrend());
+                    p.setValueTrend(value_tracker.trend());
+                    if (p.shouldPropose(cfg.rule_propose_threshold)) {
                         var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
                             std.debug.print("[daemon] proposeAndAdopt failed: {t}\n", .{err});
                             continue;
@@ -946,6 +1132,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
                             prop_result.rejected,
                         });
                         llm_propose_count += 1;
+                        const prop_summary = std.fmt.allocPrint(alloc, "propose: accepted={d} rejected={d}", .{
+                            prop_result.accepted, prop_result.rejected,
+                        }) catch null;
+                        if (prop_summary) |ps| {
+                            defer alloc.free(ps);
+                            memory.recordAt(io, .llm_proposal, tick, ps, null, weakestDim(&agent), 0) catch {};
+                        }
                     }
                 }
             }
@@ -966,7 +1159,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // ===== 退出前最后 snapshot (graceful shutdown) =====
     if (cfg.state_out) |path| {
-        writeSnapshot(alloc, io, &agent, path, agent.tick, self_evolve_count) catch |err| {
+        writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, path, agent.tick, self_evolve_count) catch |err| {
             std.debug.print("[daemon] 退出前 snapshot 失败: {t}\n", .{err});
         };
     }
@@ -1039,11 +1232,16 @@ fn crossHostListener(cl: *harness.ghw_link_tcp.CrossLink, stop: *std.atomic.Valu
     };
 }
 
-// 写 snapshot 到 path (L3 持久化: 写 tmp 然后 rename, 防止崩溃时写一半)
+// 写 snapshot 到 path (L3 持久化 + P4 memory 块)
 fn writeSnapshot(
     alloc: std.mem.Allocator,
     io: std.Io,
     agent: *GHWAgent,
+    memory: *Memory,
+    task_queue: *harness.human_symbiosis.TaskQueue,
+    human_gsp: *harness.human_symbiosis.HumanGSP,
+    human_signal: *harness.human_symbiosis.HumanSignal,
+    value_tracker: *harness.human_symbiosis.ValueTrendTracker,
     path: []const u8,
     tick: u64,
     success_count: u32,
@@ -1068,9 +1266,44 @@ fn writeSnapshot(
     };
     defer snap.deinit();
     var ss_mut = ss;
-    const json = try ss_mut.serialize(snap);
-    defer alloc.free(json);
-    // 0.17 没有原子 rename, 直接 writeFile 覆盖 (极端情况可能不一致但 0 损失)
-    try writeFile(io, path, json);
-    std.debug.print("[daemon] snapshot: {s} ({d} bytes)\n", .{ path, json.len });
+    const agent_json = try ss_mut.serialize(snap);
+    defer alloc.free(agent_json);
+    const mem_json = try memory.toJson(alloc);
+    defer alloc.free(mem_json);
+    const tq_json = try task_queue.toJson(alloc);
+    defer alloc.free(tq_json);
+    const gsp_json = try human_gsp.toJson(alloc);
+    defer alloc.free(gsp_json);
+    const sig_json = try human_signal.toJson(alloc);
+    defer alloc.free(sig_json);
+    const vt_json = try value_tracker.toJson(alloc);
+    defer alloc.free(vt_json);
+    const with_mem = try mergeJsonBlockIntoSnapshot(alloc, agent_json, "memory", mem_json);
+    defer alloc.free(with_mem);
+    const with_tq = try mergeJsonBlockIntoSnapshot(alloc, with_mem, "task_queue", tq_json);
+    defer alloc.free(with_tq);
+    const with_gsp = try mergeJsonBlockIntoSnapshot(alloc, with_tq, "human_gsp", gsp_json);
+    defer alloc.free(with_gsp);
+    const with_sig = try mergeJsonBlockIntoSnapshot(alloc, with_gsp, "human_signal", sig_json);
+    defer alloc.free(with_sig);
+    const merged = try mergeJsonBlockIntoSnapshot(alloc, with_sig, "value_tracker", vt_json);
+    defer alloc.free(merged);
+    try writeFile(io, path, merged);
+    std.debug.print("[daemon] snapshot: {s} ({d} bytes, memory episodes={d}, tasks pending={d}, gsp peers={d}, value_count={d})\n", .{
+        path, merged.len, memory.episodes.items.len, task_queue.pending_count, human_gsp.peers.count(), value_tracker.count,
+    });
+}
+
+fn mergeJsonBlockIntoSnapshot(alloc: std.mem.Allocator, base_json: []const u8, field_name: []const u8, block_json: []const u8) ![]u8 {
+    var end = base_json.len;
+    while (end > 0 and (base_json[end - 1] == '\n' or base_json[end - 1] == ' ' or base_json[end - 1] == '\r')) end -= 1;
+    if (end > 0 and base_json[end - 1] == '}') end -= 1;
+    while (end > 0 and base_json[end - 1] == ' ') end -= 1;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, base_json[0..end]);
+    try buf.print(alloc, ",\n  \"{s}\": ", .{field_name});
+    try buf.appendSlice(alloc, block_json);
+    try buf.appendSlice(alloc, "\n}\n");
+    return buf.toOwnedSlice(alloc);
 }

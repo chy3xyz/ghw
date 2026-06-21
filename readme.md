@@ -57,9 +57,12 @@ A **digital life** is a long-running process that:
 
 The intelligence is **not** a single LLM. It is a 3-layer stack:
 
-- **Math** (existence degree `E = αM + βR + γN − μ·Var + ν·min + σ·S + λ·D`).
-- **Rules** (SelfEvolutionGuard 17-blacklist, BoundaryGuardian, SelfEncoder
-  formal verification).
+- **Math** (existence degree `E = M_p(M,R,N; α,β,γ) + σ·S + λ·D`, where `M_p`
+  is a weighted power mean / CES aggregator — "imbalance penalty, weakest-link
+  priority, indispensability" are *provable* properties of its concavity, not
+  hand-tuned patches. See [`docs/math.md`](docs/math.md)).
+- **Rules** (SelfEvolutionGuard single-source blacklist incl. `@panic`,
+  BoundaryGuardian, SelfEncoder formal verification).
 - **Feedback** (ΔE backprop, L1–L5 compiler verifier, 9-palace milestone gates).
 
 The **LLM is a fuel injector** — it parses text into features, proposes code
@@ -225,8 +228,8 @@ diagram, and 9-palace state machine.
 ```
                     ┌─────────────────────────────────┐
                     │  World (M/R/N — three sources)  │
-                    │  E = αM + βR + γN − μ·Var        │
-                    │      + ν·min + σ·S + λ·D         │
+                    │  E = M_p(M,R,N;α,β,γ)            │
+                    │      + σ·S + λ·D  (power mean)   │
                     └────────────────┬────────────────┘
                                      │ perception
                     ┌────────────────▼────────────────┐

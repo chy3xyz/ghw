@@ -26,6 +26,9 @@ const GHWAgent = ghw.GHWAgent;
 const SystemCollector = ghw_harness.system_collector.SystemCollector;
 const WorldContext = ghw_harness.world_context.WorldContext;
 const Memory = ghw_harness.memory.Memory;
+const TaskQueue = ghw_harness.human_symbiosis.TaskQueue;
+const HumanGSP = ghw_harness.human_symbiosis.HumanGSP;
+const HumanSignal = ghw_harness.human_symbiosis.HumanSignal;
 const Personality = ghw_harness.personality.Personality;
 const Reflection = ghw_harness.reflection.Reflection;
 const SqliteDb = ghw.sandbox.SqliteDb;
@@ -61,6 +64,8 @@ const ChatMessage = struct {
     text: []const u8,
     timestamp: i64,
     tick: u64,
+    /// P15: GHW 回复是否注入 buildContext
+    memory_injected: bool = false,
 };
 
 /// 后台 chat worker context (chat 异步化: POST 立刻返 user bubble,
@@ -84,22 +89,32 @@ const ChatWorkerCtx = struct {
             std.debug.print("[chat-worker] pushUserEvent 失败: {t}\n", .{err});
             return;
         };
-        const snap = app.sys_collector.collect() catch |err| {
-            std.debug.print("[chat-worker] collect 失败: {t}\n", .{err});
-            return;
-        };
-        const info = app.sys_collector.toInformation(snap) catch |err| {
-            std.debug.print("[chat-worker] toInformation 失败: {t}\n", .{err});
-            return;
-        };
-        defer app.sys_collector.freeInformation(info);
 
-        // 2. 跑 1 cycle
-        const report = app.agent.runCycle(info) catch |err| {
+        // P11: 任务型 chat → TaskQueue (from_human=human)
+        if (ghw_harness.human_symbiosis.chat_task.maybeSubmitFromChat(
+            &app.human_gsp,
+            &app.task_queue,
+            &app.agent,
+            app.alloc,
+            self.user_text,
+        ) catch null) |task_id| {
+            std.debug.print("[chat-worker] 人类任务 #{d} 入队 pending={d}\n", .{ task_id, app.task_queue.pending_count });
+        }
+
+        // 2. 跑 1 cycle + P8 统一 post-cycle 管道 (提议/任务/自省跟 GET /api/state 一致)
+        const report = runCycle(app) catch |err| {
             std.debug.print("[chat-worker] runCycle 失败: {t}\n", .{err});
             return;
         };
         appendGrowth(app, report) catch {};
+        runPostCyclePipeline(app, report) catch |err| {
+            std.debug.print("[chat-worker] post-cycle 失败: {t}\n", .{err});
+        };
+        recomputePersonality(app);
+        const chat_summary = if (self.user_text.len > 80) self.user_text[0..80] else self.user_text;
+        app.memory.recordAt(app.io, .user_chat, report.tick, chat_summary, self.user_text, 0, report.e_after - report.e_before) catch |err| {
+            std.debug.print("[chat-worker] recordAt user_chat 失败: {t}\n", .{err});
+        };
         saveState(app) catch {};
 
         // 3. 构造 GHW 回复 (LLM 模式 or 模板降级)
@@ -123,29 +138,44 @@ const ChatWorkerCtx = struct {
             .timestamp = 0,
         };
 
-        const response_text: []u8 = if (app.llm_chat) |*lc|
-            buildLLMReply(app, lc, self.user_text, report, sys_snap, goal_name) catch |err| brk: {
+        const reply: LLMReplyResult = if (app.llm_chat) |*lc| blk: {
+            const r = buildLLMReply(app, lc, self.user_text, report, sys_snap, goal_name) catch |err| {
                 std.debug.print("[chat-worker] LLM 失败: {t}, 降级到模板\n", .{err});
-                break :brk fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return;
-            }
-        else
-            fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return;
-        defer app.alloc.free(response_text);
+                break :blk LLMReplyResult{
+                    .text = fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return,
+                    .memory_injected = false,
+                };
+            };
+            break :blk r;
+        } else LLMReplyResult{
+            .text = fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return,
+            .memory_injected = false,
+        };
+        defer app.alloc.free(reply.text);
 
         // 4. 写 sqlite + 写 chat_history (lock)
         if (app.sqlite) |*db| {
-            _ = db.insertEpisode(@intCast(report.tick), "chat", response_text, 0.4, "llm") catch {};
+            _ = db.insertEpisode(@intCast(report.tick), "chat", reply.text, 0.4, "llm") catch {};
         }
         app.chat_mutex.lockUncancelable(app.io);
         defer app.chat_mutex.unlock(app.io);
         app.chat_history.append(app.alloc, .{
             .sender = app.alloc.dupe(u8, "ghw") catch return,
-            .text = app.alloc.dupe(u8, response_text) catch return,
+            .text = app.alloc.dupe(u8, reply.text) catch return,
             .timestamp = std.Io.Clock.real.now(app.io).toSeconds(),
             .tick = report.tick,
+            .memory_injected = reply.memory_injected,
         }) catch {};
-        std.debug.print("[chat-worker] tick={d} GHW reply ready ({d}B)\n", .{ report.tick, response_text.len });
+        std.debug.print("[chat-worker] tick={d} GHW reply ready ({d}B memory={s})\n", .{
+            report.tick, reply.text.len, if (reply.memory_injected) "on" else "off",
+        });
     }
+};
+
+const LLMReplyResult = struct {
+    text: []u8,
+    memory_injected: bool,
+    meta: ghw_harness.human_symbiosis.chat_reply.Meta = .{},
 };
 
 /// 构造 LLM 回复 (worker 用, 独立函数避免 worker struct 太大)
@@ -156,61 +186,26 @@ fn buildLLMReply(
     report: CycleReport,
     sys_snap: SystemSnapshot,
     goal_name: []const u8,
-) ![]u8 {
+) !LLMReplyResult {
     const alloc = app.alloc;
-    const sys_ctx = try std.fmt.allocPrint(alloc,
-        \\CPU {d:.0}%, 内存 {d:.0}%, 负载 {d:.1}
-    , .{
+    const value_score = ghw_harness.human_symbiosis.computeScore(
+        &app.human_signal,
+        &app.task_queue,
+        &app.human_gsp,
+    );
+    const built = try ghw_harness.human_symbiosis.chat_reply.buildChatReply(
+        alloc,
+        &app.memory,
+        &app.agent,
+        user_text,
+        goal_name,
+        value_score,
+        app.task_queue.pending_count,
         sys_snap.cpu_user_pct + sys_snap.cpu_sys_pct,
         sys_snap.mem_pct,
         sys_snap.load_1m,
-    });
-    defer alloc.free(sys_ctx);
-    const persona_ctx = try std.fmt.allocPrint(alloc,
-        \\tick={d}, E={d:.3} (M={d:.3} R={d:.3} N={d:.3}), 当前 top_goal={s}, mood={s}, bias={s}
-    , .{
-        report.tick, report.e_after,
-        app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
-        goal_name,
-        @tagName(app.personality.mood),
-        @tagName(app.personality.bias),
-    });
-    defer alloc.free(persona_ctx);
-
-    const narr = if (app.memory.self_narrative.len > 0) app.memory.self_narrative else "(我还没有自我叙事)";
-    var beliefs_ctx_buf: std.ArrayList(u8) = .empty;
-    defer beliefs_ctx_buf.deinit(alloc);
-    for (app.memory.beliefs.items[0..@min(3, app.memory.beliefs.items.len)]) |b| {
-        try beliefs_ctx_buf.print(alloc, "  - [{s} c={d:.2}] {s}\n", .{ @tagName(b.source), b.confidence, b.text });
-    }
-    const beliefs_ctx = beliefs_ctx_buf.items;
-
-    const llm_prompt = try std.fmt.allocPrint(alloc,
-        \\你是 GHW 数字生命, 正在和用户实时对话.
-        \\
-        \\你的状态:
-        \\  {s}
-        \\  {s}
-        \\  我的自我叙事: {s}
-        \\  我最近相信的事:
-        \\{s}
-        \\
-        \\用户刚说: {s}
-        \\
-        \\请用 1-3 句话, 第一人称 ("我"), 自然地回应.
-        \\- 你的状态会影响语气 (低 E 的话简短, 高 E 的话可以轻松点)
-        \\- 你的自我叙事/信念会影响看法
-        \\- 如果用户问你 E/状态/系统, 如实回答
-        \\- 如果用户给任务, 说"好的, 让我想想怎么做" 并表示会去找
-        \\- 不要 markdown, 不要代码块, 纯文本
-    , .{
-        persona_ctx,
-        sys_ctx,
-        narr,
-        beliefs_ctx,
-        user_text,
-    });
-    defer alloc.free(llm_prompt);
+    );
+    defer alloc.free(built.prompt);
 
     var req = LLMChatRequest{
         .model = app.llm_model,
@@ -219,15 +214,26 @@ fn buildLLMReply(
     };
     const messages = [_]LLMMessage{
         .{ .role = .system, .content = "你是 GHW 数字生命, 一对一与用户对话, 真实可信, 不假装." },
-        .{ .role = .user, .content = llm_prompt },
+        .{ .role = .user, .content = built.prompt },
     };
     req.messages = &messages;
     var llm_resp = try lc.complete(req, alloc);
     defer llm_resp.deinit();
     const llm_text = llm_resp.content orelse "";
-    if (llm_text.len == 0) return try fallbackTemplate(alloc, user_text, report.e_after, sys_snap, goal_name);
+    if (llm_text.len == 0) {
+        return .{
+            .text = try fallbackTemplate(alloc, user_text, report.e_after, sys_snap, goal_name),
+            .memory_injected = false,
+        };
+    }
     const max_len = @min(llm_text.len, 500);
-    return try alloc.dupe(u8, llm_text[0..max_len]);
+    app.last_chat_reply = built.meta;
+    if (built.meta.memory_injected) app.chat_replies_with_memory += 1;
+    return .{
+        .text = try alloc.dupe(u8, llm_text[0..max_len]),
+        .memory_injected = built.meta.memory_injected,
+        .meta = built.meta,
+    };
 }
 
 const App = struct {
@@ -240,6 +246,13 @@ const App = struct {
     llm_chat: ?LLMChat,
     llm_model: []const u8,
     memory: Memory,
+    /// P6: 人类/LLM 任务队列 — proposeAndAdopt + 周期 runTask
+    task_queue: TaskQueue,
+    /// P9: 人类反馈 + 信任 (L6 HumanSignal / HumanGSP)
+    human_gsp: HumanGSP,
+    human_signal: HumanSignal,
+    /// P11: 人类 value_score 趋势 (驱动 goal 提议加速 + provenance)
+    value_tracker: ghw_harness.human_symbiosis.ValueTrendTracker = .{},
     reflection: ?Reflection,
     /// Reflect 互斥锁: 后台 thread 跑 reflect 时, 主 thread 访问 memory 用这锁保护
     /// 避免 main thread 跟 reflect thread 同时改 self_narrative / beliefs 时 race
@@ -286,10 +299,19 @@ const App = struct {
     action_every: u64 = 16,
     /// L1-L5 自演化: StaticCodeGenerator (L3/L4 用, 不依赖 LLM)
     static_codegen: ?ghw.harness.code_generator.StaticCodeGenerator = null,
+    /// P4: LLM 驱动的 CodeGenerator (LLM 启用时替换 StaticCodeGenerator)
+    llm_codegen: ?ghw.harness.LlmCodeGenerator = null,
     /// L1-L5 自演化: SelfEvolver (持有 Guard + CodeGenerator)
     self_evolver: ?ghw.harness.SelfEvolver = null,
     /// L5 自演化: SelfEncoder (规则合成, 形式验证)
     self_encoder: ?ghw.harness.SelfEncoder = null,
+    /// P13: LLM 规则提议 (Guard + RuleProposer, 跟 daemon 对齐)
+    evolution_guard: ?ghw.harness.SelfEvolutionGuard = null,
+    rule_proposer: ?ghw.harness.rule_proposer.RuleProposer = null,
+    rule_propose_total: u32 = 0,
+    /// P15: 最近一次 chat LLM 回复的记忆 provenance
+    last_chat_reply: ghw_harness.human_symbiosis.chat_reply.Meta = .{},
+    chat_replies_with_memory: u32 = 0,
     /// L1-L5 累计触发次数 (UI capabilities 展示)
     self_evolve_l1_count: u32 = 0,
     self_evolve_l2_count: u32 = 0,
@@ -674,7 +696,15 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
                 .context = try std.fmt.allocPrint(alloc, "tick={d} E={d:.3} L3 learn new method", .{ app.agent.tick, e }),
                 .target_file = try std.fmt.allocPrint(alloc, "src/goal/methods/l3_{d}.zig", .{app.agent.tick}),
             };
-            const outcome = try evolver.evolve(req, e, app.agent.tick);
+            const ev_ctx = ghw.harness.EvolveContext{
+                .e = e,
+                .tick = app.agent.tick,
+                .material = app.agent.ed.v.material,
+                .representation = app.agent.ed.v.representation,
+                .nature = app.agent.ed.v.nature,
+                .query_text = "L3 learn method",
+            };
+            const outcome = try evolver.evolve(req, ev_ctx);
             const applied = try evolver.apply(outcome);
             app.self_evolve_l3_count += 1;
 
@@ -741,7 +771,15 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
                 .context = try std.fmt.allocPrint(alloc, "tick={d} E={d:.3} L4 optimize algorithm", .{ app.agent.tick, e }),
                 .target_file = "src/agent/params.zig", // 白名单精确匹配
             };
-            const outcome = try evolver.evolve(req, e, app.agent.tick);
+            const ev_ctx = ghw.harness.EvolveContext{
+                .e = e,
+                .tick = app.agent.tick,
+                .material = app.agent.ed.v.material,
+                .representation = app.agent.ed.v.representation,
+                .nature = app.agent.ed.v.nature,
+                .query_text = "L4 optimize algorithm",
+            };
+            const outcome = try evolver.evolve(req, ev_ctx);
             const applied = try evolver.apply(outcome);
             app.self_evolve_l4_count += 1;
 
@@ -1100,6 +1138,331 @@ fn runCycle(app: *App) !CycleReport {
     return report;
 }
 
+/// P6/P9: 每 32 tick 跑 1 个 pending 任务 + 启发式人类反馈
+fn maybeRunPendingTask(app: *App) void {
+    if (app.agent.tick == 0 or app.agent.tick % 32 != 0) return;
+    if (app.task_queue.pending_count == 0) return;
+    const ts: u64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    const ctx = ghw_harness.task_feedback.Context{
+        .queue = &app.task_queue,
+        .gsp = &app.human_gsp,
+        .signal = &app.human_signal,
+    };
+    const ran = ghw_harness.task_feedback.runNextPendingWithFeedback(&app.agent, &ctx, app.alloc, ts) catch |err| {
+        std.debug.print("[ui] runNextPending 失败: {t}\n", .{err});
+        return;
+    };
+    if (ran) |r| {
+        std.debug.print("[ui] tick={d} 任务 #{d} 「{s}」完成 ΔE={d:.3} ({d} cycles)\n", .{
+            app.agent.tick, r.task_id, r.title, r.actual_delta_e, r.cycles_used,
+        });
+        if (app.sqlite) |*db| {
+            const ep = std.fmt.allocPrint(app.alloc, "task_id={d} title={s} dE={d:.3}", .{
+                r.task_id, r.title, r.actual_delta_e,
+            }) catch null;
+            if (ep) |e| {
+                defer app.alloc.free(e);
+                _ = db.insertEpisode(@intCast(app.agent.tick), "task", e, 0.6, "agent") catch {};
+            }
+        }
+    }
+}
+
+/// P9: 三源失衡时, 用 GSP 信任选伙伴投递 balance 任务
+fn maybeAutoBalanceTask(app: *App) void {
+    if (app.agent.tick == 0 or app.agent.tick % 128 != 0) return;
+    const analysis = ghw_harness.balance_seeker.BalanceSeeker.analyze(app.agent.ed);
+    if (!analysis.isImbalanced()) return;
+    const weak = analysis.weakest;
+    const partner = ghw_harness.balance_seeker.BalanceSeeker.selectWeakPartner(app.agent.ed, &app.human_gsp) orelse
+        app.human_gsp.selectMostTrusted(weak) orelse return;
+    var balance_task = ghw_harness.balance_seeker.BalanceSeeker.proposeBalanceTask(app.agent.ed, weak, partner, app.alloc) catch |err| {
+        std.debug.print("[ui] proposeBalanceTask 失败: {t}\n", .{err});
+        return;
+    };
+    defer balance_task.deinit();
+    const task_id = app.task_queue.submitWithSource(
+        balance_task.title,
+        balance_task.description,
+        partner,
+        balance_task.priority,
+        balance_task.required_dimension,
+        balance_task.cycles_allocated,
+        .balance,
+    ) catch |err| {
+        std.debug.print("[ui] balance task submit 失败: {t}\n", .{err});
+        return;
+    };
+    std.debug.print("[ui] tick={d} L6 balance task #{d} dim={s} → {s}\n", .{
+        app.agent.tick, task_id, @tagName(weak), partner,
+    });
+}
+
+/// P8: 把 LLM 提议结果写入 UI 列表 + sqlite (handleGetState 自动提议 / GET /api/propose 共用)
+fn storeProposeResult(app: *App, result: *const ghw.harness.goal_proposer.ProposeResult) !void {
+    const alloc = app.alloc;
+    for (app.proposed_goals.items) |old| {
+        alloc.free(old.title);
+        alloc.free(old.description);
+        alloc.free(old.dimension);
+        alloc.free(old.reason);
+    }
+    app.proposed_goals.clearRetainingCapacity();
+    const propose_threshold: f32 = 0.5;
+    for (result.goals) |g| {
+        if (g.urgency < propose_threshold) continue;
+        try app.proposed_goals.append(alloc, .{
+            .title = try alloc.dupe(u8, g.title),
+            .description = try alloc.dupe(u8, g.description),
+            .dimension = try alloc.dupe(u8, g.dimension),
+            .reason = try alloc.dupe(u8, g.reason),
+            .urgency = g.urgency,
+        });
+        if (app.sqlite) |*db| {
+            _ = db.insertProposedGoal(
+                @intCast(app.agent.tick),
+                g.title,
+                g.description,
+                g.dimension,
+                g.reason,
+                g.urgency,
+                result.raw_response,
+            ) catch |err| {
+                std.debug.print("[ui] sqlite insert goal 失败: {t}\n", .{err});
+            };
+        }
+    }
+    if (app.last_propose_raw) |raw| alloc.free(raw);
+    app.last_propose_raw = try alloc.dupe(u8, result.raw_response);
+    if (app.sqlite) |*db| {
+        const ep = try std.fmt.allocPrint(alloc, "propose_total={d} goals={d}", .{ app.propose_total, result.goals.len });
+        defer alloc.free(ep);
+        _ = db.insertEpisode(@intCast(app.agent.tick), "propose", ep, 0.7, "llm") catch {};
+    }
+}
+
+/// P11: 采样人类 value_score 写入趋势缓冲
+fn recordValueTrend(app: *App) void {
+    const score = ghw_harness.human_symbiosis.computeScore(
+        &app.human_signal,
+        &app.task_queue,
+        &app.human_gsp,
+    );
+    app.value_tracker.record(score);
+}
+
+/// P13: LLM 规则提议 (E/KPI/value 下滑 → Guard → SelfEncoder; 决策权仍在数字生命)
+fn maybeAutoProposeRules(app: *App) void {
+    if (app.rule_proposer) |*p| {
+        if (app.self_encoder) |*enc| {
+            if (app.evolution_guard) |*grd| {
+                const goal_name = if (app.growth_log.items.len > 0)
+                    if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "observe"
+                else
+                    "observe";
+                p.updateState(
+                    app.agent.ed.e(),
+                    app.agent.ed.v.material,
+                    app.agent.ed.v.representation,
+                    app.agent.ed.v.nature,
+                    goal_name,
+                    "ui-post-cycle",
+                    -0.05,
+                );
+                p.setKpiTrend(app.agent.ed.kpiTrend());
+                p.setValueTrend(app.value_tracker.trend());
+                if (p.shouldPropose(0.50)) {
+                    var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
+                        std.debug.print("[ui] rule proposeAndAdopt 失败: {t}\n", .{err});
+                        return;
+                    };
+                    defer prop_result.deinit();
+                    app.rule_propose_total += 1;
+                    std.debug.print("[ui] tick={d} 规则提议 accepted={d} rejected={d} (total={d})\n", .{
+                        app.agent.tick, prop_result.accepted, prop_result.rejected, app.rule_propose_total,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// P8: 自动 LLM 目标提议 → TaskQueue (每 auto_every tick)
+fn maybeAutoProposeGoals(app: *App) !void {
+    if (app.goal_proposer) |*gp| {
+        const since_last: u64 = app.agent.tick -% gp.last_propose_at_tick;
+        const value_declining = app.value_tracker.trend() < -ghw_harness.human_symbiosis.ValueTrendTracker.DECLINE_EPS;
+        if (since_last >= gp.auto_every or gp.last_propose_at_tick == 0 or value_declining) {
+            if (app.world.last) |prev_snap| {
+                var world_snap = app.world.dupSnapshot(prev_snap) catch |err| {
+                    std.debug.print("[ui] dupSnapshot failed: {t}\n", .{err});
+                    return;
+                };
+                defer world_snap.deinit();
+                gp.last_propose_at_tick = app.agent.tick;
+                app.propose_total += 1;
+                var result = gp.proposeAndAdopt(&app.world, world_snap, &app.agent, &app.task_queue, app.io) catch |err| {
+                    std.debug.print("[ui] proposeAndAdopt failed: {t}\n", .{err});
+                    return;
+                };
+                defer result.deinit();
+                std.debug.print("[ui] tick={d} LLM 提议 {d} 个目标 → TaskQueue pending={d} ({d}ms):\n", .{
+                    app.agent.tick, result.goals.len, app.task_queue.pending_count, result.latency_ms,
+                });
+                for (result.goals) |g| {
+                    if (g.urgency < 0.5) {
+                        std.debug.print("  - [skip urgency<0.50] [{s}] {d:.2} : {s}\n", .{ g.dimension, g.urgency, g.title });
+                    } else {
+                        std.debug.print("  - [{s}] urgency={d:.2} : {s}\n", .{ g.dimension, g.urgency, g.title });
+                    }
+                }
+                try storeProposeResult(app, &result);
+            }
+        }
+    }
+}
+
+/// P8: 周期自省 (LLM 或模板兜底)
+fn maybeAutoReflect(app: *App) void {
+    const alloc = app.alloc;
+    if (app.reflection) |*r| {
+        if (r.shouldReflect(&app.agent) and !app.reflect_inflight) {
+            app.reflect_inflight = true;
+            app.reflect_last_tick = app.agent.tick;
+            const ReflectCtx = struct { app: *App };
+            const ctx = ReflectCtx{ .app = app };
+            _ = std.Thread.spawn(.{}, struct {
+                fn run(c: ReflectCtx) void {
+                    defer c.app.reflect_inflight = false;
+                    if (c.app.reflection) |*rr| {
+                        c.app.reflection_mutex.lock(c.app.io) catch return;
+                        defer c.app.reflection_mutex.unlock(c.app.io);
+                        const reflect_result = rr.reflect(&c.app.agent, &c.app.memory, c.app.io) catch |err| {
+                            std.debug.print("[reflect-bg] failed: {t}\n", .{err});
+                            return;
+                        };
+                        if (reflect_result.self_narrative_updated) {
+                            std.debug.print("[reflect-bg] ✓ tick={d} narrative 更新 (len={d})\n", .{ c.app.agent.tick, c.app.memory.self_narrative.len });
+                        }
+                    }
+                }
+            }.run, .{ctx}) catch |err| {
+                std.debug.print("[ui] reflect-bg spawn 失败: {t}, 降级同步\n", .{err});
+                app.reflect_inflight = false;
+            };
+        } else if (r.shouldReflect(&app.agent) and app.reflect_inflight) {
+            std.debug.print("[reflect] inflight, skip tick={d}\n", .{app.agent.tick});
+        }
+    }
+    if (app.agent.tick > 0 and app.agent.tick -% app.last_template_reflect_tick >= 32) {
+        const E = app.agent.ed.e();
+        const top_goal = if (app.growth_log.items.len > 0)
+            if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "observe"
+        else "observe";
+        const narr = std.fmt.allocPrint(alloc,
+            \\[no-LLM 模板] 我跑到了 tick={d}, E={d:.3} (M={d:.3} R={d:.3} N={d:.3}), 主要在 {s}. 自我演化累计 {d} 次. 信念数 {d}.
+        , .{
+            app.agent.tick, E,
+            app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
+            top_goal, app.self_evolve_total, app.memory.beliefs.items.len,
+        }) catch return;
+        defer alloc.free(narr);
+        alloc.free(app.memory.self_narrative);
+        app.memory.self_narrative = alloc.dupe(u8, narr) catch return;
+        app.memory.reflection_count += 1;
+        app.last_template_reflect_tick = app.agent.tick;
+        if (app.sqlite) |*db| {
+            _ = db.insertEpisode(@intCast(app.agent.tick), "reflection", narr, 0.5, "template") catch {};
+        }
+        std.debug.print("[ui] no-LLM 反思 (tick={d}): {s}\n", .{ app.agent.tick, narr });
+    }
+}
+
+/// P8: GET /api/state 与 POST /api/chat 共用的 post-cycle 管道
+fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
+    if (app.sqlite) |*db| {
+        const cycle_data = try std.fmt.allocPrint(app.alloc, "tick={d} E={d:.3} M={d:.3} R={d:.3} N={d:.3}", .{
+            report.tick, report.e_after,
+            app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
+        });
+        defer app.alloc.free(cycle_data);
+        _ = db.insertEpisode(@intCast(report.tick), "cycle", cycle_data, 0.3, "system") catch |err| {
+            std.debug.print("[ui] sqlite insertEpisode 失败: {t}\n", .{err});
+        };
+        app.sqlite_episodes_written += 1;
+    }
+    maybeAutoReflect(app);
+    try maybeAutoProposeGoals(app);
+    maybeAutoProposeRules(app);
+    maybeAutoBalanceTask(app);
+    maybeRunPendingTask(app);
+    recordValueTrend(app);
+}
+
+fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !void {
+    const rb = app.agent.last_rule_bias;
+    const tb = app.agent.last_task_bias;
+    try body.appendSlice(alloc, ",\"provenance\":{\"rule_bias\":{");
+    try body.print(alloc, "\"rule_count\":{d},\"dominance\":{d:.3},\"selection_changed\":", .{ rb.rule_count, rb.dominance });
+    try body.print(alloc, "{s},\"favored\":", .{if (rb.selection_changed) "true" else "false"});
+    if (rb.favored) |f| {
+        try body.print(alloc, "\"{s}\"", .{@tagName(f)});
+    } else {
+        try body.appendSlice(alloc, "null");
+    }
+    try body.appendSlice(alloc, "},\"task_bias\":{");
+    try body.print(alloc, "\"pending_count\":{d},\"dominance\":{d:.3},\"selection_changed\":", .{ tb.pending_count, tb.dominance });
+    try body.print(alloc, "{s},\"favored\":", .{if (tb.selection_changed) "true" else "false"});
+    if (tb.favored) |f| {
+        try body.print(alloc, "\"{s}\"", .{@tagName(f)});
+    } else {
+        try body.appendSlice(alloc, "null");
+    }
+    try body.appendSlice(alloc, "}},\"task_queue\":{");
+    try body.print(alloc, "\"pending\":{d},\"total\":{d},\"completed\":{d}", .{
+        app.task_queue.pending_count,
+        app.task_queue.tasks.items.len,
+        app.task_queue.completed_count,
+    });
+    var vm = ghw_harness.human_symbiosis.ValueMetric{};
+    vm.pullFromSignal(&app.human_signal);
+    vm.pullFromQueue(&app.task_queue);
+    vm.pullFromGSP(&app.human_gsp);
+    try body.print(alloc, "}},\"human_symbiosis\":{{\"value_score\":{d:.3},\"value_trend\":{d:.4},", .{
+        vm.valueScore(), app.value_tracker.trend(),
+    });
+    try app.value_tracker.appendRecentSamplesJson(alloc, body);
+    try body.print(alloc, ",\"feedback_count\":{d},\"human_e_uplift\":{d:.3},\"peers\":[", .{
+        vm.feedback_count, vm.human_e_uplift,
+    });
+    var gsp_it = app.human_gsp.peers.iterator();
+    var first_peer = true;
+    while (gsp_it.next()) |entry| {
+        if (!first_peer) try body.append(alloc, ',');
+        first_peer = false;
+        const p = entry.value_ptr.*;
+        try body.print(alloc, "{{\"id\":\"{s}\",\"trust\":{d:.3},\"trust_level\":\"{s}\"}}", .{
+            p.id, p.trust, p.trustLevel(),
+        });
+    }
+    try body.appendSlice(alloc, "]},\"rule_propose\":{");
+    const rule_enabled = app.rule_proposer != null;
+    try body.print(alloc, "\"enabled\":{s},\"total\":{d},\"adopted_rules\":{d}", .{
+        if (rule_enabled) "true" else "false",
+        app.rule_propose_total,
+        app.agent.last_rule_bias.rule_count,
+    });
+    try body.appendSlice(alloc, "},\"chat\":{");
+    const cr = app.last_chat_reply;
+    try body.print(alloc, "\"last_memory_injected\":{s},\"last_tick\":{d},\"replies_with_memory\":{d},\"episode_count\":{d},\"belief_count\":{d}}}}}", .{
+        if (cr.memory_injected) "true" else "false",
+        if (app.chat_history.items.len > 0) app.chat_history.items[app.chat_history.items.len - 1].tick else 0,
+        app.chat_replies_with_memory,
+        cr.episode_count,
+        cr.belief_count,
+    });
+}
+
 /// LLM 不可用时的回退模板 (4 套根据 E)
 fn fallbackTemplate(
     alloc: Allocator,
@@ -1233,12 +1596,6 @@ fn saveState(app: *App) !void {
         if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "—"
     else "—";
 
-    // memory block: self_narrative + reflection_count + beliefs (UI 直接读)
-    // 注意: beliefs 不进 state.json (UI 从 sqlite 读; state.json 只放最常显示的)
-    const narr = app.memory.self_narrative;
-    const safe_narr = std.mem.replaceOwned(u8, app.alloc, narr, "\"", "'") catch narr;
-    defer if (safe_narr.ptr != narr.ptr) app.alloc.free(safe_narr);
-
     const json_a = try std.fmt.allocPrint(app.alloc,
         \\{{"agent_id":"{s}","tick":{d},"M":{d:.6},"R":{d:.6},"N":{d:.6},"alpha":{d:.6},"beta":{d:.6},"gamma":{d:.6},"E":{d:.6},"self_evolved_total":{d},"action_count":{d},"l1_count":{d},"l2_count":{d},"l3_count":{d},"l3_approved":{d},"l4_count":{d},"l4_approved":{d},"l5_count":{d},"last_auto_l1l2_tick":{d},"last_auto_l3_tick":{d},"last_auto_l4_tick":{d},"last_auto_l5_tick":{d},"phase":{d},"phase_progress":{d},"six_interfaces_done":{d},"seven_reflection_done":{d},"eight_relations_seen":{d},"nine_palaces_e_var_seen":{d},"nine_palaces_mrn_seen":{d},"nine_palaces_mrn_strong_seen":{d},"top_goal":"{s}",
     , .{
@@ -1275,14 +1632,31 @@ fn saveState(app: *App) !void {
         goal_str,
     });
     defer app.alloc.free(json_a);
-    const json_b = try std.fmt.allocPrint(app.alloc,
-        \\"memory":{{"self_narrative":"{s}","reflection_count":{d}}}"}}
-    , .{
-        safe_narr,
-        app.memory.reflection_count,
-    });
-    defer app.alloc.free(json_b);
-    const json = try std.fmt.allocPrint(app.alloc, "{s}{s}", .{ json_a, json_b });
+    const mem_json = try app.memory.toJson(app.alloc);
+    defer app.alloc.free(mem_json);
+    const tq_json = try app.task_queue.toJson(app.alloc);
+    defer app.alloc.free(tq_json);
+    const gsp_json = try app.human_gsp.toJson(app.alloc);
+    defer app.alloc.free(gsp_json);
+    const sig_json = try app.human_signal.toJson(app.alloc);
+    defer app.alloc.free(sig_json);
+    const vt_json = try app.value_tracker.toJson(app.alloc);
+    defer app.alloc.free(vt_json);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(app.alloc);
+    try buf.appendSlice(app.alloc, json_a);
+    try buf.appendSlice(app.alloc, "\"memory\":");
+    try buf.appendSlice(app.alloc, mem_json);
+    try buf.appendSlice(app.alloc, ",\"task_queue\":");
+    try buf.appendSlice(app.alloc, tq_json);
+    try buf.appendSlice(app.alloc, ",\"human_gsp\":");
+    try buf.appendSlice(app.alloc, gsp_json);
+    try buf.appendSlice(app.alloc, ",\"human_signal\":");
+    try buf.appendSlice(app.alloc, sig_json);
+    try buf.appendSlice(app.alloc, ",\"value_tracker\":");
+    try buf.appendSlice(app.alloc, vt_json);
+    try buf.append(app.alloc, '}');
+    const json = try buf.toOwnedSlice(app.alloc);
     defer app.alloc.free(json);
     try std.Io.File.writeStreamingAll(file, app.io, json);
 }
@@ -1557,150 +1931,8 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
     try appendGrowth(app, report);
     try saveState(app);
 
-    // 写 episode 到 sqlite (每 cycle 一条, kind=cycle)
-    if (app.sqlite) |*db| {
-        const cycle_data = try std.fmt.allocPrint(alloc, "tick={d} E={d:.3} M={d:.3} R={d:.3} N={d:.3}", .{
-            report.tick, report.e_after,
-            app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
-        });
-        defer alloc.free(cycle_data);
-        _ = db.insertEpisode(@intCast(report.tick), "cycle", cycle_data, 0.3, "system") catch |err| {
-            std.debug.print("[ui] sqlite insertEpisode 失败: {t}\n", .{err});
-        };
-        app.sqlite_episodes_written += 1;
-    }
-
-    // 自动自省 (每 32 cycle, 调 LLM 写自我叙事 + 信念)
-    // 无 LLM 模式: 用模板写自我叙事 (保证 UI 不会一直显示"我还没有...")
-    // v2: 后台 thread 跑 reflect, 不阻塞主 thread (5-15s 加速 handler)
-    // 锁: 共享 self_narrative / beliefs 写, 主 thread 通过 lock 保护读
-    if (app.reflection) |*r| {
-        if (r.shouldReflect(&app.agent) and !app.reflect_inflight) {
-            // 标记 inflight, 启动后台 thread
-            app.reflect_inflight = true;
-            app.reflect_last_tick = app.agent.tick;
-            const ReflectCtx = struct { app: *App };
-            const ctx = ReflectCtx{ .app = app };
-            _ = std.Thread.spawn(.{}, struct {
-                fn run(c: ReflectCtx) void {
-                    defer c.app.reflect_inflight = false;
-                    if (c.app.reflection) |*rr| {
-                        // 锁保护: 写 self_narrative / beliefs
-                        c.app.reflection_mutex.lock(c.app.io) catch return;
-                        defer c.app.reflection_mutex.unlock(c.app.io);
-                        const reflect_result = rr.reflect(&c.app.agent, &c.app.memory, c.app.io) catch |err| {
-                            std.debug.print("[reflect-bg] failed: {t}\n", .{err});
-                            return;
-                        };
-                        if (reflect_result.self_narrative_updated) {
-                            std.debug.print("[reflect-bg] ✓ tick={d} narrative 更新 (len={d})\n", .{ c.app.agent.tick, c.app.memory.self_narrative.len });
-                        }
-                    }
-                }
-            }.run, .{ctx}) catch |err| {
-                std.debug.print("[ui] reflect-bg spawn 失败: {t}, 降级同步\n", .{err});
-                app.reflect_inflight = false;
-            };
-        } else if (r.shouldReflect(&app.agent) and app.reflect_inflight) {
-            // 后台还在跑, 跳过本次 (避免重叠)
-            std.debug.print("[reflect] inflight, skip tick={d}\n", .{app.agent.tick});
-        }
-    }
-    // 兜底: 即使 LLM 模式存在, 32 cycle 没写 self_narrative 时, 用模板写一条保底
-    // (LLM extract 失败 / 网络断时不让 self_narrative 永远空)
-    if (app.agent.tick > 0 and app.agent.tick -% app.last_template_reflect_tick >= 32) {
-        // === 无 LLM 模式: 模板自省 ===
-        // 每 32 cycle 用真状态写一条 self_narrative, UI 立刻能看到
-        const E = app.agent.ed.e();
-        const top_goal = if (app.growth_log.items.len > 0)
-            if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "observe"
-        else "observe";
-        const narr = try std.fmt.allocPrint(alloc,
-            \\[no-LLM 模板] 我跑到了 tick={d}, E={d:.3} (M={d:.3} R={d:.3} N={d:.3}), 主要在 {s}. 自我演化累计 {d} 次. 信念数 {d}.
-        , .{
-            app.agent.tick, E,
-            app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
-            top_goal, app.self_evolve_total, app.memory.beliefs.items.len,
-        });
-        defer alloc.free(narr);
-        app.alloc.free(app.memory.self_narrative);
-        app.memory.self_narrative = try app.alloc.dupe(u8, narr);
-        app.memory.reflection_count += 1;
-        app.last_template_reflect_tick = app.agent.tick;
-        // 写 sqlite episode
-        if (app.sqlite) |*db| {
-            _ = db.insertEpisode(@intCast(app.agent.tick), "reflection", narr, 0.5, "template") catch {};
-        }
-        std.debug.print("[ui] no-LLM 反思 (tick={d}): {s}\n", .{ app.agent.tick, narr });
-    }
-
-    // 自动提议新目标 (每 64 cycle, LLM 看世界快照 + 自身状态后提议)
-    if (app.goal_proposer) |*gp| {
-        const since_last: u64 = app.agent.tick -% gp.last_propose_at_tick;
-        if (since_last >= gp.auto_every or gp.last_propose_at_tick == 0) {
-            // 需要 world snapshot. dup 避免 race (collect 会 deinit last)
-            if (app.world.last) |prev_snap| {
-                var world_snap = app.world.dupSnapshot(prev_snap) catch |err| {
-                    std.debug.print("[ui] dupSnapshot failed: {t}\n", .{err});
-                    return;
-                };
-                defer world_snap.deinit();
-                gp.last_propose_at_tick = app.agent.tick;
-                app.propose_total += 1;
-                const result = gp.propose(&app.world, world_snap, &app.agent, app.io) catch |err| {
-                    std.debug.print("[ui] propose failed: {t}\n", .{err});
-                    return;
-                };
-                std.debug.print("[ui] tick={d} LLM 提议 {d} 个目标 ({d}ms):\n", .{ app.agent.tick, result.goals.len, result.latency_ms });
-                // 释放旧 proposed_goals
-                for (app.proposed_goals.items) |old| {
-                    app.alloc.free(old.title);
-                    app.alloc.free(old.description);
-                    app.alloc.free(old.dimension);
-                    app.alloc.free(old.reason);
-                }
-                app.proposed_goals.clearRetainingCapacity();
-                // 存新的 (阈值 0.5 — 比之前 0.6 更激进, 接受更多行动)
-                const propose_threshold: f32 = 0.5;
-                for (result.goals) |g| {
-                    if (g.urgency < propose_threshold) {
-                        std.debug.print("  - [skip urgency<{d:.2}] [{s}] {d:.2} : {s}\n", .{ propose_threshold, g.dimension, g.urgency, g.title });
-                        continue;
-                    }
-                    std.debug.print("  - [{s}] urgency={d:.2} : {s}\n", .{ g.dimension, g.urgency, g.title });
-                    try app.proposed_goals.append(app.alloc, .{
-                        .title = try app.alloc.dupe(u8, g.title),
-                        .description = try app.alloc.dupe(u8, g.description),
-                        .dimension = try app.alloc.dupe(u8, g.dimension),
-                        .reason = try app.alloc.dupe(u8, g.reason),
-                        .urgency = g.urgency,
-                    });
-                    // 写 sqlite (每条 goal 一行)
-                    if (app.sqlite) |*db| {
-                        _ = db.insertProposedGoal(
-                            @intCast(app.agent.tick),
-                            g.title,
-                            g.description,
-                            g.dimension,
-                            g.reason,
-                            g.urgency,
-                            result.raw_response,
-                        ) catch |err| {
-                            std.debug.print("[ui] sqlite insert goal 失败: {t}\n", .{err});
-                        };
-                    }
-                }
-                if (app.last_propose_raw) |raw| app.alloc.free(raw);
-                app.last_propose_raw = try app.alloc.dupe(u8, result.raw_response);
-                // 写 propose episode
-                if (app.sqlite) |*db| {
-                    const ep = try std.fmt.allocPrint(app.alloc, "propose_total={d} goals={d}", .{ app.propose_total, result.goals.len });
-                    defer app.alloc.free(ep);
-                                        _ = db.insertEpisode(@intCast(app.agent.tick), "propose", ep, 0.7, "llm") catch {};
-                }
-            }
-        }
-    }
+    // P8: 自省 + LLM 提议入队 + 跑 pending 任务 (与 POST /api/chat 共用)
+    try runPostCyclePipeline(app, report);
 
     // === 自动执行: 每 N cycle 跑 1 个 top unadopted goal ===
     // 这是"具备行动的能力"的核心: 反思 → 提议 → **执行** → 状态变化
@@ -2358,8 +2590,8 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         proposed_json.items,
         app.action_count,
     });
-    // 单独追加 peer_influence + 关闭外层对象 (避免单次 print 超过 32 参数)
-    // `}}}}` = 2 个 `}}` 字面 = 2 个 `}` (close peer_influence obj + close outer obj)
+    // 单独追加 provenance + task_queue + peer_influence + 关闭外层对象
+    try appendProvenanceJson(alloc, &body, app);
     try body.print(alloc, ",\"peer_influence\":{{\"peer_count\":{d},\"peer_E_avg\":{d:.3},\"sigma\":{d:.3}}}}}", .{ app.peer_count_cached, app.peer_E_avg, app.agent.ed.sigma });
 
     // 二次 saveState: 上面 reflection/propose/action 块可能更新了 self_narrative,
@@ -2611,15 +2843,19 @@ fn handleGetChatHistory(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, 
         const label = if (std.mem.eql(u8, m.sender, "human")) "你" else "GHW";
         const text = try jsonEscape(alloc, m.text);
         defer alloc.free(text);
+        const mem_badge = if (std.mem.eql(u8, m.sender, "ghw") and m.memory_injected)
+            "<span class=\"ml-2 px-1 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30\">memory</span>"
+        else
+            "";
         try body.print(alloc,
             \\<div class="flex flex-col {s}">
             \\  <div class="max-w-[80%] rounded-lg px-4 py-2 bg-slate-800">
-            \\    <div class="text-[10px] uppercase tracking-wider {s} mb-1">{s}</div>
+            \\    <div class="text-[10px] uppercase tracking-wider {s} mb-1">{s}{s}</div>
             \\    <div class="text-sm whitespace-pre-wrap break-words">{s}</div>
             \\    <div class="text-[10px] text-ghw-dim mt-1 font-mono">tick #{d}</div>
             \\  </div>
             \\</div>
-        , .{ align_cls, sender_class, label, text, m.tick });
+        , .{ align_cls, sender_class, label, mem_badge, text, m.tick });
     }
     if (app.chat_history.items.len == 0) {
         try body.appendSlice(alloc,
@@ -3617,6 +3853,183 @@ fn appendJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !v
     }
 }
 
+fn urlDecodeFormComponent(alloc: Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < value.len) {
+        if (value[i] == '+') {
+            try out.append(alloc, ' ');
+            i += 1;
+        } else if (value[i] == '%' and i + 2 < value.len) {
+            const hex = value[i + 1 .. i + 3];
+            if (std.fmt.parseInt(u8, hex, 16)) |c| {
+                try out.append(alloc, c);
+                i += 3;
+            } else |_| {
+                try out.append(alloc, value[i]);
+                i += 1;
+            }
+        } else {
+            try out.append(alloc, value[i]);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn formValue(alloc: Allocator, body_text: []const u8, key: []const u8) !?[]u8 {
+    var it = std.mem.splitScalar(u8, body_text, '&');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], key)) {
+            return try urlDecodeFormComponent(alloc, kv[eq + 1 ..]);
+        }
+    }
+    return null;
+}
+
+/// GET /api/tasks — TaskQueue 快照 (P9: UI 评分 + 审计)
+fn handleGetTasks(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, "{\"tasks\":[");
+    for (app.task_queue.tasks.items, 0..) |t, i| {
+        if (i > 0) try body.append(alloc, ',');
+        try body.print(alloc, "{{\"id\":{d},\"title\":\"", .{t.id});
+        try appendJsonString(alloc, &body, t.title);
+        try body.print(alloc, "\",\"status\":\"{s}\",\"from_human\":\"", .{@tagName(t.status)});
+        try appendJsonString(alloc, &body, t.from_human);
+        try body.append(alloc, '"');
+        try body.print(alloc, ",\"priority\":{d},\"required_dimension\":\"{s}\",\"source\":\"{s}\"", .{ t.priority, @tagName(t.required_dimension), @tagName(t.source) });
+        if (t.result) |r| {
+            try body.print(alloc, ",\"actual_delta_e\":{d:.6}", .{r.actual_delta_e});
+        }
+        if (t.feedback) |f| {
+            try body.print(alloc, ",\"feedback_score\":{d},\"feedback_delta_e\":{d:.3}", .{ f.score, f.delta_e });
+        }
+        try body.append(alloc, '}');
+    }
+    try body.appendSlice(alloc, "],\"pending\":");
+    try body.print(alloc, "{d},\"completed\":{d}}}", .{ app.task_queue.pending_count, app.task_queue.completed_count });
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/tasks — 人类显式投递任务 (P14: source=human)
+fn handlePostTask(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
+    const title_owned = (try formValue(alloc, body_text, "title")) orelse {
+        const err_body = "{\"error\":\"missing title\"}";
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    defer alloc.free(title_owned);
+    const desc_owned = try formValue(alloc, body_text, "description");
+    defer if (desc_owned) |v| alloc.free(v);
+    const from_owned = try formValue(alloc, body_text, "from_human");
+    defer if (from_owned) |v| alloc.free(v);
+    const dim_owned = try formValue(alloc, body_text, "required_dimension");
+    defer if (dim_owned) |v| alloc.free(v);
+    const priority_owned = try formValue(alloc, body_text, "priority");
+    defer if (priority_owned) |v| alloc.free(v);
+    const cycles_owned = try formValue(alloc, body_text, "cycles_allocated");
+    defer if (cycles_owned) |v| alloc.free(v);
+
+    if (title_owned.len == 0) {
+        const err_body = "{\"error\":\"missing title\"}";
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+
+    const from_human = if (from_owned) |v| if (v.len > 0) v else "human" else "human";
+    const description = if (desc_owned) |v| if (v.len > 0) v else title_owned else title_owned;
+    const priority: u8 = if (priority_owned) |v| @intCast(std.fmt.parseInt(u16, v, 10) catch 7) else 7;
+    const cycles: u32 = if (cycles_owned) |v| @intCast(std.fmt.parseInt(u32, v, 10) catch 4) else 4;
+    const dim = ghw_harness.human_symbiosis.task_queue.parseDimensionPublic(
+        if (dim_owned) |v| if (v.len > 0) v else "all" else "all",
+    );
+    try app.human_gsp.register(from_human);
+
+    const task_id = app.task_queue.submitWithSource(
+        title_owned,
+        description,
+        from_human,
+        priority,
+        dim,
+        cycles,
+        .human,
+    ) catch |err| {
+        const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(err_body);
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    saveState(app) catch {};
+
+    const ok_body = try std.fmt.allocPrint(alloc, "{{\"task_id\":{d},\"pending\":{d},\"source\":\"human\"}}", .{
+        task_id, app.task_queue.pending_count,
+    });
+    defer alloc.free(ok_body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", ok_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/task/feedback — 人类显式评分 (覆盖启发式反馈)
+fn handlePostTaskFeedback(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
+    const task_id_owned = try formValue(alloc, body_text, "task_id");
+    defer if (task_id_owned) |v| alloc.free(v);
+    const score_owned = try formValue(alloc, body_text, "score");
+    defer if (score_owned) |v| alloc.free(v);
+    const comment_owned = try formValue(alloc, body_text, "comment");
+    defer if (comment_owned) |v| alloc.free(v);
+
+    const task_id: u64 = if (task_id_owned) |v| std.fmt.parseInt(u64, v, 10) catch 0 else 0;
+    const score: i8 = if (score_owned) |v| @intCast(std.fmt.parseInt(i16, v, 10) catch 0) else 0;
+    if (task_id == 0) {
+        const err_body = "{\"error\":\"missing task_id\"}";
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+    const t = app.task_queue.find(task_id) orelse {
+        const err_body = "{\"error\":\"task not found\"}";
+        const resp = try makeHttpResponse(alloc, 404, "Not Found", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    const ts: u64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    const ctx = ghw_harness.task_feedback.Context{
+        .queue = &app.task_queue,
+        .gsp = &app.human_gsp,
+        .signal = &app.human_signal,
+    };
+    const de = ghw_harness.task_feedback.applyFeedback(&ctx, t, score, comment_owned orelse "", ts) catch |err| {
+        const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(err_body);
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    saveState(app) catch {};
+    var resp_body: std.ArrayList(u8) = .empty;
+    defer resp_body.deinit(alloc);
+    try resp_body.print(alloc, "{{\"ok\":true,\"task_id\":{d},\"score\":{d},\"human_delta_e\":{d:.3}}}", .{ task_id, score, de });
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", resp_body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
 /// 手动触发 LLM 提议目标 (看世界快照, 提议 1-3 个新目标)
 fn handleGetPropose(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
     if (app.goal_proposer) |*gp| {
@@ -3637,7 +4050,8 @@ fn handleGetPropose(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app:
             return;
         };
         defer world_snap.deinit();
-        var result = gp.propose(&app.world, world_snap, &app.agent, app.io) catch |err| {
+        app.propose_total += 1;
+        var result = gp.proposeAndAdopt(&app.world, world_snap, &app.agent, &app.task_queue, app.io) catch |err| {
             const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"propose failed: {t}\"}}", .{err});
             defer alloc.free(err_body);
             const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
@@ -3646,27 +4060,9 @@ fn handleGetPropose(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app:
             return;
         };
         defer result.deinit();
-        // 释放旧的, 存新的
-        for (app.proposed_goals.items) |old| {
-            app.alloc.free(old.title);
-            app.alloc.free(old.description);
-            app.alloc.free(old.dimension);
-            app.alloc.free(old.reason);
-        }
-        app.proposed_goals.clearRetainingCapacity();
-        for (result.goals) |g| {
-            try app.proposed_goals.append(app.alloc, .{
-                .title = try app.alloc.dupe(u8, g.title),
-                .description = try app.alloc.dupe(u8, g.description),
-                .dimension = try app.alloc.dupe(u8, g.dimension),
-                .reason = try app.alloc.dupe(u8, g.reason),
-                .urgency = g.urgency,
-            });
-        }
-        if (app.last_propose_raw) |raw| app.alloc.free(raw);
-        app.last_propose_raw = try app.alloc.dupe(u8, result.raw_response);
-        app.propose_total += 1;
         gp.last_propose_at_tick = app.agent.tick;
+        try storeProposeResult(app, &result);
+        std.debug.print("[ui] 手动 propose: {d} goals → TaskQueue pending={d}\n", .{ result.goals.len, app.task_queue.pending_count });
     }
     const body =
         \\{"ok":true,"action":"propose","goals_count":
@@ -3682,36 +4078,9 @@ fn handleGetPropose(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app:
 }
 
 fn handlePostChat(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
-    // 解析 form-urlencoded: text=...
-    var text_buf: std.ArrayList(u8) = .empty;
-    defer text_buf.deinit(alloc);
-    var it = std.mem.splitScalar(u8, body_text, '&');
-    while (it.next()) |kv| {
-        if (std.mem.startsWith(u8, kv, "text=")) {
-            const v = kv["text=".len..];
-            // URL decode: + -> space, %XX -> char
-            var i: usize = 0;
-            while (i < v.len) {
-                if (v[i] == '+') {
-                    try text_buf.append(alloc, ' ');
-                    i += 1;
-                } else if (v[i] == '%' and i + 2 < v.len) {
-                    const hex = v[i + 1 .. i + 3];
-                    if (std.fmt.parseInt(u8, hex, 16)) |c| {
-                        try text_buf.append(alloc, c);
-                    } else |_| {
-                        try text_buf.append(alloc, v[i]);
-                    }
-                    i += 3;
-                } else {
-                    try text_buf.append(alloc, v[i]);
-                    i += 1;
-                }
-            }
-            break;
-        }
-    }
-    const user_text = text_buf.items;
+    const user_text_owned = try formValue(alloc, body_text, "text");
+    defer if (user_text_owned) |v| alloc.free(v);
+    const user_text = user_text_owned orelse "";
     if (user_text.len == 0) {
         const err_body = "bad request: empty text";
         const resp = try makeHttpResponse(alloc, 400, "Bad Request", "text/plain", err_body);
@@ -3920,6 +4289,8 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetCapabilities(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/evolved")) {
                 try handleGetEvolved(alloc, &stream, io, app, req.path["/api/evolved".len..]);
+            } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
+                try handleGetTasks(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/propose")) {
                 try handleGetPropose(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/memory/search")) {
@@ -3941,6 +4312,10 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
         } else if (std.mem.eql(u8, req.method, "POST")) {
             if (std.mem.eql(u8, req.path, "/api/chat")) {
                 try handlePostChat(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/task/feedback")) {
+                try handlePostTaskFeedback(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
+                try handlePostTask(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/action/run-now")) {
                 try handlePostActionRun(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/peer/query")) {
@@ -4024,6 +4399,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .llm_chat = null,
         .llm_model = args.llm_model,
         .memory = Memory.init(alloc, args.seed),
+        .task_queue = TaskQueue.init(alloc),
+        .human_gsp = HumanGSP.init(alloc),
+        .human_signal = HumanSignal.init(alloc),
         .reflection = null,
         .personality = Personality.init(alloc),
         .state_path = args.state,
@@ -4031,6 +4409,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .port = args.port,
     };
     app.agent = try GHWAgent.init(alloc, args.agent_id, 4, .{ 3, 3, 3 }, args.seed);
+    app.agent.bindTaskQueue(&app.task_queue);
+    app.agent.bindMemory(&app.memory, io);
+    try app.human_gsp.register("human");
+    try app.human_gsp.register("llm_proposer");
+    try app.human_gsp.register("system");
 
     // === GHW Link: 必须在 ActionRunner 之前 (ActionRunner 需要 &app.link) ===
     // 注意: 不能 defer 释放 link_path — thread 启动后 defer 会先于 thread 跑,
@@ -4079,6 +4462,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     {
         app.static_codegen = ghw.harness.code_generator.StaticCodeGenerator.init(alloc);
         app.self_evolver = ghw.harness.SelfEvolver.init(alloc, app.static_codegen.?.asGenerator());
+        app.self_evolver.?.setMemory(&app.memory);
         // 编译验证器 (L4 真编译的关键 — bind 后, evolver 内部会 spawn zig build-exe)
         app.verifier = ghw.harness.compile_verifier.CompileVerifier.initWithIo(alloc, io);
         // 修 verifier 的 temp_dir bug (默认 ".ghw_verify" 被当成 file, 改成真目录)
@@ -4104,6 +4488,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         app.self_encoder.?.loadBuiltInRules() catch |err| {
             std.debug.print("[ui] SelfEncoder 加载内置规则失败: {t}\n", .{err});
         };
+        app.agent.bindRuleLib(&app.self_encoder.?);
         std.debug.print("[ui] L1-L5 自演化启用 (StaticCodeGenerator + SelfEvolver + SelfEncoder + CompileVerifier)\n", .{});
         std.debug.print("[ui] L4 落盘目录: {s}  临时编译: /tmp/ghw_verify/  zig={s}\n", .{ app.evolved_dir, app.verifier.?.zig_path });
     }
@@ -4201,6 +4586,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer app.sys_collector.deinit();
     defer app.world.deinit();
     defer app.memory.deinit();
+    defer app.task_queue.deinit();
+    defer app.human_gsp.deinit();
+    defer app.human_signal.deinit();
     defer app.personality.deinit();
     // 停 link server: 不能用 defer (runServer 不返回时 defer 永远不跑; runServer 返 error
     // 时 defer join 又会卡住 — link thread 在 accept 阻塞, 没看到 stop flag).
@@ -4239,16 +4627,28 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 app.llm_chat = mock.asChat();
             }
             if (app.llm != null) {
-                 app.llm_chat = app.llm.?.asChat();
+                app.llm_chat = app.llm.?.asChat();
+            }
+            if (app.llm_chat != null) {
                  std.debug.print("[ui] LLM 接入: {s} model={s}\n", .{ args.llm_provider, args.llm_model });
+                 app.evolution_guard = ghw.harness.SelfEvolutionGuard.init(alloc);
+                 app.rule_proposer = ghw.harness.rule_proposer.RuleProposer.init(alloc, app.llm_chat.?);
+                 app.rule_proposer.?.setMemory(&app.memory);
+                 std.debug.print("[ui] RuleProposer 启用: E/KPI/value 下滑时提议规则 (Guard+SelfEncoder)\n", .{});
                  // 接入 Reflection (每 32 cycle 写自我叙事 + 信念)
                  app.reflection = Reflection.init(alloc, &app.llm_chat.?, args.llm_model);
                  // 接入 GoalProposer (每 64 cycle 让 LLM 看世界快照, 提议新目标)
                  app.goal_proposer = ghw.harness.goal_proposer.LLMGoalProposer.init(alloc, &app.llm_chat.?, args.llm_model);
-                 std.debug.print("[ui] LLM 提议器启用: 每 64 cycle 让 LLM 提议新目标\n", .{});
+                 app.goal_proposer.?.setMemory(&app.memory);
+                 std.debug.print("[ui] LLM 提议器启用: 每 64 cycle 让 LLM 提议新目标 (含自传体记忆)\n", .{});
                  // 接入 TemplateEnhancer: 基于自我叙事 + 期望 完善 L1-L5 落盘模板
                  app.template_enhancer = ghw.harness.TemplateEnhancer.init(alloc, io, &app.llm_chat.?, args.llm_model);
-                 std.debug.print("[ui] TemplateEnhancer 启用: 每 64 cycle 选 1 个最新模板让 LLM 完善\n", .{});
+                 app.template_enhancer.?.setMemory(&app.memory);
+                 std.debug.print("[ui] TemplateEnhancer 启用: 每 64 cycle 选 1 个最新模板让 LLM 完善 (含自传体记忆)\n", .{});
+                 // P4: LLM CodeGenerator 后端 (SelfEvolver L3/L4 代码由 LLM 提议, Guard+Verifier 守门)
+                 app.llm_codegen = ghw.harness.LlmCodeGenerator.init(alloc, &app.llm_chat.?, args.llm_model);
+                 if (app.self_evolver) |*se| se.setGenerator(app.llm_codegen.?.asGenerator());
+                 std.debug.print("[ui] LlmCodeGenerator 启用: SelfEvolver 使用 LLM 生成 L3/L4 代码\n", .{});
              }
         } else {
             std.debug.print("[ui] --llm {s} 但 env {s} 未设置, 降级到模板回复\n", .{ args.llm_provider, args.llm_api_key_env });
@@ -4309,6 +4709,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 parsed.l1_count, parsed.l2_count, parsed.l3_count, parsed.l3_approved,
                 parsed.l4_count, parsed.l4_approved, parsed.l5_count,
             });
+            if (app.memory.loadFromJson(io, json)) |loaded| {
+                if (loaded) std.debug.print("[ui] memory 恢复: episodes={d} beliefs={d} narrative_len={d}\n", .{
+                    app.memory.episodes.items.len,
+                    app.memory.beliefs.items.len,
+                    app.memory.self_narrative.len,
+                });
+            } else |err| {
+                std.debug.print("[ui] memory loadFromJson 失败: {t}\n", .{err});
+            }
+            if (app.task_queue.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[ui] TaskQueue 恢复: pending={d} tasks={d}\n", .{
+                    app.task_queue.pending_count, app.task_queue.tasks.items.len,
+                });
+            } else |err| {
+                std.debug.print("[ui] task_queue loadFromJson 失败: {t}\n", .{err});
+            }
+            if (app.human_gsp.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[ui] HumanGSP 恢复: peers={d}\n", .{app.human_gsp.peers.count()});
+            } else |err| {
+                std.debug.print("[ui] human_gsp loadFromJson 失败: {t}\n", .{err});
+            }
+            if (app.human_signal.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[ui] HumanSignal 恢复: feedbacks={d}\n", .{app.human_signal.total_count});
+            } else |err| {
+                std.debug.print("[ui] human_signal loadFromJson 失败: {t}\n", .{err});
+            }
+            if (app.value_tracker.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[ui] ValueTrendTracker 恢复: count={d} last={d:.3}\n", .{
+                    app.value_tracker.count, app.value_tracker.last_score,
+                });
+            } else |err| {
+                std.debug.print("[ui] value_tracker loadFromJson 失败: {t}\n", .{err});
+            }
         } else |_| {}
     } else |_| {}
 

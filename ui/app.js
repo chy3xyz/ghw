@@ -23,6 +23,7 @@ function ghwApp() {
       { id: 'capabilities', label: '能力地图',   icon: '🗺️' },
       { id: 'evolved',      label: '落盘代码',   icon: '📝' },
       { id: 'goals',        label: '提议目标',   icon: '🎯' },
+      { id: 'tasks',        label: '任务队列',   icon: '📋' },
       { id: 'actions',      label: '动作历史',   icon: '⚡' },
       { id: 'reflect',      label: '自省/记忆',  icon: '🪞' },
       { id: 'memory',       label: '记忆搜索',   icon: '🔍' },
@@ -60,6 +61,13 @@ function ghwApp() {
     actions: [],
     actionRunning: false,
 
+    // P9: TaskQueue + 人类反馈
+    tasks: { tasks: [], pending: 0, completed: 0 },
+    taskFeedbackBusy: false,
+    taskSubmitBusy: false,
+    newTask: { title: '', description: '', dimension: 'all' },
+    taskSourceFilter: 'all',
+
     // 同伴 (GHW Link)
     peers: { self: null, peers: [] },
     newPeerPath: '',
@@ -69,7 +77,8 @@ function ghwApp() {
     get metrics() {
       if (!this.state) return [];
       const s = this.state;
-      return [
+      const hs = s.provenance?.human_symbiosis;
+      const rows = [
         { label: 'Tick',         value: this.formatNum(s.tick),       hint: '已跑周期数',           color: 'text-ghw-text' },
         { label: 'E (存在度)',   value: s.E.toFixed(3),               hint: this.eHint(),            color: this.eColor() },
         { label: 'α·M 物质贡献', value: (s.alpha * s.M).toFixed(3),  hint: `α=${s.alpha.toFixed(2)}`, color: 'text-blue-400' },
@@ -77,6 +86,13 @@ function ghwApp() {
         { label: 'γ·N 本心贡献', value: (s.gamma * s.N).toFixed(3),  hint: `γ=${s.gamma.toFixed(2)}`, color: 'text-amber-400' },
         { label: 'ΔE 累计',      value: (s.E - 0.5).toFixed(3),      hint: 'vs 初始 0.5',            color: 'text-ghw-warm' },
       ];
+      if (hs) {
+        rows.push(
+          { label: '人类价值', value: (hs.value_score ?? 0).toFixed(3), hint: 'ValueMetric 综合分', color: 'text-cyan-300' },
+          { label: '价值趋势', value: (hs.value_trend ?? 0).toFixed(4), hint: this.valueTrendHint(hs.value_trend), color: this.valueTrendColor(hs.value_trend) },
+        );
+      }
+      return rows;
     },
 
     // ===== 颜色 / 文本辅助 =====
@@ -101,6 +117,24 @@ function ghwApp() {
       if (!this.state) return 'text-ghw-text';
       const l = this.state.system.load_1m;
       return l > 8 ? 'text-ghw-bad' : l > 4 ? 'text-ghw-warm' : 'text-ghw-good';
+    },
+    valueTrendColor(trend) {
+      if (trend == null) return 'text-ghw-dim';
+      if (trend < -0.003) return 'text-ghw-bad';
+      if (trend > 0.003) return 'text-ghw-good';
+      return 'text-ghw-warm';
+    },
+    valueTrendHint(trend) {
+      if (trend == null) return '缓冲未满';
+      if (trend < -0.003) return '人类价值下滑 → 加速补救';
+      if (trend > 0.003) return '人类价值上升';
+      return '平稳';
+    },
+    trustLevelColor(level) {
+      if (level === 'high') return 'text-ghw-good';
+      if (level === 'medium') return 'text-ghw-warm';
+      if (level === 'low') return 'text-orange-400';
+      return 'text-ghw-bad';
     },
 
     // ===== 自省/人格 辅助 =====
@@ -130,6 +164,46 @@ function ghwApp() {
       if (source === 'representation') return 'bg-fuchsia-500/20 text-fuchsia-300';
       if (source === 'material') return 'bg-blue-500/20 text-blue-300';
       return 'bg-slate-500/20 text-ghw-dim';
+    },
+    taskSourceLabel(source) {
+      const m = {
+        chat_forced: '@task',
+        chat_heuristic: 'chat',
+        llm_proposer: 'llm',
+        balance: 'balance',
+        human: 'human',
+        unknown: '—',
+      };
+      return m[source] || source || '—';
+    },
+    taskSourceClass(source) {
+      if (source === 'chat_forced') return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+      if (source === 'chat_heuristic') return 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30';
+      if (source === 'llm_proposer') return 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/30';
+      if (source === 'balance') return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+      if (source === 'human') return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
+      return 'bg-slate-700 text-ghw-dim border-slate-600';
+    },
+    taskSourceFilters() {
+      return [
+        { id: 'all', label: '全部' },
+        { id: 'chat_forced', label: '@task' },
+        { id: 'chat_heuristic', label: 'chat' },
+        { id: 'human', label: 'human' },
+        { id: 'llm_proposer', label: 'llm' },
+        { id: 'balance', label: 'balance' },
+        { id: 'unknown', label: '—' },
+      ];
+    },
+    filteredTasks() {
+      const list = this.tasks.tasks || [];
+      if (this.taskSourceFilter === 'all') return list;
+      return list.filter((t) => (t.source || 'unknown') === this.taskSourceFilter);
+    },
+    taskSourceCount(sourceId) {
+      const list = this.tasks.tasks || [];
+      if (sourceId === 'all') return list.length;
+      return list.filter((t) => (t.source || 'unknown') === sourceId).length;
     },
     goalDimensionClass(dim) {
       if (dim === 'nature') return 'bg-amber-500/20 text-amber-300';
@@ -169,6 +243,56 @@ function ghwApp() {
         this.memoryResults = await r.json();
       } catch (e) {
         this.error = String(e);
+      }
+    },
+    async refreshTasks() {
+      try {
+        const r = await fetch('/api/tasks');
+        if (!r.ok) return;
+        this.tasks = await r.json();
+      } catch (e) {
+        // 静默
+      }
+    },
+    async submitTaskFeedback(taskId, score) {
+      if (this.taskFeedbackBusy) return;
+      this.taskFeedbackBusy = true;
+      try {
+        const body = `task_id=${taskId}&score=${score}`;
+        const r = await fetch('/api/task/feedback', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+        if (!r.ok) throw new Error('feedback failed: ' + r.status);
+        await this.refreshTasks();
+        await this.refreshState();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.taskFeedbackBusy = false;
+      }
+    },
+    async submitHumanTask() {
+      if (this.taskSubmitBusy || !this.newTask.title) return;
+      this.taskSubmitBusy = true;
+      try {
+        const params = new URLSearchParams({
+          title: this.newTask.title,
+          description: this.newTask.description || this.newTask.title,
+          required_dimension: this.newTask.dimension || 'all',
+          from_human: 'human',
+          priority: '8',
+        });
+        const r = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+        if (!r.ok) throw new Error('submit task failed: ' + r.status);
+        this.newTask = { title: '', description: '', dimension: 'all' };
+        await this.refreshTasks();
+        await this.refreshState();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.taskSubmitBusy = false;
       }
     },
     async refreshActions() {
@@ -321,6 +445,7 @@ function ghwApp() {
       await this.refreshState();
       await this.refreshLog();
       await this.refreshActions();
+      await this.refreshTasks();
       await this.refreshPeers();
       await this.refreshCapabilities();
       await this.refreshEvolved();
@@ -329,6 +454,7 @@ function ghwApp() {
         await this.refreshState();
         if (this.tab === 'log') await this.refreshLog();
         if (this.tab === 'actions') await this.refreshActions();
+        if (this.tab === 'tasks') await this.refreshTasks();
         if (this.tab === 'capabilities') await this.refreshCapabilities();
         if (this.tab === 'evolved') await this.refreshEvolved();
         // status tab 显示同伴 — 每次轮询都更新 (轻量)

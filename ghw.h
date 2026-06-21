@@ -30,6 +30,10 @@ typedef struct GhW GhW;
 /* Version */
 const char* ghw_version(void);
 
+/* Last error description (static string; do NOT free). "" when no error.
+ * Lets callers distinguish causes behind a -1/NULL return. */
+const char* ghw_last_error(GhW* g);
+
 /* ============ Lifecycle ============ */
 GhW* ghw_init(const char* agent_id, uint64_t seed);
 void ghw_deinit(GhW* g);
@@ -82,6 +86,65 @@ int ghw_propose(GhW* g);
 /* LLM reflect: writes self_narrative based on recent state.
  * Returns: 0 on ok, -1 on error. */
 int ghw_reflect(GhW* g);
+
+/* ============ KPI bridge (ρ·K term into Existence Degree) ============ */
+/* Configure the KPI bridge. MUST be called once before ghw_kpi_feed.
+ *   refresh_interval_hours: min hours between two writes into E (anti-flicker;
+ *                           0 defaults to 24). Product may feed faster; the
+ *                           bridge rate-limits actual writes.
+ *   north_star_is_revenue:  != 0 gives the revenue axis a 1.5x weight.
+ *   w_user_sat/w_retention/w_revenue/w_safety: composite value weights.
+ * Returns 0 on ok, -1 on error. */
+int ghw_kpi_configure(GhW* g, uint32_t refresh_interval_hours,
+                      int32_t north_star_is_revenue,
+                      float w_user_sat, float w_retention,
+                      float w_revenue, float w_safety);
+
+/* Feed the latest raw CRM KPIs (may be called at high frequency).
+ *   csat:          real customer-satisfaction score in [0,1]; pass NAN for "no source"
+ *                  (falls back to the active-sales proxy).
+ *   incident_rate: normalized incident severity in [0,1] (0 = none); pass NAN for
+ *                  "no source" (the safety axis then contributes 0).
+ *   now_unix:      caller-supplied current unix seconds (Zig 0.17 has no builtin clock).
+ * Returns 1 if E was updated this call, 0 if rate-limited, -1 if not configured. */
+int ghw_kpi_feed(GhW* g, float nrr_quarterly, float deal_win_rate,
+                 float sales_cycle_days_p50, float weekly_active_sales_pct,
+                 float csat, float incident_rate,
+                 int64_t now_unix);
+
+/* Current composite KPI K in [0,1] (diagnostic, does not write E).
+ * Returns -1 if not configured or no valid feed yet. */
+double ghw_kpi_composite(GhW* g);
+
+/* ============ Product evolution runtime ============ */
+/* Load ProductIntent JSON and initialize the product evolution runtime.
+ * Returns 0 on ok, -1 on error. */
+int ghw_product_intent_load(GhW* g, const char* path);
+
+/* Feed CRM KPI through ProductEvolutionRuntime. This writes into E via KpiBridge
+ * and appends a kpi_refreshed audit entry when the rate limiter allows it.
+ * Returns 1 if E was updated, 0 if rate-limited, -1 on error. */
+int ghw_product_kpi_feed(GhW* g, float nrr_quarterly, float deal_win_rate,
+                         float sales_cycle_days_p50, float weekly_active_sales_pct,
+                         float csat, float incident_rate,
+                         int64_t now_unix);
+
+/* Submit the canonical CRM proposal: follow-up cadence 7d -> 5d.
+ * Returns change_id (>0) or -1 on error. */
+int64_t ghw_product_propose_crm_followup(GhW* g, const char* tenant_id,
+                                         uint32_t affected_users,
+                                         float expected_delta_k,
+                                         uint64_t now_unix);
+
+/* Consent/apply/rollback gates for product changes. Return 0 on ok, -1 on error. */
+int ghw_product_approve_change(GhW* g, uint64_t change_id,
+                               const char* approver, const char* note,
+                               uint64_t now_unix);
+int ghw_product_apply_change(GhW* g, uint64_t change_id, uint64_t now_unix);
+int ghw_product_rollback_change(GhW* g, uint64_t change_id, uint64_t now_unix);
+
+/* Product evolution audit log JSON. Caller frees with ghw_free_string. */
+char* ghw_product_audit_json(GhW* g);
 
 #ifdef __cplusplus
 }

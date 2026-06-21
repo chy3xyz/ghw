@@ -112,6 +112,7 @@ pub const SqliteDb = sandbox.sqlite_db.SqliteDb;
 // 引用所有子模块以便它们的测试被发现
 comptime {
     _ = world;
+    _ = world.coappropriation;
     _ = goal;
     _ = harness;
     _ = agent;
@@ -126,7 +127,10 @@ comptime {
     _ = harness.human_symbiosis.human_signal;
     _ = harness.human_symbiosis.task_queue;
     _ = harness.human_symbiosis.human_gsp;
+    _ = harness.human_symbiosis.human_signal;
+    _ = harness.task_feedback;
     _ = harness.human_symbiosis.value_metric;
+    _ = harness.human_symbiosis.chat_task;
     _ = harness.translator;
     _ = harness.balance_seeker;
     _ = harness.wechat;
@@ -142,6 +146,10 @@ comptime {
     _ = harness.self_encoder;
     _ = harness.rule_proposer;
     _ = harness.world_collector;
+    _ = harness.crm_kpi;
+    _ = harness.product_intent;
+    _ = harness.kpi_bridge;
+    _ = harness.product_runtime;
 }
 
 // 注意: test {} 块在每个子模块自身内部,这样可以保持测试代码本地化

@@ -117,6 +117,8 @@ pub const SelfMigration = struct {
     serializer: StateSerializer,
     /// 安全守护
     guard: SelfEvolutionGuard,
+    /// spawnSelfNewVersion 后保存子进程句柄, 供 waitNewProcess 回收 (防僵尸进程)
+    pending_child: ?std.process.Child = null,
 
     pub fn init(allocator: Allocator) SelfMigration {
         return .{
@@ -142,6 +144,11 @@ pub const SelfMigration = struct {
     }
 
     pub fn deinit(self: *SelfMigration) void {
+        // 回收未 wait 的子进程, 防僵尸
+        if (self.pending_child) |*c| {
+            _ = c.wait(self.serializer.io) catch {};
+            self.pending_child = null;
+        }
         self.guard.deinit();
     }
 
@@ -230,19 +237,13 @@ pub const SelfMigration = struct {
         result.final_step = .serializing;
         _ = try self.serializer.writeToFile(snapshot, self.config.state_file);
 
-        // Step 6: 编译新二进制 (用 GHW 主项目编译一个新版本)
+        // Step 6: 进程交接。
+        // migrate() 只负责"准备好可交接的新版本"(代码已写盘 + 状态已序列化 + 编译已验证),
+        // **不**在此自动 spawn —— 自动替换自身进程是不可逆操作, 必须由部署方显式调
+        // `spawnSelfNewVersion(state_file, self_binary_path)` 触发 (该函数真实 spawn + 可 wait)。
+        // 这样单测 / 库使用者不会在 migrate() 里意外 fork 出新进程。
         result.final_step = .spawning;
-        // 在真实场景下, 这里应该:
-        //   1. 把新代码作为新 main.zig 的一部分
-        //   2. 调 zig build 生成新二进制
-        //   3. spawn 新二进制
-        // 但作为演示, 我们记录"假如成功"的状态
-        // 真正 spawn 需要:
-        //   - 新二进制路径
-        //   - state.json 路径作为参数
-        //   - 父进程 PID 作为参数
-        //   - 新二进制启动后写 .ghw_next/ready 信号
-        result.new_pid = null; // 演示中不实际 spawn
+        result.new_pid = null;
         result.final_step = .done;
         result.success = true;
         self.success_count += 1;
@@ -250,18 +251,26 @@ pub const SelfMigration = struct {
         return result;
     }
 
-    /// 写新代码到 next_dir (Zig 0.17 简化: 留接口)
+    /// 写新代码到 next_dir/main_v2.zig (真实 std.Io 落盘)。
     fn writeNewCode(self: *SelfMigration, code: []const u8) !void {
-        // 实际部署时, 用 std.Io.Dir 或 @import("builtin") + syscall
-        // 这里用 stub, 留 trace 表明已计划写文件
-        std.debug.print("[SelfMigration] would write {d} bytes to {s}/main_v2.zig\n", .{
-            code.len, self.config.next_dir,
-        });
+        const io = self.serializer.io;
+        // 幂等创建 next_dir (含多级路径); 已存在不报错
+        std.Io.Dir.cwd().createDirPath(io, self.config.next_dir) catch {};
+        const main_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.config.next_dir, "main_v2.zig" });
+        defer self.allocator.free(main_path);
+        const f = try std.Io.Dir.createFileAbsolute(io, main_path, .{});
+        defer f.close(io);
+        try std.Io.File.writeStreamingAll(f, io, code);
     }
 
-    /// 回滚
+    /// 回滚: 删除 next_dir 下已写出的新代码与状态文件 (真实落盘删除)。
     pub fn rollback(self: *SelfMigration) void {
-        std.debug.print("[SelfMigration] would rollback {s}\n", .{self.config.next_dir});
+        const io = self.serializer.io;
+        if (std.fs.path.join(self.allocator, &[_][]const u8{ self.config.next_dir, "main_v2.zig" })) |main_path| {
+            defer self.allocator.free(main_path);
+            std.Io.Dir.deleteFileAbsolute(io, main_path) catch {};
+        } else |_| {}
+        std.Io.Dir.deleteFileAbsolute(io, self.config.state_file) catch {};
     }
 
     /// 双进程协议: 老进程 spawn 自身新版本, 传 --migrate-from 参数
@@ -305,24 +314,23 @@ pub const SelfMigration = struct {
             return -1;
         };
 
-        // 提取 PID (POSIX)
-        const pid: i32 = switch (child.id.?) {
-            .exited => -1, // 已退出, 拿不到
-            .signal => -1,
-            else => |id| switch (@typeInfo(@TypeOf(id))) {
-                .int => @intCast(id),
-                else => -1,
-            },
-        };
-        return pid;
+        // 保存句柄供 waitNewProcess 回收 (防僵尸)。
+        self.pending_child = child;
+        // POSIX: Child.Id 是 pid_t (整数); 提取 PID。
+        return if (child.id) |id| @intCast(id) else -1;
     }
 
-    /// 等待新进程完成
+    /// 等待之前 spawnSelfNewVersion 拉起的新进程结束, 返回其退出码 (无子进程返回 0)。
     pub fn waitNewProcess(self: *SelfMigration, pid: i32) !u32 {
-        _ = self;
-        if (pid < 0) return 0;
-        // 简化: 我们没保留 child handle, 不能直接 wait
-        // 真实部署需要把 child 存在 SelfMigration 里
+        _ = pid; // PID 仅供调用方记录; 实际句柄存在 self.pending_child
+        if (self.pending_child) |*c| {
+            const term = try c.wait(self.serializer.io);
+            self.pending_child = null;
+            return switch (term) {
+                .exited => |code| @intCast(code),
+                else => 1, // signal/stopped/unknown → 视为非正常退出
+            };
+        }
         return 0;
     }
 
@@ -354,6 +362,9 @@ test "SelfMigration: 完整流程 (成功)" {
     const io = threaded.io();
     var mig = SelfMigration.initWithIo(alloc, io);
     defer mig.deinit();
+    // 用 /tmp 避免在仓库目录产出 .ghw_next 工件
+    mig.config.next_dir = "/tmp/ghw_mig_full_test";
+    mig.config.state_file = "/tmp/ghw_mig_full_test/state.json";
     // 清理
     defer mig.rollback();
 
@@ -422,4 +433,48 @@ test "SelfMigration: 序列化 + 加载" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("roundtrip-test", parsed.agent_id);
     try std.testing.expectEqual(@as(u64, 100), parsed.tick);
+}
+
+test "SelfMigration: writeNewCode 真实落盘 + rollback 删除" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var mig = SelfMigration.initWithIo(alloc, io);
+    defer mig.deinit();
+    // 用 /tmp 避免污染仓库目录
+    mig.config.next_dir = "/tmp/ghw_mig_test_dir";
+    mig.config.state_file = "/tmp/ghw_mig_test_dir/state.json";
+
+    const code = "pub const answer: u32 = 42;\n";
+    try mig.writeNewCode(code);
+
+    // 读回验证内容一致
+    const main_path = try std.fs.path.join(alloc, &[_][]const u8{ mig.config.next_dir, "main_v2.zig" });
+    defer alloc.free(main_path);
+    const back = try mig.serializer.readFromFile(main_path);
+    defer alloc.free(back);
+    try std.testing.expectEqualStrings(code, back);
+
+    // rollback 后文件应被删除
+    mig.rollback();
+    const reopened = std.Io.Dir.openFileAbsolute(io, main_path, .{ .mode = .read_only });
+    try std.testing.expectError(error.FileNotFound, reopened);
+}
+
+test "SelfMigration: spawnSelfNewVersion 真 spawn + waitNewProcess 回收" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var mig = SelfMigration.initWithIo(alloc, io);
+    defer mig.deinit();
+
+    // /usr/bin/true 忽略所有参数并立即退出 0 —— 安全验证真实 spawn/wait 通路
+    const pid = try mig.spawnSelfNewVersion("/tmp/ghw_ignored_state.json", "/usr/bin/true");
+    if (pid <= 0) return; // 环境缺 /usr/bin/true: spawn 已优雅返回 -1, 跳过
+    try std.testing.expect(mig.pending_child != null);
+    const code = try mig.waitNewProcess(pid);
+    try std.testing.expectEqual(@as(u32, 0), code);
+    try std.testing.expect(mig.pending_child == null);
 }

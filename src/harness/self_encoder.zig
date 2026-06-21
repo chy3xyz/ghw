@@ -19,6 +19,7 @@ const F = util.F;
 const FState = @import("../world/core.zig");
 const ExistenceVector = FState.ExistenceVector;
 const ExistenceWeights = FState.ExistenceWeights;
+const guard_mod = @import("self_evolution_guard.zig");
 
 /// 调整类型的顶层枚举 (供 Rule 引用)
 pub const AdjustmentKind = enum {
@@ -342,8 +343,9 @@ pub const SelfEncoder = struct {
         if (std.mem.indexOf(u8, code, "beta") == null) v.passes_invariants = false;
         if (std.mem.indexOf(u8, code, "gamma") == null) v.passes_invariants = false;
         if (std.mem.indexOf(u8, code, "E") == null) v.passes_invariants = false;
-        // 2. 检查是否含黑名单
-        const forbidden = [_][]const u8{ "harm:human", "modify_kernel", "@panic", "unreachable" };
+        // 2. 检查是否含黑名单 (与 SelfEvolutionGuard 共用同一份危险构造 + 伦理红线,
+        //    单一事实源, 避免两套黑名单不一致)
+        const forbidden = guard_mod.DANGEROUS_CONSTRUCTS ++ guard_mod.ETHICAL_REDLINES;
         for (forbidden) |f| {
             if (std.mem.indexOf(u8, code, f) != null) {
                 v.contains_blacklisted = true;

@@ -26,9 +26,14 @@ const TaskQueue = ghw.harness.human_symbiosis.TaskQueue;
 const HumanGSP = ghw.harness.human_symbiosis.HumanGSP;
 const HumanSignal = ghw.harness.human_symbiosis.HumanSignal;
 const ValueMetric = ghw.harness.human_symbiosis.ValueMetric;
+const ValueTrendTracker = ghw.harness.human_symbiosis.ValueTrendTracker;
 const HumanFeedback = ghw.harness.human_symbiosis.HumanFeedback;
 const BalanceSeeker = ghw.harness.balance_seeker.BalanceSeeker;
 const Translator = ghw.harness.translator.Translator;
+const KpiBridge = ghw.harness.KpiBridge;
+const RawKpi = ghw.harness.crm_kpi.RawKpi;
+const ValueWeights = ghw.harness.product_intent.ValueWeights;
+const Memory = ghw.harness.memory.Memory;
 const GHWAgent = ghw.agent.GHWAgent;
 const Information = ghw.goal.Information;
 const F = ghw.util.F;
@@ -41,6 +46,8 @@ const Config = struct {
     cycles: u32 = 8,
     auto_balance_every: u32 = 4,
     rule_propose_threshold: F = 0.50,
+    /// 演示用: 用一条缓慢爬升的**模拟** KPI 经 KpiBridge 限频驱动 E (非真实 CRM 数据)
+    kpi_demo: bool = false,
 };
 
 fn parseArgs(alloc: Allocator, args: []const []const u8) !Config {
@@ -70,6 +77,8 @@ fn parseArgs(alloc: Allocator, args: []const []const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArg;
             cfg.rule_propose_threshold = try std.fmt.parseFloat(F, args[i]);
+        } else if (std.mem.eql(u8, a, "--kpi-demo")) {
+            cfg.kpi_demo = true;
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             std.debug.print(
                 \\live_loop — 真接 LLM 跑 GHW 数字生命 (L4' + L6 + L7)
@@ -81,6 +90,7 @@ fn parseArgs(alloc: Allocator, args: []const []const u8) !Config {
                 \\  --provider deepseek | anthropic (默认 deepseek)
                 \\  --cycles <N> (默认 8)
                 \\  --threshold <E> (默认 0.50, 跌穿触发 LLM 提议)
+                \\  --kpi-demo (用模拟 KPI 经 KpiBridge 限频驱动 E, 演示 ρ·K)
             , .{});
             std.process.exit(0);
         } else {
@@ -154,9 +164,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var proposer = RuleProposer.init(alloc, llm.asChat());
     defer _ = proposer.proposal_count;
 
+    var memory = Memory.init(alloc, 42);
+    defer memory.deinit();
+
     // ===== 3. L6 组件: TaskQueue + HumanGSP + Signal =====
     var queue = TaskQueue.init(alloc);
     defer queue.deinit();
+    agent.bindTaskQueue(&queue);
+    agent.bindRuleLib(&encoder);
+    proposer.setMemory(&memory);
+    _ = queue.submitWithSource("平衡三源", "优先补齐 nature 短板", "alice", 9, .nature, 4, .human) catch {};
 
     var gsp = HumanGSP.init(alloc);
     defer gsp.deinit();
@@ -172,12 +189,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer signal.deinit();
 
     var vm = ValueMetric{};
+    var value_tracker = ValueTrendTracker{};
     var self_evolve_count: u32 = 0;
     var llm_propose_count: u32 = 0;
     var auto_balance_count: u32 = 0;
+    var memory_record_count: u32 = 0;
 
-    std.debug.print("\n[init] 数字生命 E={d:.3}, 规则库 {d} 条, GSP {d} humans\n", .{
-        agent.ed.e(), encoder.rules.items.len, gsp.peers.count(),
+    std.debug.print("\n[init] 数字生命 E={d:.3}, bindRuleLib+memory 已接线, GSP {d} humans\n", .{
+        agent.ed.e(), gsp.peers.count(),
     });
     std.debug.print("[init] Trust 分布: alice={d:.2} bob={d:.2} carol={d:.2}\n", .{
         gsp.peers.get("alice").?.trust,
@@ -186,6 +205,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     });
 
     // ===== 4. 主循环 =====
+    // KPI 演示桥 (模拟数据): 1h 限频, 模拟时钟每 cycle 走 30min ⇒ 约每 2 cycle 写一次 E
+    var kpi_bridge: ?KpiBridge = if (cfg.kpi_demo) KpiBridge.init(
+        ValueWeights{ .user_satisfaction = 0.25, .retention = 0.30, .revenue = 0.35, .safety = 0.10, ._raw_buf = &.{} },
+        true,
+        3600,
+    ) else null;
+    var sim_now_unix: i64 = 0;
+    if (cfg.kpi_demo) std.debug.print("[loop] --kpi-demo 开启: 模拟 KPI 缓慢爬升, 经 KpiBridge 限频驱动 E (非真实 CRM)\n", .{});
+
     std.debug.print("\n[loop] 开始 {d} 个 cycle, E 阈值 {d:.2}\n", .{ cfg.cycles, cfg.rule_propose_threshold });
     var tick: u64 = 0;
     while (tick < cfg.cycles) : (tick += 1) {
@@ -199,9 +227,47 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         if (report.self_evolved) self_evolve_count += 1;
 
-        // L4': 跌穿 E 阈值 → 调 LLM 提规则
-        if (agent.ed.e() < cfg.rule_propose_threshold) {
-            proposer.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "explore", "llm-propose", -0.05);
+        {
+            const delta_e = report.e_after - report.e_before;
+            const goal_name = if (report.top_goal) |g| @tagName(g.kind) else "none";
+            const summary = std.fmt.allocPrint(alloc, "cycle {d}: goal={s} E={d:.3} dE={d:.3}", .{
+                tick, goal_name, report.e_after, delta_e,
+            }) catch null;
+            if (summary) |s| {
+                defer alloc.free(s);
+                memory.recordAt(io, .system_event, tick, s, null, 1, delta_e) catch {};
+                memory_record_count += 1;
+            }
+        }
+
+        // KPI 演示: 喂入模拟 KPI (随 cycle 缓慢爬升), 桥按限频写入 E
+        if (kpi_bridge) |*bridge| {
+            sim_now_unix += 1800; // 模拟时钟每 cycle 走 30 分钟
+            const denom: F = @floatFromInt(@max(cfg.cycles - 1, 1));
+            const frac: F = @as(F, @floatFromInt(tick)) / denom; // 0 → 1
+            bridge.feed(.{
+                .nrr_quarterly = 0.90 + 0.28 * frac, // 0.90 → 1.18
+                .deal_win_rate = 0.12 + 0.26 * frac, // 0.12 → 0.38
+                .sales_cycle_days_p50 = 80.0 - 55.0 * frac, // 80 → 25
+                .weekly_active_sales_pct = 0.45 + 0.47 * frac, // 0.45 → 0.92
+            });
+            const e_before = agent.ed.e();
+            if (bridge.maybeRefresh(&agent.ed, sim_now_unix)) {
+                std.debug.print("[tick {d}] KPI(模拟) 写入 E: K={d:.3} E {d:.3}→{d:.3} (刷新#{d})\n", .{
+                    tick, bridge.currentComposite().?, e_before, agent.ed.e(), bridge.refresh_count,
+                });
+            }
+        }
+
+        // L4': E 跌穿阈值 / KPI 下滑 / 人类价值下滑 → 调 LLM 提规则
+        proposer.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "explore", "llm-propose", -0.05);
+        proposer.setKpiTrend(agent.ed.kpiTrend());
+        vm.pullFromSignal(&signal);
+        vm.pullFromQueue(&queue);
+        vm.pullFromGSP(&gsp);
+        value_tracker.record(vm.valueScore());
+        proposer.setValueTrend(value_tracker.trend());
+        if (proposer.shouldPropose(cfg.rule_propose_threshold)) {
             var prop_result = proposer.proposeAndAdopt(&encoder, &guard, 3) catch |err| {
                 std.debug.print("[loop] proposeAndAdopt 失败: {t}\n", .{err});
                 continue;
@@ -211,6 +277,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 tick, prop_result.accepted, prop_result.rejected, proposer.proposal_count,
             });
             llm_propose_count += 1;
+            const prop_summary = std.fmt.allocPrint(alloc, "propose: accepted={d} rejected={d}", .{
+                prop_result.accepted, prop_result.rejected,
+            }) catch null;
+            if (prop_summary) |ps| {
+                defer alloc.free(ps);
+                memory.recordAt(io, .llm_proposal, tick, ps, null, 1, 0) catch {};
+                memory_record_count += 1;
+            }
         }
 
         // L6: 每 K cycle 自动生成 balance 任务, 用 GSP 选最信任的
@@ -219,13 +293,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (gsp.selectMostTrusted(weak)) |trusted| {
                 var balance_task = try BalanceSeeker.proposeBalanceTask(agent.ed, weak, trusted, alloc);
                 defer balance_task.deinit();
-                const task_id = try queue.submit(
+                const task_id = try queue.submitWithSource(
                     balance_task.title,
                     balance_task.description,
                     trusted, // ← L6 关键: 选最信任的人
                     balance_task.priority,
                     balance_task.required_dimension,
                     balance_task.cycles_allocated,
+                    .balance,
                 );
                 std.debug.print("[tick {d}] L6 自动投 balance task #{d} (dim={s}, 给 {s} trust={d:.2})\n", .{
                     tick, task_id, @tagName(weak), trusted, gsp.peers.get(trusted).?.trust,
@@ -276,11 +351,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
         BalanceSeeker.analyze(agent.ed).gap,
         if (BalanceSeeker.analyze(agent.ed).isImbalanced()) "YES" else "NO",
     });
+    if (kpi_bridge) |*bridge| {
+        std.debug.print("  ───────────────────────────\n", .{});
+        std.debug.print("  KPI 桥 (模拟数据):\n", .{});
+        std.debug.print("    写入 E 次数: {d}, 当前 K={d:.3}, kpi_enabled={}\n", .{
+            bridge.refresh_count, bridge.currentComposite() orelse -1, agent.ed.kpi_enabled,
+        });
+    }
     std.debug.print("  ───────────────────────────\n", .{});
     std.debug.print("  触发统计:\n", .{});
     std.debug.print("    LLM 提议调用:    {d} 次\n", .{llm_propose_count});
     std.debug.print("    自动 balance 任务: {d} 次\n", .{auto_balance_count});
     std.debug.print("    自演化触发:      {d} 次\n", .{self_evolve_count});
+    std.debug.print("    value_trend:     {d:.4}\n", .{value_tracker.trend()});
+    std.debug.print("    memory 记录:     {d} 条 episode\n", .{memory_record_count});
     std.debug.print("  ───────────────────────────\n", .{});
     std.debug.print("  Token 总消耗:\n", .{});
     std.debug.print("    prompt={d} completion={d} (LLM 总计)\n", .{

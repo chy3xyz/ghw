@@ -2,7 +2,7 @@
 //! decision and the LLM-driven explanation layer.
 //!
 //! Status: Week 2 of Phase 1 (GHW-as-CRM). Pairs with
-//! src/world/existence_degree.zig and src/harness/llm_driver.zig.
+//! the ρ·K term in src/world/core.zig and src/harness/llm_driver.zig.
 //!
 //! # Why this module exists
 //!

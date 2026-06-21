@@ -1,5 +1,10 @@
 //! Auto-generated registry: @imports all adopted self-evolved files
 //! (数字生命 L3 L4 L5 落盘 + adopt 到 ghw 源码, build 时自动 include)
+//!
+//! 不变量: src/{goal/methods, agent/auto_eps, harness/auto_eps} 下的每个
+//! .zig 文件都**必须**在此 registry 被 @import。未被引用的"孤儿"文件不会
+//! 参与编译,可能悄悄含有无法编译的内容 (历史上发生过)。新增落盘文件时
+//! 务必同步登记;清理时务必删文件而非留孤儿。
 
 const std = @import("std");
 

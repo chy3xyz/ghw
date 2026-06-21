@@ -26,10 +26,10 @@
 const std = @import("std");
 const llm_driver = @import("llm_driver.zig");
 const product_intent = @import("product_intent.zig");
-// Note: existence_degree lives in src/world/, but 0.17's module
-// system doesn't allow `..` in @import. We forward-declare the
-// types we need. If the real EBreakdown struct changes, this
-// must change in lockstep with src/world/existence_degree.zig.
+// Note: the canonical EBreakdown lives in src/world/core.zig
+// (ExistenceDegree.eBreakdown). We forward-declare the fields we
+// need here to avoid a cross-layer import; keep this in lockstep
+// with world/core.zig's EBreakdown.
 
 const EBreakdown = struct {
     base: f32,

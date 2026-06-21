@@ -22,6 +22,7 @@ const Role = @import("llm/llm.zig").Role;
 const world_context = @import("world_context.zig");
 const WorldContext = world_context.WorldContext;
 const WorldSnapshot = world_context.WorldSnapshot;
+const Memory = @import("memory.zig").Memory;
 const ghw = @import("../ghw.zig");
 const GHWAgent = ghw.agent.GHWAgent;
 
@@ -56,6 +57,8 @@ pub const LLMGoalProposer = struct {
     alloc: Allocator,
     llm: *LLMChat,
     model: []const u8,
+    /// 自传体记忆 (P2): 绑定后, 目标提议 prompt 注入 buildContext
+    memory: ?*Memory = null,
     /// 自省间隔 (cycles), 0 = 不自动触发
     auto_every: u64 = 64,
     last_propose_at_tick: u64 = 0,
@@ -66,6 +69,52 @@ pub const LLMGoalProposer = struct {
             .llm = llm,
             .model = model,
         };
+    }
+
+    pub fn setMemory(self: *LLMGoalProposer, memory: *Memory) void {
+        self.memory = memory;
+    }
+
+    /// 构造 user prompt (世界快照 + 自传体记忆 + 提议指令; 可独立测试)。
+    pub fn buildUserPrompt(
+        self: *LLMGoalProposer,
+        context_str: []const u8,
+        agent: *GHWAgent,
+    ) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.alloc);
+
+        if (self.memory) |m| {
+            const query_dim = Memory.weakestDim(
+                agent.ed.v.material,
+                agent.ed.v.representation,
+                agent.ed.v.nature,
+            );
+            const query_text = try std.fmt.allocPrint(self.alloc, "tick {d} E {d:.3}", .{
+                agent.tick, agent.ed.e(),
+            });
+            defer self.alloc.free(query_text);
+            if (m.buildContext(self.alloc, query_dim, query_text, 5, 5)) |ctx| {
+                defer self.alloc.free(ctx);
+                try buf.print(self.alloc, "{s}\n", .{ctx});
+            } else |_| {}
+        }
+
+        try buf.print(self.alloc,
+            \\{s}
+            \\
+            \\基于以上世界快照和你的内部状态, 提议 1-3 个**现在**最值得追求的目标.
+            \\规则:
+            \\- 如果系统空闲 (load<1), 提议自省/进化类目标 (dimension: nature, 提升 R)
+            \\- 如果系统忙 (load>4) 且有进程在烧 CPU, 提议优化该进程 (material)
+            \\- 如果检测到其他 GHW 实例在跑, 提议共生任务 (representation, 跨进程协作)
+            \\- 如果用户最近在改文件, 提议帮忙 (representation, 文件操作)
+            \\- 如果低 E (<0.4), 优先选 material (拿资源, 避免 E 继续掉)
+            \\- 如果高 E (>0.7), 优先选 nature/representation (沉淀, 进化)
+            \\- 输出的每个目标要具体到可执行 (不能是 "变好", 要 "优化 ghw-daemon")
+            \\- 若上方记忆块中有相关信念/往事, 与之衔接, 不要提出与自我认知矛盾的目标
+        , .{context_str});
+        return buf.toOwnedSlice(self.alloc);
     }
 
     /// 主入口: 用 LLM 提议目标
@@ -84,21 +133,9 @@ pub const LLMGoalProposer = struct {
         const context_str = try world_ctx.toLLMContext(snap, ghw_state_str);
         defer self.alloc.free(context_str);
 
-        // 2. 构造 system + user prompt
+        // 2. 构造 system + user prompt (P2: 注入自传体记忆)
         const system_prompt = SYSTEM_PROMPT;
-        const user_prompt = try std.fmt.allocPrint(self.alloc,
-            \\{s}
-            \\
-            \\基于以上世界快照和你的内部状态, 提议 1-3 个**现在**最值得追求的目标.
-            \\规则:
-            \\- 如果系统空闲 (load<1), 提议自省/进化类目标 (dimension: nature, 提升 R)
-            \\- 如果系统忙 (load>4) 且有进程在烧 CPU, 提议优化该进程 (material)
-            \\- 如果检测到其他 GHW 实例在跑, 提议共生任务 (representation, 跨进程协作)
-            \\- 如果用户最近在改文件, 提议帮忙 (representation, 文件操作)
-            \\- 如果低 E (<0.4), 优先选 material (拿资源, 避免 E 继续掉)
-            \\- 如果高 E (>0.7), 优先选 nature/representation (沉淀, 进化)
-            \\- 输出的每个目标要具体到可执行 (不能是 "变好", 要 "优化 ghw-daemon")
-        , .{context_str});
+        const user_prompt = try self.buildUserPrompt(context_str, agent);
         defer self.alloc.free(user_prompt);
 
         // 3. 调 LLM
@@ -140,25 +177,25 @@ pub const LLMGoalProposer = struct {
         io: std.Io,
     ) !ProposeResult {
         const result = try self.propose(world_ctx, snap, agent, io);
-        // 把每个 proposed goal 转成 Task 推进 queue
+        errdefer result.deinit();
+        const propose_threshold: F = 0.5;
         for (result.goals) |g| {
+            if (g.urgency < propose_threshold) continue;
             const dim: ghw.harness.human_symbiosis.Task.Dimension = blk: {
                 if (std.mem.eql(u8, g.dimension, "material")) break :blk .material;
                 if (std.mem.eql(u8, g.dimension, "representation")) break :blk .representation;
                 if (std.mem.eql(u8, g.dimension, "nature")) break :blk .nature;
                 break :blk .all;
             };
-            const task = ghw.harness.human_symbiosis.Task{
-                .id = @intCast(agent.tick +% 1),
-                .title = try self.alloc.dupe(u8, g.title),
-                .description = try std.fmt.allocPrint(self.alloc, "{s}\n\n[LLM 提议, urgency={d:.2}, 理由: {s}]", .{
-                    g.description, g.urgency, g.reason,
-                }),
-                .from_human = try self.alloc.dupe(u8, "llm_proposer"),
-                .required_dimension = dim,
-                .allocator = self.alloc,
+            const priority: u8 = @intCast(@min(10, @max(1, @as(i32, @intFromFloat(g.urgency * 10.0)))));
+            const desc = std.fmt.allocPrint(self.alloc, "{s}\n\n[LLM 提议, urgency={d:.2}, 理由: {s}]", .{
+                g.description, g.urgency, g.reason,
+            }) catch continue;
+            _ = queue.submitWithSource(g.title, desc, "llm_proposer", priority, dim, 4, .llm_proposer) catch {
+                self.alloc.free(desc);
+                continue;
             };
-            _ = queue.submit(task.title, task.description, task.from_human, task.priority, task.required_dimension, task.cycles_allocated) catch continue;
+            self.alloc.free(desc);
         }
         return result;
     }
@@ -264,4 +301,30 @@ fn buildGhwStateString(alloc: Allocator, agent: *GHWAgent) ![]u8 {
     );
     // AttentionEngine 暂时没有 top_goal 公开 API, 跳过
     return buf.toOwnedSlice(alloc);
+}
+
+test "LLMGoalProposer: buildUserPrompt 注入自传体记忆" {
+    const alloc = std.testing.allocator;
+    var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
+    const chat = mock.asChat();
+    var gp = LLMGoalProposer.init(alloc, &chat, "mock");
+
+    var agent = try GHWAgent.init(alloc, "goal-test", 4, .{ 3, 3, 3 }, 1);
+    defer agent.deinit();
+
+    var mem = Memory.init(alloc, 1);
+    defer mem.deinit();
+    try mem.setSelfNarrative("我偏好优化 daemon 进程");
+
+    gp.setMemory(&mem);
+    const prompt = try gp.buildUserPrompt("world: load=2.0 cpu=high", &agent);
+    defer alloc.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "我偏好优化 daemon 进程") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "world: load=2.0 cpu=high") != null);
+
+    var gp2 = LLMGoalProposer.init(alloc, &chat, "mock");
+    const prompt2 = try gp2.buildUserPrompt("world: idle", &agent);
+    defer alloc.free(prompt2);
+    try std.testing.expect(std.mem.indexOf(u8, prompt2, "autobiographical context") == null);
 }

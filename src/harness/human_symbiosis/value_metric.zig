@@ -131,6 +131,120 @@ pub const ValueMetric = struct {
     }
 };
 
+/// value_score 环形历史 + 线性趋势 (P11, 镜像 ExistenceDegree.kpiTrend)
+pub const ValueTrendTracker = struct {
+    history: [64]F = @splat(0),
+    idx: u8 = 0,
+    count: u8 = 0,
+    last_score: F = 0,
+
+    /// 人类价值明显下滑阈值 (value-units/cycle)
+    pub const DECLINE_EPS: F = 0.003;
+
+    pub fn record(self: *ValueTrendTracker, score: F) void {
+        const s = @max(0, @min(score, 1));
+        self.history[self.idx] = s;
+        self.idx = (self.idx + 1) % 64;
+        if (self.count < 64) self.count += 1;
+        self.last_score = s;
+    }
+
+    /// 缓冲未满返回 0 (不在半数据上行动)
+    pub fn trend(self: *const ValueTrendTracker) F {
+        if (self.count < 64) return 0;
+        var sum_x: F = 0;
+        var sum_y: F = 0;
+        var sum_xy: F = 0;
+        var sum_x2: F = 0;
+        const n: F = 64.0;
+        for (0..64) |i| {
+            const x: F = @floatFromInt(i);
+            const y = self.history[i];
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+        }
+        const den = n * sum_x2 - sum_x * sum_x;
+        if (@abs(den) < 1e-9) return 0;
+        return (n * sum_xy - sum_x * sum_y) / den;
+    }
+
+    /// 序列化为 JSON (P12: state.json 跨重启保留趋势缓冲)
+    pub fn toJson(self: *const ValueTrendTracker, alloc: Allocator) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        try buf.print(alloc, "{{\"idx\":{d},\"count\":{d},\"last_score\":{d:.6},\"history\":[", .{
+            self.idx, self.count, self.last_score,
+        });
+        for (self.history, 0..) |v, i| {
+            if (i > 0) try buf.append(alloc, ',');
+            try buf.print(alloc, "{d:.6}", .{v});
+        }
+        try buf.appendSlice(alloc, "]}");
+        return buf.toOwnedSlice(alloc);
+    }
+
+    /// 从 state.json 的 value_tracker 块恢复; 无字段时返回 false
+    pub fn loadFromJson(self: *ValueTrendTracker, json: []const u8) !bool {
+        const sj = @import("state_json.zig");
+        const obj = sj.extractObjectBlock(json, "value_tracker") orelse return false;
+        self.* = .{};
+        if (sj.extractJsonNumber(obj, "idx")) |n| {
+            self.idx = @intCast(std.fmt.parseInt(u8, n, 10) catch 0);
+        }
+        if (sj.extractJsonNumber(obj, "count")) |n| {
+            self.count = @intCast(std.fmt.parseInt(u8, n, 10) catch 0);
+        }
+        if (sj.extractJsonNumber(obj, "last_score")) |n| {
+            self.last_score = std.fmt.parseFloat(F, n) catch 0;
+        }
+        if (std.mem.indexOf(u8, obj, "\"history\"")) |hist_pos| {
+            const arr_start = std.mem.indexOfPos(u8, obj, hist_pos, "[") orelse return true;
+            const arr_end = sj.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr = obj[arr_start + 1 .. arr_end];
+            var slot: usize = 0;
+            var i: usize = 0;
+            while (i < arr.len and slot < 64) {
+                while (i < arr.len and (arr[i] == ' ' or arr[i] == ',')) : (i += 1) {}
+                if (i >= arr.len) break;
+                const start = i;
+                while (i < arr.len and (std.ascii.isDigit(arr[i]) or arr[i] == '.' or arr[i] == '-')) : (i += 1) {}
+                if (i > start) {
+                    self.history[slot] = std.fmt.parseFloat(F, arr[start..i]) catch 0;
+                    slot += 1;
+                }
+            }
+        }
+        if (self.count > 64) self.count = 64;
+        if (self.idx >= 64) self.idx = 0;
+        return true;
+    }
+
+    /// 最近 N 个采样 (时间序) 写入 JSON 数组 (P13 UI sparkline)
+    pub fn appendRecentSamplesJson(self: *const ValueTrendTracker, alloc: std.mem.Allocator, buf: *std.ArrayList(u8)) !void {
+        const n = @min(self.count, 16);
+        try buf.appendSlice(alloc, "\"samples\":[");
+        var first = true;
+        for (0..n) |i| {
+            const pos = (self.idx + 64 - n + i) % 64;
+            if (!first) try buf.append(alloc, ',');
+            first = false;
+            try buf.print(alloc, "{d:.4}", .{self.history[pos]});
+        }
+        try buf.append(alloc, ']');
+    }
+};
+
+/// 从 L6 三源拉取并算 value_score
+pub fn computeScore(signal: *const HumanSignal, queue: *const TaskQueue, gsp: *const HumanGSP) F {
+    var vm = ValueMetric{};
+    vm.pullFromSignal(signal);
+    vm.pullFromQueue(queue);
+    vm.pullFromGSP(gsp);
+    return vm.valueScore();
+}
+
 // ===== Tests =====
 
 const testing = std.testing;
@@ -205,4 +319,46 @@ test "ValueMetric: 4 个权重归一化和 = 1.0 (D4 不变量)" {
     const score = vm.valueScore();
     // 完美状态下 valueScore ≈ 1.0
     try testing.expectApproxEqAbs(@as(F, 1.0), score, 0.05);
+}
+
+test "ValueTrendTracker: 下降趋势检测" {
+    var tr = ValueTrendTracker{};
+    for (0..64) |i| {
+        const frac: F = @as(F, @floatFromInt(i)) / 63.0;
+        tr.record(0.50 - 0.20 * frac);
+    }
+    try testing.expect(tr.trend() < -ValueTrendTracker.DECLINE_EPS);
+    try testing.expectApproxEqAbs(@as(F, 0.30), tr.last_score, 0.01);
+}
+
+test "ValueTrendTracker: toJson/loadFromJson roundtrip" {
+    const alloc = testing.allocator;
+    var tr = ValueTrendTracker{};
+    for (0..20) |i| tr.record(@as(F, @floatFromInt(i)) * 0.01);
+
+    const json = try tr.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"value_tracker\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+
+    var tr2 = ValueTrendTracker{};
+    try testing.expect(try tr2.loadFromJson(wrapped));
+    try testing.expectEqual(tr.idx, tr2.idx);
+    try testing.expectEqual(tr.count, tr2.count);
+    try testing.expectApproxEqAbs(tr.last_score, tr2.last_score, 0.0001);
+    try testing.expectApproxEqAbs(tr.history[0], tr2.history[0], 0.0001);
+}
+
+test "ValueTrendTracker: appendRecentSamplesJson" {
+    const alloc = testing.allocator;
+    var tr = ValueTrendTracker{};
+    for (0..5) |i| tr.record(@as(F, @floatFromInt(i + 1)) * 0.1);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try tr.appendRecentSamplesJson(alloc, &buf);
+    const s = buf.items;
+    try testing.expect(std.mem.startsWith(u8, s, "\"samples\":["));
+    try testing.expect(std.mem.indexOf(u8, s, "0.1000") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "0.5000") != null);
 }

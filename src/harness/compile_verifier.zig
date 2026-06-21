@@ -13,14 +13,8 @@ const Allocator = mem.Allocator;
 const util = @import("../util/mod.zig");
 const F = util.F;
 
-// Zig 0.17 简化: 文件 IO 留给用户接入 (生产环境可接 std.Io.Dir)
-// 这里用 std.fs.path 处理路径, 文件创建/读取通过 std.process.Child 调 shell
-// 实际部署建议:
-//   1. 使用 Threaded Io + std.Io.File API
-//   2. 或在用户层用 std.posix.openat + 第三方 syscall 库
-//   3. 或用 @import("builtin") + 平台特定 syscall
-
-// writeFileAbsolute 移到下面 (verify 后面)
+// 已做实: 用 Threaded Io (std.Io.Dir/File) 写候选代码 + std.process.spawn 调 zig build。
+// 须传 initWithIo(allocator, io); 文件辅助 writeFileAbsolute 见 verify 之后。
 
 pub const VerifyRequest = struct {
     /// 待验证的 Zig 源码

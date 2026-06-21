@@ -44,24 +44,33 @@ pub const Reflection = struct {
         return agent.tick - self.last_at_tick >= self.interval;
     }
 
-    /// 执行自省: 让 LLM 回顾最近 8 个 episodes + 自身状态, 更新 self_narrative + beliefs
-    pub fn reflect(
-        self: *Reflection,
-        agent: *GHWAgent,
-        memory: *Memory,
-        io: std.Io,
-    ) !ReflectionResult {
-        const start = std.Io.Clock.real.now(io).toMilliseconds();
+    /// 构造自省 user prompt (P2: 自传体记忆 + 时序最近 episodes + 自身状态; 可独立测试)。
+    pub fn buildUserPrompt(self: *Reflection, agent: *GHWAgent, memory: *Memory) ![]u8 {
+        const query_dim = Memory.weakestDim(
+            agent.ed.v.material,
+            agent.ed.v.representation,
+            agent.ed.v.nature,
+        );
+        const query_text = try std.fmt.allocPrint(self.alloc, "tick {d} E {d:.3}", .{
+            agent.tick, agent.ed.e(),
+        });
+        defer self.alloc.free(query_text);
 
-        // 1. 构造 prompt
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.alloc);
+
+        // 1) 自传体记忆 (跨时间连续: 叙事 + 信念 + 语义相关往事)
+        if (memory.buildContext(self.alloc, query_dim, query_text, 5, 5)) |ctx| {
+            defer self.alloc.free(ctx);
+            try buf.print(self.alloc, "{s}\n", .{ctx});
+        } else |_| {}
+
+        // 2) 时序 tail: 反思任务需要"刚刚发生了什么"
         const recent = memory.recentEpisodes(8);
-        const ghw_state_str = try buildStateString(self.alloc, agent, memory, recent);
-        defer self.alloc.free(ghw_state_str);
+        try appendAgentState(self.alloc, &buf, agent, memory, recent);
 
-        const user_prompt = try std.fmt.allocPrint(self.alloc,
-            \\我是 GHW. 以下是我最近 {d} 条 episodes + 自身状态:
-            \\
-            \\{s}
+        // 3) JSON 输出格式
+        try buf.print(self.alloc,
             \\
             \\请用以下 JSON 格式回复 (不要其他文字):
             \\{{"self_narrative": "<2-3 句, 用第一人称, 描述我最近的状态和感悟>", "beliefs": [{{"source":"material|representation|nature","text":"<我学到的>","confidence":<0-1>}}]}}
@@ -71,7 +80,22 @@ pub const Reflection = struct {
             \\- beliefs 是 "我相信..." 的形式, 最多 3 条
             \\- 重点关注: 我最近**做了什么** (不是"应该做什么"), 行动结果, 状态变化
             \\- 反思要基于事实: 提到具体的 tick, E 数值, 或刚刚发生的事
-        , .{ recent.len, ghw_state_str });
+            \\- 若上方记忆块中有相关往事, 与之衔接形成连续自我认知
+        , .{});
+
+        return buf.toOwnedSlice(self.alloc);
+    }
+
+    /// 执行自省: 让 LLM 回顾记忆 + 最近 episodes + 自身状态, 更新 self_narrative + beliefs
+    pub fn reflect(
+        self: *Reflection,
+        agent: *GHWAgent,
+        memory: *Memory,
+        io: std.Io,
+    ) !ReflectionResult {
+        const start = std.Io.Clock.real.now(io).toMilliseconds();
+
+        const user_prompt = try self.buildUserPrompt(agent, memory);
         defer self.alloc.free(user_prompt);
 
         const system = "你是 GHW 数字生命的反思系统. 帮助它从自身经历中提炼洞察, 形成自我叙事. 重点: 行动 > 意图, 事实 > 想象.";
@@ -116,39 +140,25 @@ pub const ReflectionResult = struct {
     self_narrative_updated: bool,
 };
 
-fn buildStateString(
+fn appendAgentState(
     alloc: Allocator,
+    buf: *std.ArrayList(u8),
     agent: *GHWAgent,
     memory: *Memory,
     recent: []const Episode,
-) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-
-    try buf.print(alloc, "## 自身\ntick={d}  E={d:.3}  M={d:.3}  R={d:.3}  N={d:.3}\n", .{
+) !void {
+    try buf.print(alloc, "## 自身状态\ntick={d}  E={d:.3}  M={d:.3}  R={d:.3}  N={d:.3}\n", .{
         agent.tick, agent.ed.e(),
         agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature,
     });
-    try buf.print(alloc, "self_evolved_total={d}  self_narrative_count={d}\n", .{ 0, memory.reflection_count });
-    if (memory.self_narrative.len > 0) {
-        try buf.print(alloc, "\n## 现有自我叙事\n\"{s}\"\n", .{memory.self_narrative});
-    }
-    if (memory.beliefs.items.len > 0) {
-        try buf.print(alloc, "\n## 现有 beliefs ({d})\n", .{memory.beliefs.items.len});
-        for (memory.beliefs.items) |b| {
-            try buf.print(alloc, "- [{s} c={d:.2}] {s}\n", .{ @tagName(b.source), b.confidence, b.text });
-        }
-    }
-    try buf.print(alloc, "\n## 最近 episodes ({d})\n", .{recent.len});
+    try buf.print(alloc, "reflection_count={d}\n", .{memory.reflection_count});
+    try buf.print(alloc, "\n## 最近发生 (时序, {d} 条)\n", .{recent.len});
     for (recent) |e| {
-        const sign: F = if (e.delta_e >= 0) 1.0 else -1.0;
-        const abs_de: F = @abs(e.delta_e);
         try buf.print(alloc, "- tick={d} [{s}] dim={d} dE={d:.3} | {s}\n", .{
-            e.tick, @tagName(e.kind), e.dimension, sign * abs_de, e.summary,
+            e.tick, @tagName(e.kind), e.dimension, e.delta_e, e.summary,
         });
         if (e.detail) |d| try buf.print(alloc, "  detail: {s}\n", .{d});
     }
-    return buf.toOwnedSlice(alloc);
 }
 
 fn parseAndApply(alloc: Allocator, content: []const u8, agent: *GHWAgent, memory: *Memory) !void {
@@ -294,4 +304,31 @@ fn extractJsonNumber(obj: []const u8, key: []const u8) ?[]const u8 {
     while (ve < obj.len and (std.ascii.isDigit(obj[ve]) or obj[ve] == '.' or obj[ve] == '-')) : (ve += 1) {}
     if (ve == start) return null;
     return obj[start..ve];
+}
+
+test "Reflection: buildUserPrompt 注入自传体记忆 + 时序 episodes" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
+    const chat = mock.asChat();
+    var reflect = Reflection.init(alloc, &chat, "mock");
+
+    var agent = try GHWAgent.init(alloc, "reflect-test", 4, .{ 3, 3, 3 }, 1);
+    defer agent.deinit();
+
+    var mem = Memory.init(alloc, 1);
+    defer mem.deinit();
+    try mem.setSelfNarrative("我曾多次探索并获益");
+    try mem.recordAt(io, .system_event, 10, "just finished cycle 10", null, 3, 0.1);
+
+    const prompt = try reflect.buildUserPrompt(&agent, &mem);
+    defer alloc.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "autobiographical context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "我曾多次探索并获益") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "just finished cycle 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "self_narrative") != null);
 }

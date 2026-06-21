@@ -50,6 +50,7 @@ const GenerationRequest = harness.GenerationRequest;
 const GenerationKind = harness.GenerationKind;
 const StaticCodeGenerator = harness.StaticCodeGenerator;
 const ReviewVerdict = harness.ReviewVerdict;
+const SelfEncoder = harness.SelfEncoder;
 
 /// 一个生命循环的报告
 pub const CycleReport = struct {
@@ -75,12 +76,70 @@ pub const CycleReport = struct {
     evolution_verdict: ?ReviewVerdict,
     /// 自演化产生的代码 (如果有)
     evolution_code: ?[]const u8,
+    /// 本周期采纳规则对目标选择的偏置 (provenance: LLM 提议是否真的影响了行为)
+    rule_bias: RuleBias = .{},
+    /// 本周期 pending 任务对目标选择的偏置 (P5: 人类/LLM 任务闭环)
+    task_bias: TaskBias = .{},
 };
 
 /// 反思层触发
 pub const ReflectionTrigger = struct {
     window: usize = 32,
     stagnation_threshold: F = 0.001, // E 方差低于此值视为停滞
+};
+
+/// 规则偏好的维度 (RuleBias.favored)
+pub const RuleDim = enum { material, representation, nature };
+
+/// 规则偏置: 把"数字生命已采纳的规则"(LLM 提议 → Guard 通过 → SelfEncoder.rules)
+/// 折算成对**目标选择**的可观测偏置。这是「LLM 的话算数」的闭环落点:
+/// 规则不再只是躺在库里, 而是真正改变这一周期选哪个目标去行动。
+///
+/// 设计原则 (保持"LLM 提议 / 数字生命决定"):
+///   - 偏置只在已有目标之间**重排**, 不凭空造目标, 不改 E 公理;
+///   - 偏置幅度有界 (≤ MAX_BONUS), 只能翻转优先级相近的目标, 压不过巨大差距;
+///   - 仍受 boundary 守护 + ΔE 评分兜底。
+pub const RuleBias = struct {
+    /// 参与计算的已采纳规则总数
+    rule_count: u32 = 0,
+    material: u32 = 0,
+    representation: u32 = 0,
+    nature: u32 = 0,
+    /// 最受偏好维度 (argmax; 并列优先 representation > nature > material); 无规则时 null
+    favored: ?RuleDim = null,
+    /// 该维度在规则里的主导度 [0,1] = favored_count / rule_count
+    dominance: F = 0,
+    /// provenance: 本周期 selectTopGoal 是否因规则偏置改变了选择
+    selection_changed: bool = false,
+
+    /// 偏置能给"对齐目标"叠加的最大分值 (等价优先级点数)。
+    /// 取 3.0: 强主导时可翻转 ≤3 的优先级差, 但压不过更大的差距。
+    pub const MAX_BONUS: F = 3.0;
+
+    pub fn hasBias(self: RuleBias) bool {
+        return self.rule_count > 0 and self.favored != null;
+    }
+};
+
+/// 任务偏置: 把 TaskQueue 里 pending 的人类/LLM 任务折算成对**目标选择**的可观测偏置。
+/// 架构上不走 GoalGraph (每 T_G 重建 + label 不持有), 而是跟 RuleBias 同构的"重排已有目标"。
+pub const TaskBias = struct {
+    pending_count: u32 = 0,
+    material: u32 = 0,
+    representation: u32 = 0,
+    nature: u32 = 0,
+    favored: ?RuleDim = null,
+    /// pending 任务 priority 加权主导度 [0,1]
+    dominance: F = 0,
+    /// provenance: 本周期是否因任务偏置改变了选择 (相对规则偏置之后)
+    selection_changed: bool = false,
+
+    /// 人类任务略强于规则偏置 (投递者明确意图)
+    pub const MAX_BONUS: F = 4.0;
+
+    pub fn hasBias(self: TaskBias) bool {
+        return self.pending_count > 0 and self.favored != null;
+    }
 };
 
 pub const GHWAgent = struct {
@@ -100,6 +159,18 @@ pub const GHWAgent = struct {
     gsp: GSPNode,
     /// 自我升级器 (L1-L4: 参数调整/方法扩展/算法优化)
     self_evolver: ?*SelfEvolver,
+    /// 已采纳的规则库 (LLM 提议 → Guard → SelfEncoder.rules)。
+    /// 绑定后, runCycle 的目标选择会被这些规则偏置 (闭环); 默认 null = 行为不变。
+    rule_lib: ?*SelfEncoder = null,
+    /// 最近一次目标选择的规则偏置 (写入 CycleReport, 供观测/审计)
+    last_rule_bias: RuleBias = .{},
+    /// 已绑定的任务队列 (人类/LLM 提议的任务)。绑定后, pending 任务偏置目标选择 (P5)。
+    task_queue: ?*@import("../harness/human_symbiosis/task_queue.zig").TaskQueue = null,
+    /// 最近一次目标选择的任务偏置
+    last_task_bias: TaskBias = .{},
+    /// P6: 自传体记忆 — runTask 完成时 recordAt(.task_completed)
+    memory: ?*@import("../harness/memory.zig").Memory = null,
+    memory_io: ?std.Io = null,
 
     /// 当前目标图
     goal_graph: GoalGraph,
@@ -181,6 +252,112 @@ pub const GHWAgent = struct {
         self.self_evolver = evolver;
     }
 
+    /// 绑定规则库, 让 LLM 提议并经守门采纳的规则真正参与目标选择 (P0 闭环)。
+    pub fn bindRuleLib(self: *GHWAgent, lib: *SelfEncoder) void {
+        self.rule_lib = lib;
+    }
+
+    /// 绑定任务队列, 让 pending 的人类/LLM 任务参与目标选择 (P5 闭环)。
+    pub fn bindTaskQueue(self: *GHWAgent, queue: *@import("../harness/human_symbiosis/task_queue.zig").TaskQueue) void {
+        self.task_queue = queue;
+    }
+
+    /// 绑定记忆 — runTask 完成时写入 task_completed episode (P6)。
+    pub fn bindMemory(self: *GHWAgent, memory_ref: *@import("../harness/memory.zig").Memory, io: std.Io) void {
+        self.memory = memory_ref;
+        self.memory_io = io;
+    }
+
+    fn finalizeDimensionBias(
+        material: u32,
+        representation: u32,
+        nature: u32,
+        count: u32,
+    ) struct { favored: ?RuleDim, dominance: F } {
+        var top = representation;
+        var favored: RuleDim = .representation;
+        if (nature > top) {
+            top = nature;
+            favored = .nature;
+        }
+        if (material > top) {
+            top = material;
+            favored = .material;
+        }
+        if (top == 0 or count == 0) return .{ .favored = null, .dominance = 0 };
+        const denom: F = @floatFromInt(material + representation + nature);
+        return .{
+            .favored = favored,
+            .dominance = if (denom > 0) @as(F, @floatFromInt(top)) / denom else 0,
+        };
+    }
+
+    /// 把已采纳规则折算成本周期的目标选择偏置。
+    /// rule.dimension: material/representation/nature 各计 1; all 计入全部三维 (通用倾向)。
+    fn computeRuleBias(self: *const GHWAgent) RuleBias {
+        const lib = self.rule_lib orelse return .{};
+        var b: RuleBias = .{ .rule_count = @intCast(lib.rules.items.len) };
+        if (b.rule_count == 0) return b;
+        for (lib.rules.items) |rule| {
+            switch (rule.dimension) {
+                .material => b.material += 1,
+                .representation => b.representation += 1,
+                .nature => b.nature += 1,
+                .all => {
+                    b.material += 1;
+                    b.representation += 1;
+                    b.nature += 1;
+                },
+            }
+        }
+        const fin = finalizeDimensionBias(b.material, b.representation, b.nature, b.rule_count);
+        b.favored = fin.favored;
+        b.dominance = fin.dominance;
+        return b;
+    }
+
+    /// 把 pending 任务 (priority 加权) 折算成本周期的目标选择偏置。
+    fn computeTaskBias(self: *const GHWAgent) TaskBias {
+        const queue = self.task_queue orelse return .{};
+        const w = queue.pendingDimensionWeights();
+        var b: TaskBias = .{
+            .pending_count = w.pending_count,
+            .material = w.material,
+            .representation = w.representation,
+            .nature = w.nature,
+        };
+        if (b.pending_count == 0) return b;
+        const fin = finalizeDimensionBias(b.material, b.representation, b.nature, b.pending_count);
+        b.favored = fin.favored;
+        b.dominance = fin.dominance;
+        return b;
+    }
+
+    fn goalScore(eff_p: i32, g: *Goal, rule_bias: RuleBias, task_bias: TaskBias, apply_rule: bool, apply_task: bool) F {
+        var score: F = @floatFromInt(eff_p);
+        if (apply_rule and rule_bias.hasBias()) {
+            if (goalDim(g.kind)) |gd| {
+                if (gd == rule_bias.favored.?) score += RuleBias.MAX_BONUS * rule_bias.dominance;
+            }
+        }
+        if (apply_task and task_bias.hasBias()) {
+            if (goalDim(g.kind)) |gd| {
+                if (gd == task_bias.favored.?) score += TaskBias.MAX_BONUS * task_bias.dominance;
+            }
+        }
+        return score;
+    }
+
+    /// 目标类型对齐的维度 (用于规则偏置匹配)。enhance_existence/symbiosis 视为中性。
+    fn goalDim(kind: GoalKind) ?RuleDim {
+        return switch (kind) {
+            .acquire_resource, .maintain_boundary => .material,
+            .acquire_knowledge, .self_modify_params, .self_extend_method, .self_optimize => .representation,
+            .explore => .nature,
+            .enhance_existence, .symbiosis => null,
+        };
+    }
+
     /// 热加载 SelfEvolutionGuard 配置 (从 JSON)
     /// 真实部署: ConfigLoader.loadFromString + guard.loadFromJson
     pub fn loadGuardConfig(self: *GHWAgent, json: []const u8) !void {
@@ -229,18 +406,51 @@ pub const GHWAgent = struct {
         const sorted = self.goal_graph.topologicalSort(self.allocator) catch return null;
         defer self.allocator.free(sorted);
 
+        // 计算本周期规则 + 任务偏置 (无绑定时为零 ⇒ 行为与旧版完全一致)
+        var rule_bias = self.computeRuleBias();
+        var task_bias = self.computeTaskBias();
+
         var best: ?*Goal = null;
-        var best_p: i32 = -1;
+        var best_score: F = -1;
+        var plain_best: ?*Goal = null;
+        var plain_best_p: i32 = -1;
+        var rule_best: ?*Goal = null;
+        var rule_best_score: F = -1;
+
         for (sorted) |gid| {
             const g = self.goal_graph.getPtr(gid) orelse continue;
-            // effectivePriority: 父未激活时, 子不可选
             const eff_p = self.goal_graph.effectivePriority(gid);
-            const p: i32 = eff_p;
-            if (p > best_p) {
-                best_p = p;
+
+            if (eff_p > plain_best_p) {
+                plain_best_p = eff_p;
+                plain_best = g;
+            }
+
+            const rule_score = goalScore(eff_p, g, rule_bias, task_bias, true, false);
+            const full_score = goalScore(eff_p, g, rule_bias, task_bias, true, true);
+
+            if (rule_score > rule_best_score) {
+                rule_best_score = rule_score;
+                rule_best = g;
+            }
+            if (full_score > best_score) {
+                best_score = full_score;
                 best = g;
             }
         }
+
+        if (rule_bias.hasBias()) {
+            if (rule_best) |rb| {
+                if (plain_best) |pb| rule_bias.selection_changed = rb.id != pb.id;
+            }
+        }
+        if (task_bias.hasBias()) {
+            if (best) |b| {
+                if (rule_best) |rb| task_bias.selection_changed = b.id != rb.id;
+            }
+        }
+        self.last_rule_bias = rule_bias;
+        self.last_task_bias = task_bias;
         return best;
     }
 
@@ -514,7 +724,16 @@ pub const GHWAgent = struct {
                     .context = "auto-triggered",
                     .target_file = target_file,
                 };
-                if (evolver.evolve(req, self.ed.e(), self.tick)) |outcome_ev| {
+                const top_goal_name = if (top) |g| @tagName(g.kind) else "none";
+                const ev_ctx = harness.self_evolver.EvolveContext{
+                    .e = self.ed.e(),
+                    .tick = self.tick,
+                    .material = self.ed.v.material,
+                    .representation = self.ed.v.representation,
+                    .nature = self.ed.v.nature,
+                    .query_text = top_goal_name,
+                };
+                if (evolver.evolve(req, ev_ctx)) |outcome_ev| {
                     var o = outcome_ev;
                     self_evolved = true;
                     evolution_verdict = o.verdict;
@@ -566,6 +785,8 @@ pub const GHWAgent = struct {
             .self_evolved = self_evolved,
             .evolution_verdict = evolution_verdict,
             .evolution_code = evolution_code,
+            .rule_bias = self.last_rule_bias,
+            .task_bias = self.last_task_bias,
         };
     }
 
@@ -587,6 +808,15 @@ pub const GHWAgent = struct {
             .id = task.id * 1000 + tick,
             .label = task.title,
             .features = features,
+        };
+    }
+
+    fn taskDimU8(dim: HumanDimension) u8 {
+        return switch (dim) {
+            .material => 1,
+            .representation => 2,
+            .nature => 3,
+            .all => 0,
         };
     }
 
@@ -632,6 +862,18 @@ pub const GHWAgent = struct {
                 .{ task.title, actual_de },
             );
 
+        if (self.memory) |memory_ref| {
+            if (self.memory_io) |io| {
+                const summary = std.fmt.allocPrint(self.allocator, "task completed: {s} ΔE={d:.3}", .{
+                    task.title, actual_de,
+                }) catch null;
+                if (summary) |s| {
+                    defer self.allocator.free(s);
+                    memory_ref.recordAt(io, .task_completed, self.tick, s, null, taskDimU8(task.required_dimension), actual_de) catch {};
+                }
+            }
+        }
+
         return HumanTaskResult{
             .output = outcome_str,
             .actual_delta_e = actual_de,
@@ -664,6 +906,81 @@ const GoalHint = struct {
 };
 
 // ===== Tests =====
+
+test "GHWAgent: 采纳规则偏置目标选择 (LLM 闭环 + provenance)" {
+    const alloc = std.testing.allocator;
+    var agent = try GHWAgent.init(alloc, "rulebias-test", 4, .{ 3, 3, 3 }, 42);
+    defer agent.deinit();
+
+    // 两个候选目标: material 类优先级更高(5), explore(nature) 类略低(4)
+    _ = try agent.goal_graph.add(.acquire_resource, "get-resource", 5, 0.1, .{ 1, 0, 0, 0 });
+    _ = try agent.goal_graph.add(.explore, "explore-novel", 4, 0.1, .{ 0, 0, 1, 0 });
+
+    // 无规则库 ⇒ 选优先级最高的 material 目标, 无偏置
+    {
+        const top = agent.selectTopGoal().?;
+        try std.testing.expectEqual(GoalKind.acquire_resource, top.kind);
+        try std.testing.expect(!agent.last_rule_bias.hasBias());
+        try std.testing.expect(!agent.last_rule_bias.selection_changed);
+    }
+
+    // 数字生命采纳了 3 条 nature 维度规则 (模拟 LLM 提议 → Guard 通过 → 入库)
+    var enc = SelfEncoder.init(alloc);
+    defer enc.deinit();
+    inline for (.{ "rule_nat_1", "rule_nat_2", "rule_nat_3" }) |nm| {
+        try enc.rules.append(alloc, .{
+            .name = try alloc.dupe(u8, nm),
+            .description = try alloc.dupe(u8, "explore more novelty"),
+            .applies_to = .tune_params,
+            .dimension = .nature,
+        });
+    }
+
+    // 绑定规则库 ⇒ 偏好 nature ⇒ 翻转选择到 explore 目标
+    agent.bindRuleLib(&enc);
+    {
+        const top = agent.selectTopGoal().?;
+        try std.testing.expectEqual(GoalKind.explore, top.kind);
+        try std.testing.expect(agent.last_rule_bias.hasBias());
+        try std.testing.expectEqual(RuleDim.nature, agent.last_rule_bias.favored.?);
+        try std.testing.expect(agent.last_rule_bias.selection_changed);
+        try std.testing.expectEqual(@as(u32, 3), agent.last_rule_bias.rule_count);
+    }
+
+    // 解绑 ⇒ 行为回到纯优先级 (闭环可控, 不是不可逆)
+    agent.rule_lib = null;
+    {
+        const top = agent.selectTopGoal().?;
+        try std.testing.expectEqual(GoalKind.acquire_resource, top.kind);
+        try std.testing.expect(!agent.last_rule_bias.selection_changed);
+    }
+}
+
+test "GHWAgent: TaskQueue pending 任务偏置目标选择 (P5 闭环 + provenance)" {
+    const alloc = std.testing.allocator;
+    const TaskQueue = @import("../harness/human_symbiosis/task_queue.zig").TaskQueue;
+
+    var agent = try GHWAgent.init(alloc, "taskbias-test", 4, .{ 3, 3, 3 }, 99);
+    defer agent.deinit();
+
+    _ = try agent.goal_graph.add(.acquire_resource, "get-resource", 5, 0.1, .{ 1, 0, 0, 0 });
+    _ = try agent.goal_graph.add(.explore, "explore-novel", 4, 0.1, .{ 0, 0, 1, 0 });
+
+    var queue = TaskQueue.init(alloc);
+    defer queue.deinit();
+    _ = try queue.submit("human wants explore", "please explore", "alice", 10, .nature, 4);
+    agent.bindTaskQueue(&queue);
+
+    const top = agent.selectTopGoal().?;
+    try std.testing.expectEqual(GoalKind.explore, top.kind);
+    try std.testing.expect(agent.last_task_bias.hasBias());
+    try std.testing.expectEqual(RuleDim.nature, agent.last_task_bias.favored.?);
+    try std.testing.expect(agent.last_task_bias.selection_changed);
+
+    agent.task_queue = null;
+    const top2 = agent.selectTopGoal().?;
+    try std.testing.expectEqual(GoalKind.acquire_resource, top2.kind);
+}
 
 test "GHWAgent: 完整生命周期" {
     const alloc = std.testing.allocator;

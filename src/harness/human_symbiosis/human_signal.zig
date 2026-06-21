@@ -71,6 +71,9 @@ pub const HumanSignal = struct {
     }
 
     pub fn deinit(self: *HumanSignal) void {
+        for (self.feedbacks.items) |fb| {
+            self.allocator.free(fb.comment);
+        }
         self.feedbacks.deinit(self.allocator);
         var it = self.by_human.iterator();
         while (it.next()) |entry| {
@@ -84,7 +87,16 @@ pub const HumanSignal = struct {
         const de = fb.toDeltaE();
         self.total_e_uplift += de;
         self.total_count += 1;
-        try self.feedbacks.append(self.allocator, fb);
+        const comment_owned = try self.allocator.dupe(u8, fb.comment);
+        errdefer self.allocator.free(comment_owned);
+        const stored = HumanFeedback{
+            .from_human = fb.from_human,
+            .task_id = fb.task_id,
+            .score = fb.score,
+            .comment = comment_owned,
+            .timestamp = fb.timestamp,
+        };
+        try self.feedbacks.append(self.allocator, stored);
 
         // 按 human 聚合
         const gop = try self.by_human.getOrPut(self.allocator, fb.from_human);
@@ -102,6 +114,87 @@ pub const HumanSignal = struct {
         for (self.feedbacks.items) |fb| sum += fb.score;
         return @as(F, @floatFromInt(sum)) /
             @as(F, @floatFromInt(self.feedbacks.items.len));
+    }
+
+    /// 序列化为 JSON (P10: 反馈历史跨重启保留)
+    pub fn toJson(self: *const HumanSignal, alloc: Allocator) ![]u8 {
+        const sj = @import("state_json.zig");
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        try buf.print(alloc, "{{\"total_e_uplift\":{d:.6},\"total_count\":{d},\"feedbacks\":[", .{
+            self.total_e_uplift, self.total_count,
+        });
+        for (self.feedbacks.items, 0..) |fb, i| {
+            if (i > 0) try buf.append(alloc, ',');
+            try buf.print(alloc, "{{\"from_human\":\"", .{});
+            try sj.writeJsonString(alloc, &buf, fb.from_human);
+            try buf.print(alloc, "\",\"task_id\":{d},\"score\":{d},\"comment\":\"", .{ fb.task_id, fb.score });
+            try sj.writeJsonString(alloc, &buf, fb.comment);
+            try buf.print(alloc, "\",\"timestamp\":{d}}}", .{fb.timestamp});
+        }
+        try buf.appendSlice(alloc, "]}");
+        return buf.toOwnedSlice(alloc);
+    }
+
+    /// 从 state.json 的 human_signal 块恢复; 无字段时返回 false
+    pub fn loadFromJson(self: *HumanSignal, json: []const u8) !bool {
+        const sj = @import("state_json.zig");
+        const obj = sj.extractObjectBlock(json, "human_signal") orelse return false;
+        self.clearAll();
+        if (std.mem.indexOf(u8, obj, "\"feedbacks\"")) |fb_pos| {
+            const arr_start = std.mem.indexOfPos(u8, obj, fb_pos, "[") orelse return true;
+            const arr_end = sj.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr = obj[arr_start + 1 .. arr_end];
+            var i: usize = 0;
+            while (i < arr.len) {
+                const os = std.mem.indexOfPos(u8, arr, i, "{") orelse break;
+                const oe = sj.findMatchingBrace(arr, os) orelse break;
+                try loadOneFeedback(self, arr[os .. oe + 1]);
+                i = oe + 1;
+            }
+        }
+        return true;
+    }
+
+    fn clearAll(self: *HumanSignal) void {
+        for (self.feedbacks.items) |fb| {
+            self.allocator.free(fb.comment);
+        }
+        self.feedbacks.clearRetainingCapacity();
+        self.total_e_uplift = 0;
+        self.total_count = 0;
+        var it = self.by_human.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.by_human.clearRetainingCapacity();
+    }
+
+    fn loadOneFeedback(self: *HumanSignal, one: []const u8) !void {
+        const sj = @import("state_json.zig");
+        const from_human = sj.extractJsonString(self.allocator, one, "from_human") orelse return;
+        errdefer self.allocator.free(from_human);
+        const comment_owned = sj.extractJsonString(self.allocator, one, "comment") orelse try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(comment_owned);
+        const gop = try self.by_human.getOrPut(self.allocator, from_human);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = from_human;
+            gop.value_ptr.* = .{};
+        } else {
+            self.allocator.free(from_human);
+        }
+        const fb = HumanFeedback{
+            .from_human = gop.key_ptr.*,
+            .task_id = std.fmt.parseInt(u64, sj.extractJsonNumber(one, "task_id") orelse "0", 10) catch 0,
+            .score = @intCast(std.fmt.parseInt(i16, sj.extractJsonNumber(one, "score") orelse "0", 10) catch 0),
+            .comment = comment_owned,
+            .timestamp = std.fmt.parseInt(u64, sj.extractJsonNumber(one, "timestamp") orelse "0", 10) catch 0,
+        };
+        const de = fb.toDeltaE();
+        self.total_e_uplift += de;
+        self.total_count += 1;
+        try self.feedbacks.append(self.allocator, fb);
+        gop.value_ptr.record(fb);
     }
 };
 
@@ -150,4 +243,26 @@ test "HumanSignal: A3 非对称比 ≈ 1.67 (H4 假设)" {
     // |neg_de| / pos_de ≈ 0.50 / 0.30 = 1.667
     const ratio = @abs(neg_de) / pos_de;
     try testing.expectApproxEqAbs(@as(F, 1.667), ratio, 0.01);
+}
+
+test "HumanSignal: toJson/loadFromJson roundtrip" {
+    const alloc = testing.allocator;
+    var sig = HumanSignal.init(alloc);
+    defer sig.deinit();
+    try sig.receive(.{ .from_human = "alice", .task_id = 1, .score = 3, .comment = "ok", .timestamp = 50 });
+    try sig.receive(.{ .from_human = "bob", .task_id = 2, .score = -1, .timestamp = 60 });
+
+    const json = try sig.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"human_signal\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+
+    var sig2 = HumanSignal.init(alloc);
+    defer sig2.deinit();
+    try testing.expect(try sig2.loadFromJson(wrapped));
+    try testing.expectEqual(@as(u32, 2), sig2.total_count);
+    try testing.expectApproxEqAbs(sig.total_e_uplift, sig2.total_e_uplift, 0.001);
+    try testing.expectEqual(@as(u32, 2), sig2.by_human.count());
+    try testing.expect(sig2.by_human.get("alice") != null);
+    try testing.expect(sig2.by_human.get("bob") != null);
 }

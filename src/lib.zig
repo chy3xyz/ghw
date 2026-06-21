@@ -35,7 +35,17 @@ const HttpLLM = ghw_harness.http_llm.HttpLLM;
 const LLMChat = ghw_harness.llm.LLMChat;
 const SqliteDb = ghw_root.sandbox.SqliteDb;
 const ActionRunner = ghw_root.sandbox.ActionRunner;
+const KpiBridge = ghw_harness.kpi_bridge.KpiBridge;
+const RawKpi = ghw_harness.crm_kpi.RawKpi;
+const ValueWeights = ghw_harness.product_intent.ValueWeights;
+const ProductIntent = ghw_harness.product_intent.ProductIntent;
+const ProductEvolutionRuntime = ghw_harness.product_runtime.ProductEvolutionRuntime;
 const Allocator = std.mem.Allocator;
+
+/// 所有返回给 C 调用方的字符串都用 libc malloc (c_allocator) 分配,
+/// 这样 ghw_free_string 能用 free(3) 真正回收 — 否则长跑嵌入会无界泄漏。
+/// (SDK 库 build 时 link_libc=true, 见 build.zig。)
+const c_str_alloc = std.heap.c_allocator;
 
 /// Opaque handle to a GHW instance
 pub const GhW = opaque {
@@ -74,8 +84,16 @@ const GhwState = struct {
     link_stop: std.atomic.Value(bool) = .init(false),
     link_handler_ctx: ?*anyopaque = null,
 
-    // === 缓存 ===
-    state_json_cache: ?[]u8 = null,
+    // === KPI 桥 (ρ·K 项, 限频喂入 ed) ===
+    kpi_bridge: ?KpiBridge = null,
+    // === 产品数字生命底座 (P17 SDK) ===
+    product_intent: ?ProductIntent = null,
+    product_runtime: ?ProductEvolutionRuntime = null,
+
+    /// 最近一次错误的静态描述 (供 ghw_last_error 读取)。
+    /// 只存指向静态字符串字面量的指针, 无需释放。
+    last_error: ?[*:0]const u8 = null,
+
     tick: u64 = 0,
 };
 
@@ -125,10 +143,11 @@ export fn ghw_deinit(g: ?*GhW) void {
     }
     state.proposed_goals.deinit(state.alloc);
 
-    // 释放缓存 + LLM model name
-    if (state.state_json_cache) |c| state.alloc.free(c);
+    // 释放 LLM model name + world_text
     if (state.world_text) |w| state.alloc.free(w);
     if (state.llm_model.len > 0) state.alloc.free(state.llm_model);
+    if (state.product_runtime) |*rt| rt.deinit();
+    if (state.product_intent) |*pi| pi.deinit();
 
     state.memory.deinit();
     state.agent.deinit();
@@ -146,12 +165,13 @@ export fn ghw_step(g: ?*GhW, world_json: [*:0]const u8) ?[*:0]u8 {
     const world = std.mem.span(world_json);
     _ = world; // 暂未用 world_json (v1 用内置空 system snapshot)
     // 跑 1 cycle (用 0 输入 = 默认初始 state)
-    const report = state.agent.runCycle(&.{}) catch return null;
+    const report = state.agent.runCycle(&.{}) catch {
+        state.last_error = "ghw_step: runCycle failed";
+        return null;
+    };
     state.tick = @intCast(report.tick);
-    // 序列化到 JSON
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(state.alloc);
-    const out = std.fmt.allocPrint(state.alloc, "{{\"tick\":{d},\"E\":{d:.6},\"M\":{d:.6},\"R\":{d:.6},\"N\":{d:.6},\"alpha\":{d:.6},\"beta\":{d:.6},\"gamma\":{d:.6},\"self_evolved\":{s},\"self_evolved_total\":{d}}}", .{
+    // 序列化到 JSON (c_allocator → 调用方用 ghw_free_string 回收)
+    const out = std.fmt.allocPrintSentinel(c_str_alloc, "{{\"tick\":{d},\"E\":{d:.6},\"M\":{d:.6},\"R\":{d:.6},\"N\":{d:.6},\"alpha\":{d:.6},\"beta\":{d:.6},\"gamma\":{d:.6},\"self_evolved\":{s},\"self_evolved_total\":{d}}}", .{
         report.tick,
         report.e_after,
         state.agent.ed.v.material,
@@ -162,10 +182,8 @@ export fn ghw_step(g: ?*GhW, world_json: [*:0]const u8) ?[*:0]u8 {
         state.agent.ed.weights.gamma,
         if (report.self_evolved) "true" else "false",
         state.self_evolved_total,
-    }) catch return null;
-    // 缓存 (供 get_state 用)
-    if (state.state_json_cache) |old| state.alloc.free(old);
-    return @ptrCast(out.ptr);
+    }, 0) catch return null;
+    return out.ptr;
 }
 
 /// Get cached state JSON (no cycle run).
@@ -173,9 +191,7 @@ export fn ghw_step(g: ?*GhW, world_json: [*:0]const u8) ?[*:0]u8 {
 export fn ghw_get_state(g: ?*GhW) ?[*:0]u8 {
     const g_ptr = g orelse return null;
     const state: *GhwState = @ptrCast(@alignCast(g_ptr));
-    if (state.state_json_cache) |cached| return @ptrCast(cached.ptr);
-    // 没有 cache, 实时生成
-    const out = std.fmt.allocPrint(state.alloc, "{{\"tick\":{d},\"E\":{d:.6},\"M\":{d:.6},\"R\":{d:.6},\"N\":{d:.6},\"alpha\":{d:.6},\"beta\":{d:.6},\"gamma\":{d:.6},\"self_evolved_total\":{d}}}", .{
+    const out = std.fmt.allocPrintSentinel(c_str_alloc, "{{\"tick\":{d},\"E\":{d:.6},\"M\":{d:.6},\"R\":{d:.6},\"N\":{d:.6},\"alpha\":{d:.6},\"beta\":{d:.6},\"gamma\":{d:.6},\"self_evolved_total\":{d}}}", .{
         state.tick,
         state.agent.ed.e(),
         state.agent.ed.v.material,
@@ -185,15 +201,15 @@ export fn ghw_get_state(g: ?*GhW) ?[*:0]u8 {
         state.agent.ed.weights.beta,
         state.agent.ed.weights.gamma,
         state.self_evolved_total,
-    }) catch return null;
-    return @ptrCast(out.ptr);
+    }, 0) catch return null;
+    return out.ptr;
 }
 
-/// Free a string returned by any ghw_* function
+/// Free a string returned by any ghw_* function. Safe to call with NULL.
+/// 返回串均由 c_allocator (libc malloc) 分配, 故可直接 free(3)。
 export fn ghw_free_string(s: ?[*:0]u8) void {
-    _ = s; // 在我们当前设计里, 所有返回的字符串都 alloc 来自 page_allocator
-    // 不显式 free (page_allocator 不需要 free, OS 进程退出回收)
-    // 未来如果改用 DebugAllocator, 这里需要 free
+    const p = s orelse return;
+    std.c.free(@ptrCast(p));
 }
 
 /// Get current tick (cheap accessor)
@@ -215,6 +231,247 @@ export fn ghw_increment_self_evolved(g: ?*GhW) void {
     const g_ptr = g orelse return;
     const state: *GhwState = @ptrCast(@alignCast(g_ptr));
     state.self_evolved_total += 1;
+}
+
+// ===== KPI 桥: 把产品 KPI 喂进存在度 (ρ·K 项) =====
+
+/// 配置 KPI 桥 (调 ghw_kpi_feed 前必须先配置一次)。
+/// @param refresh_interval_hours: 两次写入 E 的最小间隔 (小时), 防 KPI 噪声抖动 E
+/// @param north_star_is_revenue: 北极星 KPI 是否营收类 (!=0 给 revenue 轴 1.5× 权)
+/// @param w_user_sat/w_retention/w_revenue/w_safety: 复合 KPI 的价值权重
+/// @return 0 = ok, -1 = 失败
+export fn ghw_kpi_configure(
+    g: ?*GhW,
+    refresh_interval_hours: u32,
+    north_star_is_revenue: i32,
+    w_user_sat: f32,
+    w_retention: f32,
+    w_revenue: f32,
+    w_safety: f32,
+) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    const hours: u64 = if (refresh_interval_hours == 0) 24 else refresh_interval_hours;
+    state.kpi_bridge = KpiBridge.init(
+        .{
+            .user_satisfaction = w_user_sat,
+            .retention = w_retention,
+            .revenue = w_revenue,
+            .safety = w_safety,
+            ._raw_buf = &.{},
+        },
+        north_star_is_revenue != 0,
+        hours * 3600,
+    );
+    return 0;
+}
+
+/// 喂入最新原始 KPI (可高频调; 真正写入 E 的节奏由 refresh_interval 限频)。
+/// @param csat: 真实客户满意度 ∈[0,1]; 传 NaN = 无来源 (回退到活跃度代理)
+/// @param incident_rate: 归一化事故严重度 ∈[0,1] (0=无事故); 传 NaN = 无来源 (safety 轴记 0)
+/// @param now_unix: 当前 unix 秒 (调用方提供, 0.17 无内置时钟)
+/// @return 1 = 本次写入了 E, 0 = 限频未写, -1 = 未配置 / 失败
+export fn ghw_kpi_feed(
+    g: ?*GhW,
+    nrr_quarterly: f32,
+    deal_win_rate: f32,
+    sales_cycle_days_p50: f32,
+    weekly_active_sales_pct: f32,
+    csat: f32,
+    incident_rate: f32,
+    now_unix: i64,
+) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.kpi_bridge == null) {
+        state.last_error = "ghw_kpi_feed: bridge not configured (call ghw_kpi_configure first)";
+        return -1;
+    }
+    state.kpi_bridge.?.feed(.{
+        .nrr_quarterly = nrr_quarterly,
+        .deal_win_rate = deal_win_rate,
+        .sales_cycle_days_p50 = sales_cycle_days_p50,
+        .weekly_active_sales_pct = weekly_active_sales_pct,
+        .csat = if (std.math.isNan(csat)) null else csat,
+        .incident_rate = if (std.math.isNan(incident_rate)) null else incident_rate,
+    });
+    return if (state.kpi_bridge.?.maybeRefresh(&state.agent.ed, now_unix)) 1 else 0;
+}
+
+/// 当前复合 KPI K∈[0,1] (诊断, 不写 E)。-1 = 未配置或无有效 feed。
+export fn ghw_kpi_composite(g: ?*GhW) f64 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.kpi_bridge == null) return -1;
+    return state.kpi_bridge.?.currentComposite() orelse -1;
+}
+
+// ===== 产品数字生命底座: ProductIntent + ProductEvolutionRuntime =====
+
+/// 加载 ProductIntent 并初始化产品进化 runtime。
+/// @param path: product_intent JSON 文件路径
+/// @return 0 = ok, -1 = 失败
+export fn ghw_product_intent_load(g: ?*GhW, path: [*:0]const u8) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    const path_slice = std.mem.span(path);
+
+    if (state.product_runtime) |*rt| {
+        rt.deinit();
+        state.product_runtime = null;
+    }
+    if (state.product_intent) |*pi| {
+        pi.deinit();
+        state.product_intent = null;
+    }
+
+    state.product_intent = ghw_harness.product_intent.load(state.alloc, path_slice) catch {
+        state.last_error = "ghw_product_intent_load: failed to load ProductIntent";
+        return -1;
+    };
+    state.product_runtime = ProductEvolutionRuntime.init(state.alloc, &state.product_intent.?);
+    return 0;
+}
+
+/// 经 ProductEvolutionRuntime 喂入 KPI: 写 E 且记录 kpi_refreshed audit。
+/// @return 1 = 写入 E, 0 = 限频未写, -1 = runtime 未初始化或失败
+export fn ghw_product_kpi_feed(
+    g: ?*GhW,
+    nrr_quarterly: f32,
+    deal_win_rate: f32,
+    sales_cycle_days_p50: f32,
+    weekly_active_sales_pct: f32,
+    csat: f32,
+    incident_rate: f32,
+    now_unix: i64,
+) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_kpi_feed: product runtime not initialized";
+        return -1;
+    }
+    const refreshed = state.product_runtime.?.feedKpi(&state.agent.ed, .{
+        .nrr_quarterly = nrr_quarterly,
+        .deal_win_rate = deal_win_rate,
+        .sales_cycle_days_p50 = sales_cycle_days_p50,
+        .weekly_active_sales_pct = weekly_active_sales_pct,
+        .csat = if (std.math.isNan(csat)) null else csat,
+        .incident_rate = if (std.math.isNan(incident_rate)) null else incident_rate,
+    }, now_unix) catch {
+        state.last_error = "ghw_product_kpi_feed: feed failed";
+        return -1;
+    };
+    return if (refreshed) 1 else 0;
+}
+
+/// 提交 CRM canonical change: follow-up cadence 7d → 5d。
+/// @return change_id (>0), -1 = 失败
+export fn ghw_product_propose_crm_followup(
+    g: ?*GhW,
+    tenant_id: [*:0]const u8,
+    affected_users: u32,
+    expected_delta_k: f32,
+    now_unix: u64,
+) i64 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_propose_crm_followup: product runtime not initialized";
+        return -1;
+    }
+    const id = state.product_runtime.?.proposeCrmFollowupTightening(
+        std.mem.span(tenant_id),
+        affected_users,
+        expected_delta_k,
+        now_unix,
+    ) catch {
+        state.last_error = "ghw_product_propose_crm_followup: propose failed";
+        return -1;
+    };
+    return @intCast(id);
+}
+
+/// 审批产品变更。
+export fn ghw_product_approve_change(
+    g: ?*GhW,
+    change_id: u64,
+    approver: [*:0]const u8,
+    note: [*:0]const u8,
+    now_unix: u64,
+) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_approve_change: product runtime not initialized";
+        return -1;
+    }
+    state.product_runtime.?.approve(change_id, std.mem.span(approver), std.mem.span(note), now_unix) catch {
+        state.last_error = "ghw_product_approve_change: approve failed";
+        return -1;
+    };
+    return 0;
+}
+
+/// 应用已审批变更 (真实产品 apply 由宿主执行; GHW 记录状态与审计)。
+export fn ghw_product_apply_change(g: ?*GhW, change_id: u64, now_unix: u64) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_apply_change: product runtime not initialized";
+        return -1;
+    }
+    state.product_runtime.?.applyApproved(change_id, now_unix) catch {
+        state.last_error = "ghw_product_apply_change: apply failed";
+        return -1;
+    };
+    return 0;
+}
+
+/// 回滚已应用变更。
+export fn ghw_product_rollback_change(g: ?*GhW, change_id: u64, now_unix: u64) i32 {
+    const g_ptr = g orelse return -1;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_rollback_change: product runtime not initialized";
+        return -1;
+    }
+    state.product_runtime.?.rollbackApplied(change_id, now_unix) catch {
+        state.last_error = "ghw_product_rollback_change: rollback failed";
+        return -1;
+    };
+    return 0;
+}
+
+/// 返回产品进化审计日志 JSON (caller 用 ghw_free_string 释放)。
+export fn ghw_product_audit_json(g: ?*GhW) ?[*:0]u8 {
+    const g_ptr = g orelse return null;
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    if (state.product_runtime == null) {
+        state.last_error = "ghw_product_audit_json: product runtime not initialized";
+        return null;
+    }
+    const json = state.product_runtime.?.auditJson(c_str_alloc) catch {
+        state.last_error = "ghw_product_audit_json: serialization failed";
+        return null;
+    };
+    const out = c_str_alloc.allocSentinel(u8, json.len, 0) catch {
+        c_str_alloc.free(json);
+        return null;
+    };
+    @memcpy(out, json);
+    c_str_alloc.free(json);
+    return out.ptr;
+}
+
+// ===== 错误诊断 =====
+
+/// 返回最近一次失败的描述字符串 (静态, **不要** ghw_free_string 它)。
+/// 没有错误时返回 "" (空串)。让 C 调用方能区分 "没设 key" / "未配置" / "网络失败" 等。
+export fn ghw_last_error(g: ?*GhW) [*:0]const u8 {
+    const g_ptr = g orelse return "null handle";
+    const state: *GhwState = @ptrCast(@alignCast(g_ptr));
+    return state.last_error orelse "";
 }
 
 // ===== version =====
@@ -258,22 +515,36 @@ export fn ghw_setup_llm(g: ?*GhW, provider: [*:0]const u8, api_key_env: [*:0]con
         }
     }
     const key = key_opt orelse {
-        return -1; // env var 没设
+        state.last_error = "ghw_setup_llm: API key env var not set";
+        return -1;
     };
 
     if (std.mem.eql(u8, prov, "deepseek")) {
-        state.llm = HttpLLM.deepseek(state.alloc, state.io, model_slice, key) catch return -1;
+        state.llm = HttpLLM.deepseek(state.alloc, state.io, model_slice, key) catch {
+            state.last_error = "ghw_setup_llm: deepseek HttpLLM init failed";
+            return -1;
+        };
     } else if (std.mem.eql(u8, prov, "openai")) {
-        state.llm = HttpLLM.openai(state.alloc, state.io, model_slice, key, "https://api.openai.com") catch return -1;
+        state.llm = HttpLLM.openai(state.alloc, state.io, model_slice, key, "https://api.openai.com") catch {
+            state.last_error = "ghw_setup_llm: openai HttpLLM init failed";
+            return -1;
+        };
     } else if (std.mem.eql(u8, prov, "anthropic")) {
-        state.llm = HttpLLM.anthropic(state.alloc, state.io, model_slice, key) catch return -1;
+        state.llm = HttpLLM.anthropic(state.alloc, state.io, model_slice, key) catch {
+            state.last_error = "ghw_setup_llm: anthropic HttpLLM init failed";
+            return -1;
+        };
     } else {
-        return -1; // 未知 provider
+        state.last_error = "ghw_setup_llm: unknown provider (use deepseek|openai|anthropic|mock|none)";
+        return -1;
     }
 
     state.llm_chat = state.llm.?.asChat();
     state.llm_setup_done = true;
-    state.llm_model = state.alloc.dupe(u8, model_slice) catch return -1;
+    state.llm_model = state.alloc.dupe(u8, model_slice) catch {
+        state.last_error = "ghw_setup_llm: out of memory";
+        return -1;
+    };
 
     return 0;
 }
@@ -287,8 +558,14 @@ export fn ghw_open_memory(g: ?*GhW, path: [*:0]const u8) i32 {
     const path_slice = std.mem.span(path);
 
     const path_to_use = if (path_slice.len == 0) ":memory:" else path_slice;
-    state.sqlite = SqliteDb.open(state.alloc, path_to_use) catch return -1;
-    state.sqlite.?.initSchema() catch return -1;
+    state.sqlite = SqliteDb.open(state.alloc, path_to_use) catch {
+        state.last_error = "ghw_open_memory: sqlite open failed";
+        return -1;
+    };
+    state.sqlite.?.initSchema() catch {
+        state.last_error = "ghw_open_memory: sqlite schema init failed";
+        return -1;
+    };
 
     const sqlite_ptr: *const SqliteDb = &state.sqlite.?;
     state.action_runner = ActionRunner{
@@ -317,7 +594,10 @@ export fn ghw_world_set(g: ?*GhW, text: [*:0]const u8) void {
 export fn ghw_propose(g: ?*GhW) i32 {
     const g_ptr = g orelse return -1;
     const state: *GhwState = @ptrCast(@alignCast(g_ptr));
-    if (state.llm_chat == null or !state.llm_setup_done) return -1;
+    if (state.llm_chat == null or !state.llm_setup_done) {
+        state.last_error = "ghw_propose: LLM not set up (call ghw_setup_llm first)";
+        return -1;
+    }
 
     // 1. 构造 prompt
     const system_prompt =
@@ -366,7 +646,10 @@ export fn ghw_propose(g: ?*GhW) i32 {
 
     // 3. 解析 goals
     const content = resp.content orelse "";
-    const parsed = ghw_harness.goal_proposer.parseGoals(state.alloc, content) catch return -1;
+    const parsed = ghw_harness.goal_proposer.parseGoals(state.alloc, content) catch {
+        state.last_error = "ghw_propose: failed to parse LLM goals JSON";
+        return -1;
+    };
 
     // 4. 写 sqlite (如果开了) + 内存
     for (parsed) |g_item| {
@@ -399,7 +682,10 @@ export fn ghw_propose(g: ?*GhW) i32 {
 export fn ghw_reflect(g: ?*GhW) i32 {
     const g_ptr = g orelse return -1;
     const state: *GhwState = @ptrCast(@alignCast(g_ptr));
-    if (state.llm_chat == null or !state.llm_setup_done) return -1;
+    if (state.llm_chat == null or !state.llm_setup_done) {
+        state.last_error = "ghw_reflect: LLM not set up (call ghw_setup_llm first)";
+        return -1;
+    }
 
     // 1. 构造 prompt
     const system_prompt =
@@ -477,15 +763,15 @@ export fn ghw_action_run(g: ?*GhW) ?[*:0]u8 {
     if (state.last_action) |*old| old.deinit();
     state.last_action = result;
 
-    // 序列化 cycle report
-    const out = std.fmt.allocPrint(state.alloc, "{{\"success\":{s},\"action_kind\":\"{s}\",\"goal_title\":\"{s}\",\"duration_ms\":{d},\"self_evolved_total\":{d}}}", .{
+    // 序列化 cycle report (c_allocator → 调用方用 ghw_free_string 回收)
+    const out = std.fmt.allocPrintSentinel(c_str_alloc, "{{\"success\":{s},\"action_kind\":\"{s}\",\"goal_title\":\"{s}\",\"duration_ms\":{d},\"self_evolved_total\":{d}}}", .{
         if (result.success) "true" else "false",
         result.action_kind,
         result.goal_title,
         result.duration_ms,
         state.self_evolved_total,
-    }) catch return null;
-    return @ptrCast(out.ptr);
+    }, 0) catch return null;
+    return out.ptr;
 }
 
 /// 启 Link server (Unix socket, 5 method 协议)
@@ -508,8 +794,12 @@ export fn ghw_link_query(g: ?*GhW, peer_path: [*:0]const u8, method: [*:0]const 
     const g_ptr = g orelse return null;
     const state: *GhwState = @ptrCast(@alignCast(g_ptr));
     if (state.link == null) return null;
+    // query 返回的内存来自 state.alloc; 复制成 libc 串后释放原件,
+    // 让调用方能用 ghw_free_string 统一回收。
     const resp = state.link.?.query(std.mem.span(peer_path), std.mem.span(method), "{}") catch return null;
-    return @ptrCast(resp.ptr);
+    defer state.alloc.free(resp);
+    const out = std.fmt.allocPrintSentinel(c_str_alloc, "{s}", .{resp}, 0) catch return null;
+    return out.ptr;
 }
 
 /// 停 link server

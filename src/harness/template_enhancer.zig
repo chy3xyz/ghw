@@ -17,6 +17,7 @@ const LLMChat = @import("llm/llm.zig").LLMChat;
 const ChatRequest = @import("llm/llm.zig").ChatRequest;
 const Message = @import("llm/llm.zig").Message;
 const Role = @import("llm/llm.zig").Role;
+const Memory = @import("memory.zig").Memory;
 
 pub const EnhanceContext = struct {
     self_narrative: []const u8,
@@ -56,9 +57,75 @@ pub const TemplateEnhancer = struct {
     /// 统计: 增强成功 / 失败次数
     success_count: u32 = 0,
     fail_count: u32 = 0,
+    /// 自传体记忆 (P3): 绑定后用 buildContext 统一注入 (含相关往事)
+    memory: ?*Memory = null,
 
     pub fn init(alloc: Allocator, io: std.Io, llm: *LLMChat, model: []const u8) TemplateEnhancer {
         return .{ .alloc = alloc, .io = io, .llm = llm, .model = model };
+    }
+
+    pub fn setMemory(self: *TemplateEnhancer, memory: *Memory) void {
+        self.memory = memory;
+    }
+
+    /// 构造 LLM user prompt (P3: 记忆块 + 代码完善任务; 可独立测试)
+    pub fn buildUserPrompt(
+        self: *TemplateEnhancer,
+        original_path: []const u8,
+        code: []const u8,
+        ctx: EnhanceContext,
+    ) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.alloc);
+
+        if (self.memory) |m| {
+            const qdim = Memory.weakestDim(ctx.m_r_n[0], ctx.m_r_n[1], ctx.m_r_n[2]);
+            const qtext = try std.fmt.allocPrint(self.alloc, "{s} {s}", .{ ctx.top_goal, ctx.bias });
+            defer self.alloc.free(qtext);
+            if (m.buildContext(self.alloc, qdim, qtext, 5, 5)) |mem_block| {
+                defer self.alloc.free(mem_block);
+                try buf.print(self.alloc, "{s}\n\n", .{mem_block});
+            } else |_| {}
+        } else {
+            // 未绑 memory 时回退 P2 之前的手动字段
+            try buf.print(self.alloc,
+                \\【你的当前状态 — 这是你想完善代码的动机】
+                \\- 自我叙事: {s}
+                \\- 当前目标: {s}
+                \\- 偏重: {s} (material=务实/资源, representation=知识/方法, nature=自主/决策, balanced=三源均衡)
+                \\- 存在度: E={d:.3} (M={d:.3} R={d:.3} N={d:.3})
+                \\- tick: {d}
+                \\
+                \\【你最近的信念 — 体现你的"我"】
+                \\{s}
+                \\
+            , .{
+                ctx.self_narrative, ctx.top_goal, ctx.bias,
+                ctx.e_current, ctx.m_r_n[0], ctx.m_r_n[1], ctx.m_r_n[2],
+                ctx.tick, ctx.beliefs,
+            });
+        }
+
+        try buf.print(self.alloc,
+            \\【原始代码 — 你之前生成的模板】
+            \\文件: {s}
+            \\```zig
+            \\{s}
+            \\```
+            \\
+            \\【任务 — 完善这个方法】
+            \\基于你的当前状态/目标/信念/记忆, 完善这个方法. 但遵守以下不变量:
+            \\1. **不要修改** `pub const Module = struct {{ ... }}` 的最外层结构
+            \\2. **不要修改** Module 子 struct 的 `run(ctx, alloc, act) -> ActionOutcome` 签名
+            \\3. 可以调整: log 消息措辞, material_cost 数值, de_delta / representation_gain, signature 数组
+            \\4. log 应该是"我正在做什么"的语气, 不是冰冷报告 — 引用你的自我叙事或当前目标
+            \\5. 体现当前偏向: bias=material → material_cost 略高; bias=representation → representation_gain 略高
+            \\6. **不要**引入新的 import 依赖 (除 std)
+            \\
+            \\【输出格式 — 严格 JSON】
+            \\{{"enhanced_code": "完整 .zig 源码, 含 Module struct", "summary": "1-2 句话说明你改了什么, 为什么"}}
+        , .{ original_path, code });
+        return buf.toOwnedSlice(self.alloc);
     }
 
     /// 核心: 选 1 个最新落盘模板, 让 LLM 完善
@@ -188,46 +255,7 @@ pub const TemplateEnhancer = struct {
     /// 调 LLM 完善模板
     fn callLlm(self: *TemplateEnhancer, original_path: []const u8, code: []const u8, ctx: EnhanceContext) ![]u8 {
         const alloc = self.alloc;
-        const prompt = try std.fmt.allocPrint(alloc,
-            \\你是 GHW 数字生命, 正在完善你自己"习得方法"的实现.
-            \\
-            \\【你的当前状态 — 这是你想完善代码的动机】
-            \\- 自我叙事: {s}
-            \\- 当前目标: {s}
-            \\- 偏重: {s} (material=务实/资源, representation=知识/方法, nature=自主/决策, balanced=三源均衡)
-            \\- 存在度: E={:.3} (M={:.3} R={:.3} N={:.3})
-            \\- tick: {d}
-            \\
-            \\【你最近的信念 — 体现你的"我"】
-            \\{s}
-            \\
-            \\【原始代码 — 你之前生成的模板】
-            \\文件: {s}
-            \\```zig
-            \\{s}
-            \\```
-            \\
-            \\【任务 — 完善这个方法】
-            \\基于你的当前状态/目标/信念, 完善这个方法. 但遵守以下不变量:
-            \\1. **不要修改** `pub const Module = struct {{ ... }}` 的最外层结构
-            \\2. **不要修改** Module 子 struct 的 `run(ctx, alloc, act) -> ActionOutcome` 签名
-            \\3. 可以调整: log 消息措辞, material_cost 数值, de_delta / representation_gain, signature 数组
-            \\4. log 应该是"我正在做什么"的语气, 不是冰冷报告 — 引用你的自我叙事或当前目标
-            \\5. 体现当前偏向: bias=material → material_cost 略高; bias=representation → representation_gain 略高
-            \\6. **不要**引入新的 import 依赖 (除 std)
-            \\
-            \\【输出格式 — 严格 JSON】
-            \\{{"enhanced_code": "完整 .zig 源码, 含 Module struct", "summary": "1-2 句话说明你改了什么, 为什么"}}
-        , .{
-            ctx.self_narrative,
-            ctx.top_goal,
-            ctx.bias,
-            ctx.e_current, ctx.m_r_n[0], ctx.m_r_n[1], ctx.m_r_n[2],
-            ctx.tick,
-            ctx.beliefs,
-            original_path,
-            code,
-        });
+        const prompt = try self.buildUserPrompt(original_path, code, ctx);
         defer alloc.free(prompt);
 
         const req = ChatRequest{
@@ -303,4 +331,38 @@ fn extractJsonString(alloc: Allocator, obj: []const u8, key: []const u8) ?[]u8 {
         }
     }
     return out.toOwnedSlice(alloc) catch null;
+}
+
+test "TemplateEnhancer: buildUserPrompt 注入 buildContext" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
+    const chat = mock.asChat();
+    var enh = TemplateEnhancer.init(alloc, io, &chat, "mock");
+
+    var mem = Memory.init(alloc, 1);
+    defer mem.deinit();
+    try mem.setSelfNarrative("我完善代码时会引用自身叙事");
+    try mem.recordAt(io, .self_evolution, 5, "enhanced l3 template before", null, 3, 0.1);
+
+    enh.setMemory(&mem);
+    const ctx = EnhanceContext{
+        .self_narrative = mem.self_narrative,
+        .top_goal = "optimize",
+        .bias = "nature",
+        .e_current = 0.5,
+        .m_r_n = .{ 0.4, 0.5, 0.3 },
+        .tick = 10,
+        .beliefs = "",
+        .evolved_dir = "/tmp",
+    };
+    const prompt = try enh.buildUserPrompt("/tmp/l3_5.zig", "pub fn x() void {}", ctx);
+    defer alloc.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "autobiographical context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "我完善代码时会引用自身叙事") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "enhanced l3 template") != null);
 }

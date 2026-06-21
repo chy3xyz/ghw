@@ -14,9 +14,21 @@ pub const memory = @import("memory.zig");
 pub const reflection = @import("reflection.zig");
 pub const personality = @import("personality.zig");
 pub const code_generator = @import("code_generator.zig");
+pub const llm_code_generator = @import("llm_code_generator.zig");
 pub const human_symbiosis = @import("human_symbiosis/mod.zig");
+pub const task_runner = @import("task_runner.zig");
+pub const TaskRunner = task_runner;
+pub const task_feedback = @import("task_feedback.zig");
 pub const translator = @import("translator.zig");
 pub const balance_seeker = @import("balance_seeker.zig");
+pub const crm_kpi = @import("crm_kpi.zig");
+pub const product_intent = @import("product_intent.zig");
+pub const kpi_bridge = @import("kpi_bridge.zig");
+pub const product_runtime = @import("product_runtime.zig");
+pub const KpiBridge = kpi_bridge.KpiBridge;
+pub const ProductEvolutionRuntime = product_runtime.ProductEvolutionRuntime;
+pub const ProductChangeKind = product_runtime.ProductChangeKind;
+pub const ChangeStatus = product_runtime.ChangeStatus;
 pub const ghw_link = @import("ghw_link.zig");
 pub const ghw_link_tcp = @import("ghw_link_tcp.zig");
 pub const wechat = @import("wechat/wechat.zig");
@@ -58,11 +70,13 @@ pub const DEFAULT_FORBIDDEN_SYMBOLS = self_evolution.DEFAULT_FORBIDDEN_SYMBOLS;
 
 pub const CodeGenerator = code_generator.CodeGenerator;
 pub const StaticCodeGenerator = code_generator.StaticCodeGenerator;
+pub const LlmCodeGenerator = llm_code_generator.LlmCodeGenerator;
 pub const GenerationRequest = code_generator.GenerationRequest;
 pub const GenerationResult = code_generator.GenerationResult;
 pub const GenerationKind = code_generator.GenerationKind;
 
 pub const SelfEvolver = self_evolver.SelfEvolver;
+pub const EvolveContext = self_evolver.EvolveContext;
 pub const EvolutionEvent = self_evolver.EvolutionEvent;
 pub const EvolutionOutcome = self_evolver.EvolutionOutcome;
 

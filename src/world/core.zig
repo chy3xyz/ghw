@@ -19,6 +19,7 @@ const math = std.math;
 const Allocator = mem.Allocator;
 const util = @import("../util/mod.zig");
 const math_util = util.math;
+const coappropriation = @import("coappropriation.zig");
 const F = util.F;
 const LCG = util.LCG;
 const idx3 = util.idx3;
@@ -207,26 +208,53 @@ pub const ExistenceDegree = struct {
     /// 由 ui_server 每 cycle 从 goal_graph.countDistinctRelations() 更新
     relations_distinct: u8 = 0,
 
+    // === KPI 项 ρ·K (并入主公式, 2026-06; 原 world/existence_degree.zig 已合并删除) ===
+    /// 产品 KPI 是否接入。默认 false ⇒ kpi_term=0, 不影响无产品场景的纯数字生命。
+    /// recordKpi 会自动置 true。
+    kpi_enabled: bool = false,
+    /// ρ 系数 — **公理常量**, 不可被 L1/L4/L5/LLM 修改 (不进 adaptEFormula)。
+    rho: F = 0.15,
+    /// 复合 KPI K∈[0,1]。由 crm_kpi.composite(...) 喂入 (recordKpi)。
+    /// 默认 0.5 (中性: "到 best-in-class 的一半")。
+    kpi_composite: F = 0.5,
+    /// KPI 目标 (best-in-class), 通常 1.0。K_signed = (K − target)·2 ∈ [−2,0]。
+    kpi_target: F = 1.0,
+    /// 64 周期环形缓冲, 供趋势/方差 (不进 E 公式, 仅供反思层/L4 提议器)。
+    kpi_history: [64]F = @splat(0.5),
+    kpi_history_idx: u8 = 0,
+    kpi_history_count: u8 = 0,
+
     /// E(t) 总体存在度
+    ///
+    /// 公式 (v3, 2026-06: 存在度公理重写):
+    ///   E = coappropriation(M,R,N; α,β,γ,μ,ν) + σ·S + λ·D
+    ///
+    /// 合恰核心 coappropriation 用"加权幂平均 × 合恰度门控"统一表达
+    /// 三源的"缺一不可 + 失衡惩罚 + 短板优先",取代旧的
+    /// `αM+βR+γN − μ·Var + ν·min` 线性加权 + 外挂补丁 (见
+    /// `world/coappropriation.zig` 的推导与性质证明)。
+    /// σ·S (共生) 与 λ·D (关系涌现) 仍作为有界加性调制项叠加。
     pub fn e(self: ExistenceDegree) F {
-        const base = self.weights.alpha * self.v.material +
-            self.weights.beta * self.v.representation +
-            self.weights.gamma * self.v.nature;
         // Phase 8.6: 4 加项系数都可自调 (L4 闭环)
         const eff_mu: F = if (self.mu_auto) self.mu_computed else self.mu;
         const eff_nu: F = if (self.nu_auto) self.nu_computed else self.nu;
         const eff_sigma: F = if (self.sigma_auto) self.sigma_computed else self.sigma;
         const eff_lambda: F = if (self.lambda_auto) self.lambda_computed else self.lambda;
-        const imbalance = eff_mu * self.v.variance();
-        const synergy = eff_nu * self.v.min();
-        // 共生加成: peer_E_avg 接近 own.E (经过 e() 计算) 时, 增强 R (共识)
-        // peer_E_avg 远离 own.E 时, 略减 E (不同步是负担)
-        // 计算时用 base (粗略 E) 避免循环依赖
-        // 注: computeSymbiosis 用 self.sigma 字段 (兼容旧 API), auto 模式要把
-        // sigma 同步到 self.sigma (临时), 或重写 computeSymbiosis 用 eff_sigma
-        // 简化: 临时改 self.sigma 给 computeSymbiosis 用 — 不, 这破坏不变性
-        // 修法: 复制 computeSymbiosis 逻辑, 用 eff_sigma
-        const approx_e = math_util.clamp(base - imbalance + synergy, 0, 1);
+        // v3 合恰核心: 加权幂平均 (Hölder/CES) × 合恰度门控
+        // ν → 可替代性指数 p, μ → 合恰耦合 κ (衔接旧自适应闭环)
+        const base = coappropriation.coappropriation(
+            self.v.material,
+            self.v.representation,
+            self.v.nature,
+            self.weights.alpha,
+            self.weights.beta,
+            self.weights.gamma,
+            eff_mu,
+            eff_nu,
+        );
+        // 共生加成: peer_E_avg 接近 own.E 时增强共识, 远离时略减 E
+        // 用合恰核心 base 作为粗略 E, 避免循环依赖
+        const approx_e = base;
         // Phase 8.6: 复制 computeSymbiosis, 用 eff_sigma
         const symbiosis: F = if (self.peer_count == 0 or eff_sigma < 1e-6) 0 else blk: {
             const gap = self.peer_E_avg - approx_e;
@@ -239,7 +267,14 @@ pub const ExistenceDegree = struct {
         // 0 关系 → 0 加成, 满 9 → eff_lambda * 1.0
         const relations_d: F = @as(F, @floatFromInt(self.relations_distinct)) / 9.0;
         const relations_bonus = eff_lambda * relations_d;
-        return math_util.clamp(base - imbalance + synergy + symbiosis + relations_bonus, 0, 1);
+        // KPI 项 ρ·K_signed (产品对齐): K_signed=(K−target)·2∈[−2,0],
+        // 仅在 best-in-class (K=target) 时归零, 否则按距离扣分。
+        // 单调递增于 K, 不影响三源单调性 (KPI 是独立轴), 全程 clamp 保证有界。
+        const kpi_term: F = if (self.kpi_enabled)
+            self.rho * (self.kpi_composite - self.kpi_target) * 2.0
+        else
+            0.0;
+        return math_util.clamp(base + symbiosis + relations_bonus + kpi_term, 0, 1);
     }
 
     /// lambda 自适应 (Phase 8.5 2026-06-09)
@@ -410,36 +445,13 @@ pub const ExistenceDegree = struct {
         return self.sigma * sync_factor * n_factor;
     }
 
-    /// E(t+1) - E(t) 增量 (供存在度更新循环使用)
+    /// E(t+1) - E(t) 增量 (供存在度更新循环使用)。
+    /// 复制当前全部状态, 仅把三源向量换成 prev, 再比较两次 e()。
+    /// (用整体复制而非逐字段列举, 新增字段如 KPI 自动纳入, 不会漏拷。)
     pub fn delta(self: ExistenceDegree, prev: ExistenceVector) F {
         const cur = self.e();
-        const before: ExistenceDegree = .{
-            .v = prev,
-            .weights = self.weights,
-            .mu = self.mu,
-            .nu = self.nu,
-            .sigma = self.sigma,
-            .lambda = self.lambda,
-            .lambda_auto = self.lambda_auto,
-            .lambda_computed = self.lambda_computed,
-            .lambda_stage = self.lambda_stage,
-            .nu_auto = self.nu_auto,
-            .nu_computed = self.nu_computed,
-            .mu_auto = self.mu_auto,
-            .mu_computed = self.mu_computed,
-            .sigma_auto = self.sigma_auto,
-            .sigma_computed = self.sigma_computed,
-            .nu_proposed = self.nu_proposed,
-            .mu_proposed = self.mu_proposed,
-            .sigma_proposed = self.sigma_proposed,
-            .lambda_proposed = self.lambda_proposed,
-            .propose_total = self.propose_total,
-            .propose_accepted = self.propose_accepted,
-            .propose_rejected = self.propose_rejected,
-            .peer_E_avg = self.peer_E_avg,
-            .peer_count = self.peer_count,
-            .relations_distinct = self.relations_distinct,
-        };
+        var before = self;
+        before.v = prev;
         return cur - before.e();
     }
 
@@ -470,12 +482,107 @@ pub const ExistenceDegree = struct {
         self.weights.adapt(self.v);
     }
 
+    /// 喂入一个新的复合 KPI 值 K∈[0,1] (来自 crm_kpi.composite)。
+    /// 写入环形缓冲并设为当前 kpi_composite, 同时开启 KPI 项。
+    /// 调用频率受 kpi_refresh_interval_hours 限制 (防 E 抖动), 由调用方控制。
+    pub fn recordKpi(self: *ExistenceDegree, k: F) void {
+        const kc = math_util.clamp(k, 0, 1);
+        self.kpi_history[self.kpi_history_idx] = kc;
+        self.kpi_history_idx = (self.kpi_history_idx + 1) % 64;
+        if (self.kpi_history_count < 64) self.kpi_history_count += 1;
+        self.kpi_composite = kc;
+        self.kpi_enabled = true;
+    }
+
+    /// KPI 历史的线性回归斜率 (K-units/cycle)。缓冲未满返回 0 (不在半数据上行动)。
+    /// 仅供 L4 提议器 / 反思层读取, 不进 E 公式。
+    pub fn kpiTrend(self: *const ExistenceDegree) F {
+        if (self.kpi_history_count < 64) return 0;
+        var sum_x: F = 0;
+        var sum_y: F = 0;
+        var sum_xy: F = 0;
+        var sum_x2: F = 0;
+        const n: F = 64.0;
+        for (0..64) |i| {
+            const x: F = @floatFromInt(i);
+            const y = self.kpi_history[i];
+            sum_x += x;
+            sum_y += y;
+            sum_xy += x * y;
+            sum_x2 += x * x;
+        }
+        const den = n * sum_x2 - sum_x * sum_x;
+        if (den == 0) return 0;
+        return (n * sum_xy - sum_x * sum_y) / den;
+    }
+
+    /// KPI 历史方差 (稳定性信号)。少于 2 个样本返回 0。
+    pub fn kpiVariance(self: *const ExistenceDegree) F {
+        if (self.kpi_history_count < 2) return 0;
+        const n: F = @floatFromInt(self.kpi_history_count);
+        var sum: F = 0;
+        for (self.kpi_history[0..self.kpi_history_count]) |k| sum += k;
+        const m = sum / n;
+        var sq: F = 0;
+        for (self.kpi_history[0..self.kpi_history_count]) |k| {
+            const d = k - m;
+            sq += d * d;
+        }
+        return sq / n;
+    }
+
+    /// E 各项分解 (供 UI 堆叠条 / 审计)。各项之和 == clamp 前的 total。
+    pub fn eBreakdown(self: ExistenceDegree) EBreakdown {
+        const eff_mu: F = if (self.mu_auto) self.mu_computed else self.mu;
+        const eff_nu: F = if (self.nu_auto) self.nu_computed else self.nu;
+        const eff_sigma: F = if (self.sigma_auto) self.sigma_computed else self.sigma;
+        const eff_lambda: F = if (self.lambda_auto) self.lambda_computed else self.lambda;
+        const base = coappropriation.coappropriation(
+            self.v.material,
+            self.v.representation,
+            self.v.nature,
+            self.weights.alpha,
+            self.weights.beta,
+            self.weights.gamma,
+            eff_mu,
+            eff_nu,
+        );
+        const symbiosis: F = if (self.peer_count == 0 or eff_sigma < 1e-6) 0 else blk: {
+            const gap = self.peer_E_avg - base;
+            const abs_gap: F = if (gap < 0) -gap else gap;
+            const sync_factor: F = @max(0.0, 1.0 - abs_gap / 0.5);
+            const n_factor: F = @log2(1.0 + @as(F, @floatFromInt(self.peer_count))) / 3.0;
+            break :blk eff_sigma * sync_factor * n_factor;
+        };
+        const relations_bonus = eff_lambda * (@as(F, @floatFromInt(self.relations_distinct)) / 9.0);
+        const kpi_term: F = if (self.kpi_enabled)
+            self.rho * (self.kpi_composite - self.kpi_target) * 2.0
+        else
+            0.0;
+        return .{
+            .base = base,
+            .symbiosis = symbiosis,
+            .relations_bonus = relations_bonus,
+            .kpi_term = kpi_term,
+            .total = math_util.clamp(base + symbiosis + relations_bonus + kpi_term, 0, 1),
+        };
+    }
+
     pub fn format(self: ExistenceDegree, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("E={d:.3} (", .{self.e()});
         try self.v.format(w);
         try w.print(") weights=", .{});
         try self.weights.format(w);
     }
+};
+
+/// E 公式各项分解 (合恰核心 + 共生 + 关系涌现 + KPI)。
+pub const EBreakdown = struct {
+    base: F, // 合恰核心 M_p(M,R,N)
+    symbiosis: F, // σ·S
+    relations_bonus: F, // λ·D
+    kpi_term: F, // ρ·K_signed
+    total: F, // clamp 后的 E
 };
 
 /// 三源合恰张量 W[i][j][k]
@@ -1023,6 +1130,82 @@ test "ExistenceDegree: A1 公式对所有 v ∈ [0,1]^3 都返回 E ∈ [0,1]" {
         const e = d.e();
         try std.testing.expect(e >= 0.0);
         try std.testing.expect(e <= 1.0);
+    }
+}
+
+test "ExistenceDegree: KPI 默认关闭 ⇒ 不影响 E" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 } };
+    const e_off = d.e();
+    // 默认 kpi_enabled=false ⇒ 合恰核心 0.5
+    try std.testing.expectApproxEqAbs(@as(F, 0.5), e_off, 1e-4);
+    try std.testing.expect(!d.kpi_enabled);
+}
+
+test "ExistenceDegree: KPI 项 ρ·K — best-in-class 不扣分, 越差扣越多" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 } };
+    const e_base = d.e(); // 0.5, KPI 关
+    // K=target(1.0) ⇒ kpi_term=0 ⇒ E 不变
+    d.recordKpi(1.0);
+    try std.testing.expect(d.kpi_enabled);
+    try std.testing.expectApproxEqAbs(e_base, d.e(), 1e-4);
+    // K=0.5 ⇒ kpi_term = 0.15*(0.5-1)*2 = -0.15
+    d.recordKpi(0.5);
+    try std.testing.expectApproxEqAbs(e_base - 0.15, d.e(), 1e-4);
+    // K=0.0 ⇒ kpi_term = 0.15*(0-1)*2 = -0.30
+    d.recordKpi(0.0);
+    try std.testing.expectApproxEqAbs(@max(0.0, e_base - 0.30), d.e(), 1e-4);
+    // KPI 项单调递增于 K
+    d.recordKpi(0.2);
+    const e_low = d.e();
+    d.recordKpi(0.8);
+    const e_high = d.e();
+    try std.testing.expect(e_high > e_low);
+}
+
+test "ExistenceDegree: ρ 是公理常量 (不在 adaptEFormula/Proposed 中)" {
+    var d: ExistenceDegree = .{};
+    const rho_before = d.rho;
+    _ = d.adaptEFormula();
+    _ = d.adaptEFormulaProposed(0.8, 0.5, 0.3, 0.4);
+    try std.testing.expectEqual(rho_before, d.rho); // 自适应从不碰 ρ
+}
+
+test "ExistenceDegree: eBreakdown 各项和 == total (clamp 前一致)" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.6, .representation = 0.5, .nature = 0.4 } };
+    d.recordKpi(0.8);
+    d.relations_distinct = 4;
+    const bd = d.eBreakdown();
+    const sum = bd.base + bd.symbiosis + bd.relations_bonus + bd.kpi_term;
+    try std.testing.expectApproxEqAbs(math_util.clamp(sum, 0, 1), bd.total, 1e-5);
+    // eBreakdown.total 应与 e() 一致
+    try std.testing.expectApproxEqAbs(d.e(), bd.total, 1e-5);
+}
+
+test "ExistenceDegree: KPI 环形缓冲 + 趋势 + 方差" {
+    var d: ExistenceDegree = .{};
+    // 满 64 之前趋势为 0
+    try std.testing.expectEqual(@as(F, 0), d.kpiTrend());
+    // 线性上升 ⇒ 正斜率
+    for (0..64) |i| d.recordKpi(@as(F, @floatFromInt(i)) / 64.0);
+    try std.testing.expect(d.kpiTrend() > 0.013);
+    try std.testing.expect(d.kpiTrend() < 0.018);
+    // 环形缓冲在 64 处回绕
+    try std.testing.expectEqual(@as(u8, 64), d.kpi_history_count);
+    // 常量序列 ⇒ 方差 0
+    var c: ExistenceDegree = .{};
+    for (0..10) |_| c.recordKpi(0.7);
+    try std.testing.expectApproxEqAbs(@as(F, 0), c.kpiVariance(), 1e-5);
+}
+
+test "ExistenceDegree: KPI 开启后 E 仍恒在 [0,1] (含极端 K)" {
+    var i: u32 = 0;
+    while (i < 121) : (i += 1) {
+        const m: F = @as(F, @floatFromInt(i % 11)) / 10.0;
+        const r: F = @as(F, @floatFromInt((i / 11) % 11)) / 10.0;
+        var d: ExistenceDegree = .{ .v = .{ .material = m, .representation = r, .nature = 0.3 } };
+        d.recordKpi(@as(F, @floatFromInt(i % 5)) / 4.0);
+        const e = d.e();
+        try std.testing.expect(e >= 0.0 and e <= 1.0);
     }
 }
 

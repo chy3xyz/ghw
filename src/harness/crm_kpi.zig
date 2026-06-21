@@ -1,7 +1,7 @@
 //! CrmKpi — the 4-KPI composite for GHW-as-CRM.
 //!
-//! Status: Week 2 of Phase 1 (GHW-as-CRM). Pairs with
-//! src/world/existence_degree.zig (the ρ term) and
+//! Status: Week 2 of Phase 1 (GHW-as-CRM). Pairs with the ρ·K term
+//! in src/world/core.zig (ExistenceDegree.recordKpi / e()) and
 //! docs/KPI.md (the spec).
 //!
 //! # What this module does
@@ -18,7 +18,8 @@
 //!   That is the responsibility of the CRM product's KPI provider
 //!   callback (registered via ghw_kpi_register_source).
 //! - It does NOT decide what to do with the composite. The E
-//!   formula in existence_degree.zig consumes the composite.
+//!   formula in world/core.zig (ExistenceDegree) consumes the
+//!   composite via recordKpi().
 
 const std = @import("std");
 const product_intent = @import("product_intent.zig");
@@ -33,13 +34,26 @@ pub const RawKpi = struct {
     sales_cycle_days_p50: f32 = 0.0, // 20 - 90 days
     weekly_active_sales_pct: f32 = 0.0, // 0.40 - 0.95
 
-    /// True iff all 4 values are within the documented valid range.
-    /// Used to reject bad upstream data.
+    /// Optional real source for the `user_satisfaction` value-weight axis:
+    /// a customer-satisfaction score already normalized to [0,1] (e.g. CSAT/NPS).
+    /// `null` ⇒ composite falls back to the weekly_active_sales proxy (legacy behavior).
+    csat: ?f32 = null,
+    /// Optional real source for the `safety` value-weight axis:
+    /// a normalized incident severity in [0,1] (0 = no incidents, 1 = worst).
+    /// `null` ⇒ safety axis contributes 0 (legacy behavior).
+    incident_rate: ?f32 = null,
+
+    /// True iff all provided values are within the documented valid range.
+    /// Used to reject bad upstream data. Optional axes are checked only if present.
     pub fn isValid(self: *const RawKpi) bool {
-        return self.nrr_quarterly >= 0.0 and self.nrr_quarterly <= 2.0 and
+        const core_ok = self.nrr_quarterly >= 0.0 and self.nrr_quarterly <= 2.0 and
             self.deal_win_rate >= 0.0 and self.deal_win_rate <= 1.0 and
             self.sales_cycle_days_p50 >= 0.0 and self.sales_cycle_days_p50 <= 365.0 and
             self.weekly_active_sales_pct >= 0.0 and self.weekly_active_sales_pct <= 1.0;
+        if (!core_ok) return false;
+        if (self.csat) |c| if (c < 0.0 or c > 1.0) return false;
+        if (self.incident_rate) |ir| if (ir < 0.0 or ir > 1.0) return false;
+        return true;
     }
 };
 
@@ -52,6 +66,10 @@ pub const NormalizedKpi = struct {
     deal_win_rate: f32, // 0.10 → 0.0, 0.40 → 1.0
     sales_cycle_days: f32, // 20 → 1.0, 60 → 0.5, 90 → 0.0 (inverted)
     weekly_active_sales: f32, // 0.40 → 0.0, 0.95 → 1.0
+    /// Real user-satisfaction score in [0,1] if a source was provided, else null.
+    user_satisfaction: ?f32 = null,
+    /// Real safety score in [0,1] (1 = safest) if an incident source was provided, else null.
+    safety: ?f32 = null,
 };
 
 /// Normalize a RawKpi to [0, 1] scores per docs/KPI.md §3.
@@ -75,6 +93,10 @@ pub fn normalize(raw: RawKpi) NormalizedKpi {
         .sales_cycle_days = clamp01((90.0 - raw.sales_cycle_days_p50) / (90.0 - 20.0)),
         // Active sales: 0.40 → 0.0, 0.95 → 1.0
         .weekly_active_sales = clamp01((raw.weekly_active_sales_pct - 0.40) / (0.95 - 0.40)),
+        // CSAT already in [0,1]; just clamp defensively.
+        .user_satisfaction = if (raw.csat) |c| clamp01(c) else null,
+        // Safety = 1 − incident severity (higher = safer).
+        .safety = if (raw.incident_rate) |ir| 1.0 - clamp01(ir) else null,
     };
 }
 
@@ -98,10 +120,10 @@ pub fn composite(
     north_star_is_revenue: bool,
 ) f32 {
     // Map the 4 KPIs to the 4 value_weights dimensions:
-    //   user_satisfaction ↔ (placeholder; future CSAT)
+    //   user_satisfaction ↔ real CSAT (RawKpi.csat) if provided, else active-sales proxy
     //   retention         ↔ nrr (NRR is a retention signal)
     //   revenue           ↔ deal_win_rate (revenue primary signal)
-    //   safety            ↔ (1 - normalized incident rate; future)
+    //   safety            ↔ 1 − incident severity (RawKpi.incident_rate) if provided, else 0
     //
     // The third dimension (sales_cycle) and fourth (active_sales) are
     // operational signals not directly mapped to value_weights; we
@@ -110,21 +132,20 @@ pub fn composite(
     const revenue_blend = 0.5 * norm.deal_win_rate + 0.25 * norm.sales_cycle_days + 0.25 * norm.weekly_active_sales;
     const retention_blend = norm.nrr; // NRR is the canonical retention signal
 
-    // For CRM, user_satisfaction weight is not yet backed by a real
-    // CSAT source; we use weekly_active_sales as a proxy (a healthy
-    // team correlates with better customer experience).
-    const user_sat_proxy = norm.weekly_active_sales;
+    // user_satisfaction: use a real CSAT source if provided, else fall back
+    // to the weekly_active_sales proxy (a healthy team correlates with better CX).
+    const user_sat_blend = norm.user_satisfaction orelse norm.weekly_active_sales;
 
-    // Safety weight is currently 0.0 — no incident source registered
-    // yet. Future: subtract normalized incident rate.
-    const safety_blend: f32 = 0.0;
+    // safety: use a real incident source if provided (1 − severity), else 0
+    // (legacy: no incident source ⇒ the safety axis contributes nothing).
+    const safety_blend: f32 = norm.safety orelse 0.0;
 
     var w_revenue = weights.revenue;
     if (north_star_is_revenue) {
         w_revenue *= 1.5; // boost the north-star axis
     }
 
-    var sum = weights.user_satisfaction * user_sat_proxy +
+    var sum = weights.user_satisfaction * user_sat_blend +
         weights.retention * retention_blend +
         w_revenue * revenue_blend +
         weights.safety * safety_blend;
@@ -257,4 +278,60 @@ test "RawKpi.isValid: rejects out-of-range" {
         .weekly_active_sales_pct = 0.75,
     };
     try std.testing.expect(!r.isValid());
+}
+
+test "RawKpi.isValid: rejects out-of-range optional axes" {
+    var r = RawKpi{ .nrr_quarterly = 1.0, .deal_win_rate = 0.25, .sales_cycle_days_p50 = 45.0, .weekly_active_sales_pct = 0.75 };
+    r.csat = 1.5; // out of [0,1]
+    try std.testing.expect(!r.isValid());
+    r.csat = 0.8;
+    r.incident_rate = -0.1; // out of [0,1]
+    try std.testing.expect(!r.isValid());
+    r.incident_rate = 0.2;
+    try std.testing.expect(r.isValid());
+}
+
+test "normalize: real csat/incident produce user_satisfaction/safety axes" {
+    const norm = normalize(.{ .csat = 0.9, .incident_rate = 0.25 });
+    try std.testing.expect(norm.user_satisfaction != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.9), norm.user_satisfaction.?, 1e-5);
+    try std.testing.expect(norm.safety != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), norm.safety.?, 1e-5); // 1 − 0.25
+    // No source ⇒ null (legacy proxy path)
+    const norm2 = normalize(.{ .nrr_quarterly = 1.0 });
+    try std.testing.expectEqual(@as(?f32, null), norm2.user_satisfaction);
+    try std.testing.expectEqual(@as(?f32, null), norm2.safety);
+}
+
+test "composite: real CSAT replaces active-sales proxy on user_satisfaction axis" {
+    const weights = product_intent.ValueWeights{
+        .user_satisfaction = 0.40, // heavy on satisfaction to make the swap visible
+        .retention = 0.20,
+        .revenue = 0.20,
+        .safety = 0.20,
+        ._raw_buf = &.{},
+    };
+    // Same core KPIs; only difference is a poor real CSAT vs. the active-sales proxy (=1.0).
+    const base = RawKpi{ .nrr_quarterly = 1.00, .deal_win_rate = 0.25, .sales_cycle_days_p50 = 55.0, .weekly_active_sales_pct = 0.95 };
+    const k_proxy = composite(normalize(base), weights, false); // proxy: user_sat = active_sales = 1.0
+    var with_csat = base;
+    with_csat.csat = 0.1; // real source says satisfaction is low
+    const k_real = composite(normalize(with_csat), weights, false);
+    try std.testing.expect(k_real < k_proxy); // honest low CSAT pulls K down
+}
+
+test "composite: real safety source lifts K vs. legacy 0 contribution" {
+    const weights = product_intent.ValueWeights{
+        .user_satisfaction = 0.20,
+        .retention = 0.20,
+        .revenue = 0.20,
+        .safety = 0.40, // heavy on safety to make the source visible
+        ._raw_buf = &.{},
+    };
+    const base = RawKpi{ .nrr_quarterly = 1.00, .deal_win_rate = 0.25, .sales_cycle_days_p50 = 55.0, .weekly_active_sales_pct = 0.675 };
+    const k_legacy = composite(normalize(base), weights, false); // safety axis = 0
+    var with_safety = base;
+    with_safety.incident_rate = 0.0; // no incidents ⇒ safety = 1.0
+    const k_safe = composite(normalize(with_safety), weights, false);
+    try std.testing.expect(k_safe > k_legacy); // real "all safe" signal raises K
 }

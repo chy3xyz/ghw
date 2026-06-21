@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "spectrum", .root = "examples/spectrum.zig" },
         .{ .name = "selfevolve", .root = "examples/selfevolve.zig" },
         .{ .name = "migrate", .root = "examples/migrate.zig" },
+        .{ .name = "self_migrate_e2e", .root = "examples/self_migrate_e2e.zig" },
         .{ .name = "multi_agent_demo", .root = "examples/multi_agent_demo.zig" },
         // migrate2 暂时 skip (Zig 0.17 std.posix 兼容问题, 不影响 SDK)
         // .{ .name = "migrate2", .root = "examples/migrate2.zig" },

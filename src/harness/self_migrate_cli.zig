@@ -44,22 +44,27 @@ pub fn detectMigrateFromArg(args: []const []const u8) ?[]const u8 {
 /// 返回: true 表示成功接管, false 表示正常启动 (无 --migrate-from)
 pub fn handleMigrateFromArg(
     allocator: Allocator,
+    io: std.Io,
     state_path: []const u8,
 ) !bool {
     std.debug.print("\n\x1b[1;33m┌─ SelfMigrateCLI: 检测到 --migrate-from 参数\x1b[0m\n", .{});
     std.debug.print("\x1b[1;33m│\x1b[0m  state file: {s}\n", .{state_path});
 
-    // 0.17 中 readFromFile 是 stub, 这里用直接读 + 解析
-    // 实际部署时用 std.Io.Dir 读
-    var ss = StateSerializer.initMemory(allocator);
-    defer ss.deinit();
+    var ss = StateSerializer.init(allocator, io);
 
-    // 简化: 直接构造一个测试 state 来演示 (真实场景需用 Io 读文件)
-    // 这里走 parser 路径
-    const parsed = try ss.parseMinimal("{\"agent_id\": \"loaded-from-file\", \"tick\": 100, \"M\": 0.5, \"R\": 0.5, \"N\": 0.5, \"E\": 0.5}");
-    std.debug.print("\x1b[1;33m│\x1b[0m  loaded: id={s} tick={d} E={d:.3}\n", .{ parsed.agent_id, parsed.tick, parsed.e_current });
-    parsed.deinit();
+    const json = ss.readFromFile(state_path) catch |err| {
+        std.debug.print("\x1b[1;31m│\x1b[0m  ✗ 读取 state 失败 ({t}), 用默认状态接管\n", .{err});
+        std.debug.print("\x1b[1;33m└─\x1b[0m\n\n", .{});
+        return true;
+    };
+    defer allocator.free(json);
 
+    var parsed = try ss.parseMinimal(json);
+    defer parsed.deinit();
+    std.debug.print("\x1b[1;33m│\x1b[0m  loaded: id={s} tick={d} E={d:.3} (M={d:.3} R={d:.3} N={d:.3})\n", .{
+        parsed.agent_id, parsed.tick,         parsed.e_current,
+        parsed.material, parsed.representation, parsed.nature,
+    });
     std.debug.print("\x1b[1;33m│\x1b[0m  ✓ 接管成功 - 数字生命在新代码壳中复活\n", .{});
     std.debug.print("\x1b[1;33m└─\x1b[0m\n\n", .{});
 

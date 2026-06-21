@@ -26,6 +26,7 @@ const StaticCodeGenerator = code_generator.StaticCodeGenerator;
 const GenerationRequest = code_generator.GenerationRequest;
 const GenerationResult = code_generator.GenerationResult;
 const GenerationKind = code_generator.GenerationKind;
+const Memory = @import("memory.zig").Memory;
 
 /// 演化事件: 一次完整的自升级尝试
 pub const EvolutionEvent = struct {
@@ -58,6 +59,16 @@ pub const EvolutionOutcome = struct {
     }
 };
 
+/// 单次 evolve 的 agent 快照 (P3: 供记忆检索 + context 构造)
+pub const EvolveContext = struct {
+    e: F,
+    tick: u64,
+    material: F = 0.33,
+    representation: F = 0.33,
+    nature: F = 0.34,
+    query_text: []const u8 = "",
+};
+
 pub const SelfEvolver = struct {
     allocator: Allocator,
     guard: SelfEvolutionGuard,
@@ -80,6 +91,8 @@ pub const SelfEvolver = struct {
     latest_code: ?[]u8 = null,
     /// 最近一次的目标文件
     latest_target: ?[]const u8 = null,
+    /// 自传体记忆 (P3): 绑定后 enrich prompt/context, 供 LLM 后端 + 审计
+    memory: ?*Memory = null,
 
     pub fn init(allocator: Allocator, generator: CodeGenerator) SelfEvolver {
         return .{
@@ -94,6 +107,15 @@ pub const SelfEvolver = struct {
         self.verifier = verifier;
     }
 
+    pub fn setMemory(self: *SelfEvolver, memory: *Memory) void {
+        self.memory = memory;
+    }
+
+    /// 切换 CodeGenerator 后端 (P4: Static → Llm)
+    pub fn setGenerator(self: *SelfEvolver, generator: CodeGenerator) void {
+        self.generator = generator;
+    }
+
     pub fn deinit(self: *SelfEvolver) void {
         if (self.latest_code) |c| self.allocator.free(c);
         self.guard.deinit();
@@ -106,17 +128,33 @@ pub const SelfEvolver = struct {
     pub fn evolve(
         self: *SelfEvolver,
         request: GenerationRequest,
-        current_e: F,
-        tick: u64,
+        ctx: EvolveContext,
     ) !EvolutionOutcome {
         // 1. 注入当前 E 到 context
-        var context_buf: [256]u8 = undefined;
-        const context = std.fmt.bufPrint(&context_buf, "tick={d} E={d:.3} {s}", .{
-            tick, current_e, request.context,
+        var context_buf: [512]u8 = undefined;
+        const base_context = std.fmt.bufPrint(&context_buf, "tick={d} E={d:.3} {s}", .{
+            ctx.tick, ctx.e, request.context,
         }) catch request.context;
 
         var req = request;
-        req.context = context;
+        req.context = base_context;
+
+        // 1.5 P3: 自传体记忆注入 prompt (LLM 后端 + 生成代码注释审计链)
+        var mem_prompt: ?[]u8 = null;
+        defer if (mem_prompt) |p| self.allocator.free(p);
+        if (self.memory) |memory_ref| {
+            const qdim = Memory.weakestDim(ctx.material, ctx.representation, ctx.nature);
+            const qtext = if (ctx.query_text.len > 0) ctx.query_text else base_context;
+            if (memory_ref.buildContext(self.allocator, qdim, qtext, 3, 3)) |block| {
+                defer self.allocator.free(block);
+                if (request.prompt.len > 0) {
+                    mem_prompt = try std.fmt.allocPrint(self.allocator, "{s}\n---\n{s}", .{ block, request.prompt });
+                } else {
+                    mem_prompt = try self.allocator.dupe(u8, block);
+                }
+                req.prompt = mem_prompt.?;
+            } else |_| {}
+        }
 
         // 2. 调用代码生成器
         const gen_result = self.generator.generate(req, self.allocator);
@@ -124,7 +162,7 @@ pub const SelfEvolver = struct {
             // 生成失败
             self.fail_count += 1;
             try self.history.append(self.allocator, .{
-                .tick = tick,
+                .tick = ctx.tick,
                 .target_file = req.target_file,
                 .kind = req.kind,
                 .verdict = .rejected_empty,
@@ -206,7 +244,7 @@ pub const SelfEvolver = struct {
 
         // 5. 记录历史
         try self.history.append(self.allocator, .{
-            .tick = tick,
+            .tick = ctx.tick,
             .target_file = gr.target_file,
             .kind = req.kind,
             .verdict = verdict,
@@ -278,7 +316,7 @@ test "SelfEvolver: 完整自升级流程 (成功路径)" {
         .context = "stagnation E=0.4",
         .target_file = "src/agent/params.zig",
     };
-    var outcome = try se.evolve(req, 0.4, 1);
+    var outcome = try se.evolve(req, .{ .e = 0.4, .tick = 1 });
     defer outcome.deinit();
     try std.testing.expect(outcome.approved);
     try std.testing.expectEqual(ReviewVerdict.approved, outcome.verdict);
@@ -298,7 +336,7 @@ test "SelfEvolver: 黑名单路径被拒" {
         .context = "stagnation E=0.4",
         .target_file = "src/world/core.zig", // 试图改核心
     };
-    var outcome = try se.evolve(req, 0.4, 1);
+    var outcome = try se.evolve(req, .{ .e = 0.4, .tick = 1 });
     defer outcome.deinit();
     try std.testing.expect(!outcome.approved);
     try std.testing.expectEqual(ReviewVerdict.rejected_whitelist, outcome.verdict);
@@ -315,11 +353,11 @@ test "SelfEvolver: 多次演化, 累计统计正确" {
 
     // 3 次成功 + 2 次失败
     for (0..3) |i| {
-        var o = try se.evolve(.{ .kind = .param_adjustment, .context = "", .target_file = "src/agent/params.zig" }, 0.4, i + 1);
+        var o = try se.evolve(.{ .kind = .param_adjustment, .context = "", .target_file = "src/agent/params.zig" }, .{ .e = 0.4, .tick = i + 1 });
         o.deinit();
     }
     for (0..2) |i| {
-        var o = try se.evolve(.{ .kind = .param_adjustment, .context = "", .target_file = "src/world/core.zig" }, 0.4, i + 10);
+        var o = try se.evolve(.{ .kind = .param_adjustment, .context = "", .target_file = "src/world/core.zig" }, .{ .e = 0.4, .tick = i + 10 });
         o.deinit();
     }
     try std.testing.expectEqual(@as(u32, 3), se.success_count);
@@ -335,7 +373,7 @@ test "SelfEvolver: apply 在内存中保存代码" {
     var se = SelfEvolver.init(alloc, cg);
     defer se.deinit();
 
-    const outcome = try se.evolve(.{ .kind = .method_implementation, .context = "E=0.3", .target_file = "src/goal/methods/x.zig" }, 0.3, 1);
+    const outcome = try se.evolve(.{ .kind = .method_implementation, .context = "E=0.3", .target_file = "src/goal/methods/x.zig" }, .{ .e = 0.3, .tick = 1 });
     try std.testing.expect(outcome.approved);
     const code_len = outcome.generated_code.len;
     try std.testing.expect(code_len > 0);
@@ -346,4 +384,32 @@ test "SelfEvolver: apply 在内存中保存代码" {
     try std.testing.expect(se.latestCode() != null);
     try std.testing.expect(se.latestCode().?.len == code_len);
     try std.testing.expectEqualStrings("src/goal/methods/x.zig", se.latestTarget());
+}
+
+test "SelfEvolver: setMemory 绑定后 evolve 不崩溃" {
+    const alloc = std.testing.allocator;
+    var gen = StaticCodeGenerator.init(alloc);
+    const cg = gen.asGenerator();
+    var se = SelfEvolver.init(alloc, cg);
+    defer se.deinit();
+
+    var memory = Memory.init(alloc, 1);
+    defer memory.deinit();
+    try memory.setSelfNarrative("演化时我记得自己是谁");
+    se.setMemory(&memory);
+
+    var outcome = try se.evolve(.{
+        .kind = .param_adjustment,
+        .context = "stagnation",
+        .target_file = "src/agent/params.zig",
+    }, .{
+        .e = 0.4,
+        .tick = 1,
+        .material = 0.3,
+        .representation = 0.5,
+        .nature = 0.4,
+        .query_text = "param adjust",
+    });
+    defer outcome.deinit();
+    try std.testing.expect(outcome.generated_code.len > 0);
 }

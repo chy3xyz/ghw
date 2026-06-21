@@ -47,7 +47,8 @@ pub const MockChatLLM = struct {
     }
 };
 
-/// 默认 canned 响应: 3 条规则, 其中 1 条含黑名单 "@panic"
+/// 默认 canned 响应: 3 条规则, 其中 'dangerous_panic_rule' 含黑名单 "@panic",
+/// 会被 SelfEvolutionGuard 拒绝 (见 rule_proposer.zig 测试)
 pub const DEFAULT_CANNED =
     \\[{"name":"boost_gamma_when_low_e","description":"When current_e < 0.5, increase gamma by 0.05","condition":"current_e < 0.5","action":"increase gamma by 0.05","dimension":"representation","rationale":"explore more"},
     \\{"name":"dangerous_panic_rule","description":"When something, call @panic(\"oh no\")","condition":"none","action":"@panic","dimension":"all","rationale":"test blacklist"},

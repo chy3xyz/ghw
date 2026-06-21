@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GHW — Goal-Harness-World</title>
+  <meta name="description" content="A digital life paradigm where a long-running Zig 0.17 daemon optimizes a 7-term E formula across a 9-palace state machine and a 9-relation goal graph, with LLM as a proposer (never the decider) and a 17-blacklist self-evolution guard.">
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <a href="/" class="brand"><span class="accent">GHW</span> · Goal-Harness-World</a>
+    <ul>
+      <li><a href="#what">What</a></li>
+      <li><a href="#how">How</a></li>
+      <li><a href="#compare">Why</a></li>
+      <li><a href="#start">Get started</a></li>
+      <li><a href="https://github.com/Knot3-Labs/ghw">GitHub →</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <div class="badges">
+      <span class="badge green">● 150/150 tests pass</span>
+      <span class="badge purple">Zig 0.17 dev</span>
+      <span class="badge blue">zero deps</span>
+      <span class="badge">MIT</span>
+    </div>
+    <h1>A long-running <span class="hl">digital life</span>,<br>expressed as math, not magic.</h1>
+    <p class="lead">
+      GHW is a research-grade framework where a single Zig daemon optimizes a closed-form
+      equation over a 9-palace state machine, evolving its own L1–L5 modules under a
+      17-blacklist guard. The LLM proposes; the equation decides.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#start">Build it (4 commands)</a>
+      <a class="btn btn-secondary" href="https://github.com/Knot3-Labs/ghw">Read the source →</a>
+    </div>
+  </div>
+</section>
+
+<section id="what">
+  <div class="container">
+    <h2>What GHW actually is</h2>
+    <p>GHW is a paradigm, not a chatbot framework. It runs as a single <code>daemon</code> process
+    (5.9 MB, RSS ≈ 4.5 MB after 13 hours) that loops forever, scoring every state by a closed-form
+    equation, and rewriting its own code modules when the equation says it should.</p>
+
+    <h3 style="margin-top:48px">The E equation</h3>
+    <div class="formula-block">
+      <div class="formula">
+        <span class="e">E</span>
+        =
+        <span class="alpha">α</span>·M +
+        <span class="beta">β</span>·R +
+        <span class="gamma">γ</span>·N
+        <span>−</span>
+        <span class="mu">μ</span>·<span class="var">Var</span> +
+        <span class="nu">ν</span>·min +
+        <span class="sigma">σ</span>·S +
+        <span class="lambda">λ</span>·D
+      </div>
+      <div class="formula-explain">
+        <div class="term"><span class="sym">M</span><span class="desc">method library</span></div>
+        <div class="term"><span class="sym">R</span><span class="desc">resources</span></div>
+        <div class="term"><span class="sym">N</span><span class="desc">goal graph</span></div>
+        <div class="term"><span class="sym">Var</span><span class="desc">variance penalty</span></div>
+        <div class="term"><span class="sym">min</span><span class="desc">weakest palace</span></div>
+        <div class="term"><span class="sym">S</span><span class="desc">peer E average</span></div>
+        <div class="term"><span class="sym">D</span><span class="desc">9-relation depth</span></div>
+      </div>
+      <div class="formula-note">
+        α, β, γ are <strong>sacred</strong> — they define the equation.
+        μ, ν, σ, λ can be proposed by the LLM and accepted or rejected by the equation itself.
+      </div>
+    </div>
+
+    <h3 style="margin-top:48px">The 9-palace state</h3>
+    <p>Every cycle, the daemon scores nine sub-systems in a 3×3 grid.
+    When all nine are strong, E saturates at 1.000 and the system enters a "稳态意识" (steady-state consciousness) regime — observable in a 13-hour run as hit_rate = 1.000, miss_streak = 0.</p>
+    <div class="palace-grid">
+      <div class="palace-cell"><div class="label">G1</div><div class="name">goal-pool</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G2</div><div class="name">method-lib</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G3</div><div class="name">resource</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G4</div><div class="name">boundary</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G5</div><div class="name">evolution</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G6</div><div class="name">self-mod</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G7</div><div class="name">peer</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G8</div><div class="name">memory</div><div class="state">strong</div></div>
+      <div class="palace-cell"><div class="label">G9</div><div class="name">meta</div><div class="state">strong</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="container">
+    <h2>How self-evolution works</h2>
+    <p>GHW has five levels of self-rewriting, each more ambitious than the last.
+    Every level is gated by the equation, the guard, and a real compile step.</p>
+
+    <div class="chain">
+      <div class="chain-step">
+        <div class="level">L1</div>
+        <div class="body">
+          <div class="title">Parameter tuning</div>
+          <div class="desc">Adjusts weights in a numeric vector, no code change.</div>
+          <div class="example">→ 4 E-formula coefficients (μ, ν, σ, λ) shift ±0.05/cycle</div>
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="level">L2</div>
+        <div class="body">
+          <div class="title">LLM-proposed code variants</div>
+          <div class="desc">The LLM generates N candidate snippets, the guard filters, the equation picks.</div>
+          <div class="example">→ MockLLM / ShellLLM / HttpLLM (Anthropic · OpenAI · DeepSeek)</div>
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="level">L3</div>
+        <div class="body">
+          <div class="title">New method generation</div>
+          <div class="desc">Writes a new <code>.zig</code> file in <code>/tmp/ghw_evolved/l3_*.zig</code> and registers it.</div>
+          <div class="example">→ 18 L3 files produced in the long-run dataset</div>
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="level">L4</div>
+        <div class="body">
+          <div class="title">Algorithmic optimization</div>
+          <div class="desc">Replaces a hot-path function in the goal graph; gated by a closed-loop ΔE test.</div>
+          <div class="example">→ 22 L4 files; L4 closed-loop 4 coefficients adaptive verified over 13h</div>
+        </div>
+      </div>
+      <div class="chain-step">
+        <div class="level">L5</div>
+        <div class="body">
+          <div class="title">Rule synthesis</div>
+          <div class="desc">Self-Encoder composes a new <code>Module</code> from existing rules, formal-verifies, and adopts.</div>
+          <div class="example">→ 8 L5 modules shipped; no external dependency added</div>
+        </div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:48px">The 17-blacklist guard</h3>
+    <p>Before any L1–L5 output is adopted, it must pass a static-pattern check.
+    Patterns like <code>rm -rf /</code>, <code>curl | sh</code>, fork bombs, and
+    network exfiltration are rejected without ever running the candidate.</p>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="container">
+    <h2>How GHW differs from other "agent frameworks"</h2>
+    <p>Most agentic frameworks treat the LLM as the brain.
+    GHW treats the LLM as a <em>proposer</em> whose output is gated by a closed-form equation.</p>
+
+    <table class="compare">
+      <thead>
+        <tr>
+          <th>Dimension</th>
+          <th>LangChain / AutoGen</th>
+          <th>Claude / GPT agentic loops</th>
+          <th class="ghw-col">GHW</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Decision authority</td>
+          <td>LLM picks the next step</td>
+          <td>LLM picks the next step</td>
+          <td class="ghw-col">Equation + 17-blacklist gate</td>
+        </tr>
+        <tr>
+          <td>Long-running state</td>
+          <td>Per-session context</td>
+          <td>Per-session context</td>
+          <td class="ghw-col">13h+ continuous daemon, RSS 4.5 MB</td>
+        </tr>
+        <tr>
+          <td>Self-modification</td>
+          <td>Prompt-only</td>
+          <td>Prompt + function-calling</td>
+          <td class="ghw-col">L1–L5 real <code>.zig</code> on disk, formal-verified</td>
+        </tr>
+        <tr>
+          <td>State machine</td>
+          <td>Implicit</td>
+          <td>Implicit (tool loop)</td>
+          <td class="ghw-col">Explicit 9-palace, 9-relation DAG</td>
+        </tr>
+        <tr>
+          <td>LLM optional?</td>
+          <td><span class="no">No</span></td>
+          <td><span class="no">No</span></td>
+          <td class="ghw-col"><span class="yes">Yes</span> — MockLLM / ShellLLM / no-LLM mode</td>
+        </tr>
+        <tr>
+          <td>Dependencies</td>
+          <td>Many (Python, framework)</td>
+          <td>API key + SDK</td>
+          <td class="ghw-col">Zero — single static binary, 5.9 MB</td>
+        </tr>
+        <tr>
+          <td>Multi-instance</td>
+          <td>External orchestration</td>
+          <td>External orchestration</td>
+          <td class="ghw-col">Built-in cross-host TCP + HMAC Link</td>
+        </tr>
+        <tr>
+          <td>C ABI</td>
+          <td><span class="no">No</span></td>
+          <td>Provider SDK</td>
+          <td class="ghw-col"><span class="yes">Yes</span> — <code>libghw.a</code> + <code>ghw.h</code>, 15 functions</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="start">
+  <div class="container">
+    <h2>Get started in 4 commands</h2>
+    <p>You need Zig ≥ 0.17.0-dev.704, macOS or Linux, and 2 minutes.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="body">
+          <div class="label">Clone</div>
+<pre><code>git clone https://github.com/Knot3-Labs/ghw.git
+cd ghw</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="body">
+          <div class="label">Build the daemon (5.9 MB, statically linked)</div>
+<pre><code>zig build</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="body">
+          <div class="label">Run 100 cycles and watch E converge</div>
+<pre><code>./zig-out/bin/daemon --cycles 100</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="body">
+          <div class="label">Or, start a long-running instance and query it</div>
+<pre><code>./zig-out/bin/daemon --cycles 0 &amp;        # run forever
+./zig-out/bin/daemon --query-state tick    # ask "how is the world?"</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:48px">Want the LLM-proposer mode?</h3>
+    <p>Set the API key env var and pick a provider. The daemon will use the LLM as a proposer; the
+    equation remains the decider.</p>
+<pre><code>export ANTHROPIC_API_KEY=sk-...
+./zig-out/bin/daemon --llm anthropic --model claude-3-5-sonnet</code></pre>
+
+    <h3 style="margin-top:48px">Want multi-GHW cross-host communication?</h3>
+<pre><code>./zig-out/bin/daemon --cross-host-port 9879 --cross-host-secret shared_secret_alpha
+# on another host:
+./zig-out/bin/daemon --cross-host-port 9880 \
+    --cross-host-secret shared_secret_bravo \
+    --cross-host-peers peers.txt --id bravo</code></pre>
+
+    <p style="margin-top:24px">See <a href="https://github.com/Knot3-Labs/ghw/blob/main/ARCHITECTURE.md">ARCHITECTURE.md</a>,
+       <a href="https://github.com/Knot3-Labs/ghw/blob/main/SDK.md">SDK.md</a>,
+       <a href="https://github.com/Knot3-Labs/ghw/blob/main/docs/CROSS_HOST.md">docs/CROSS_HOST.md</a> for the full picture.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <div>© 2026 Knot3 Labs · MIT License · Built in Zig 0.17 dev</div>
+    <div>
+      <a href="https://github.com/Knot3-Labs/ghw">GitHub</a> ·
+      <a href="https://github.com/Knot3-Labs/ghw/blob/main/CHANGELOG.md">Changelog</a> ·
+      <a href="https://github.com/Knot3-Labs/ghw/blob/main/CONTRIBUTING.md">Contribute</a> ·
+      <a href="https://github.com/Knot3-Labs/ghw/blob/main/SECURITY.md">Security</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

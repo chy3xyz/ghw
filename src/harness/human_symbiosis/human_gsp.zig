@@ -155,6 +155,90 @@ pub const HumanGSP = struct {
             );
         }
     }
+
+    /// 序列化为 JSON (P10: trust 跨重启保留)
+    pub fn toJson(self: *const HumanGSP, alloc: Allocator) ![]u8 {
+        const sj = @import("state_json.zig");
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        try buf.appendSlice(alloc, "{\"peers\":[");
+        var it = self.peers.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) try buf.append(alloc, ',');
+            first = false;
+            const p = entry.value_ptr.*;
+            try buf.print(alloc, "{{\"id\":\"", .{});
+            try sj.writeJsonString(alloc, &buf, p.id);
+            try buf.print(alloc, "\",\"trust\":{d:.6},\"interaction_count\":{d},\"task_count\":{d},\"completed_count\":{d},\"positive_count\":{d},\"negative_count\":{d},\"last_interaction\":{d},\"best_dimension\":\"{s}\"}}", .{
+                p.trust, p.interaction_count, p.task_count, p.completed_count,
+                p.positive_count, p.negative_count, p.last_interaction, @tagName(p.best_dimension),
+            });
+        }
+        try buf.appendSlice(alloc, "]}");
+        return buf.toOwnedSlice(alloc);
+    }
+
+    /// 从 state.json 的 human_gsp 块恢复; 无字段时返回 false
+    pub fn loadFromJson(self: *HumanGSP, json: []const u8) !bool {
+        const sj = @import("state_json.zig");
+        const obj = sj.extractObjectBlock(json, "human_gsp") orelse return false;
+        self.clearAll();
+        if (std.mem.indexOf(u8, obj, "\"peers\"")) |peers_pos| {
+            const arr_start = std.mem.indexOfPos(u8, obj, peers_pos, "[") orelse return true;
+            const arr_end = sj.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr = obj[arr_start + 1 .. arr_end];
+            var i: usize = 0;
+            while (i < arr.len) {
+                const os = std.mem.indexOfPos(u8, arr, i, "{") orelse break;
+                const oe = sj.findMatchingBrace(arr, os) orelse break;
+                try loadOnePeer(self, arr[os .. oe + 1]);
+                i = oe + 1;
+            }
+        }
+        return true;
+    }
+
+    fn clearAll(self: *HumanGSP) void {
+        var it = self.peers.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.peers.clearRetainingCapacity();
+    }
+
+    fn loadOnePeer(self: *HumanGSP, one: []const u8) !void {
+        const sj = @import("state_json.zig");
+        const id = sj.extractJsonString(self.allocator, one, "id") orelse return;
+        errdefer self.allocator.free(id);
+        const gop = try self.peers.getOrPut(self.allocator, id);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = id;
+        } else {
+            self.allocator.free(id);
+        }
+        const p = gop.value_ptr;
+        const dim_owned = sj.extractJsonString(self.allocator, one, "best_dimension");
+        defer if (dim_owned) |d| self.allocator.free(d);
+        p.* = .{
+            .id = gop.key_ptr.*,
+            .trust = std.fmt.parseFloat(F, sj.extractJsonNumber(one, "trust") orelse "0.5") catch 0.5,
+            .interaction_count = @intCast(std.fmt.parseInt(u32, sj.extractJsonNumber(one, "interaction_count") orelse "0", 10) catch 0),
+            .task_count = @intCast(std.fmt.parseInt(u32, sj.extractJsonNumber(one, "task_count") orelse "0", 10) catch 0),
+            .completed_count = @intCast(std.fmt.parseInt(u32, sj.extractJsonNumber(one, "completed_count") orelse "0", 10) catch 0),
+            .positive_count = @intCast(std.fmt.parseInt(u32, sj.extractJsonNumber(one, "positive_count") orelse "0", 10) catch 0),
+            .negative_count = @intCast(std.fmt.parseInt(u32, sj.extractJsonNumber(one, "negative_count") orelse "0", 10) catch 0),
+            .last_interaction = std.fmt.parseInt(u64, sj.extractJsonNumber(one, "last_interaction") orelse "0", 10) catch 0,
+            .best_dimension = parseDimension(if (dim_owned) |d| d else "all"),
+        };
+    }
+
+    fn parseDimension(s: []const u8) Task.Dimension {
+        inline for (std.enums.values(Task.Dimension)) |v| {
+            if (std.mem.eql(u8, s, @tagName(v))) return v;
+        }
+        return .all;
+    }
 };
 
 // ===== Tests =====
@@ -223,4 +307,25 @@ test "HumanGSP: trust clamp 0-1 (不变量 #2)" {
     // 100 次 fail 应该被 clamp 到 0
     for (0..100) |i| try gsp.recordInteraction("alice", false, 1, .material, @as(u64, @intCast(i + 100)));
     try testing.expectApproxEqAbs(@as(F, 0.0), peer.trust, 0.01);
+}
+
+test "HumanGSP: toJson/loadFromJson roundtrip" {
+    const alloc = testing.allocator;
+    var gsp = HumanGSP.init(alloc);
+    defer gsp.deinit();
+    try gsp.register("alice");
+    try gsp.recordInteraction("alice", true, 4, .material, 100);
+
+    const json = try gsp.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"human_gsp\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+
+    var gsp2 = HumanGSP.init(alloc);
+    defer gsp2.deinit();
+    try testing.expect(try gsp2.loadFromJson(wrapped));
+
+    const a = gsp2.peers.get("alice").?;
+    try testing.expectApproxEqAbs(@as(F, 0.70), a.trust, 0.001);
+    try testing.expectEqual(@as(u32, 1), a.interaction_count);
 }

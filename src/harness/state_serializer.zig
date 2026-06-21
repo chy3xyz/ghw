@@ -206,16 +206,27 @@ pub const StateSerializer = struct {
         return null;
     }
 
-    /// 写入文件 (Zig 0.17 std.Io 实现)
+    /// 写入文件 (Zig 0.17 std.Io 实现, 原子写)
     /// 返回: 写入的 JSON 字节 (caller owns)
+    ///
+    /// 原子性: 先把全文写进 <path>.tmp 并 close, 再 rename 覆盖目标。
+    /// rename(2) 在同一文件系统上原子 ⇒ 读者永远看到旧版或新版完整文件,
+    /// 进程崩溃也不会留下半截 state.json (避免重启后状态损坏)。
     pub fn writeToFile(self: *StateSerializer, snapshot: StateSnapshot, path: []const u8) ![]u8 {
         const json = try self.serialize(snapshot);
         errdefer self.allocator.free(json);
 
-        // 创建/覆盖文件, 用 std.Io 写入
-        const file = try std.Io.Dir.createFileAbsolute(self.io, path, .{});
-        defer file.close(self.io);
-        try std.Io.File.writeStreamingAll(file, self.io, json);
+        const tmp_path = try self.allocator.alloc(u8, path.len + 4);
+        defer self.allocator.free(tmp_path);
+        @memcpy(tmp_path[0..path.len], path);
+        @memcpy(tmp_path[path.len..][0..4], ".tmp");
+
+        {
+            const file = try std.Io.Dir.createFileAbsolute(self.io, tmp_path, .{});
+            defer file.close(self.io);
+            try std.Io.File.writeStreamingAll(file, self.io, json);
+        }
+        try std.Io.Dir.renameAbsolute(tmp_path, path, self.io);
         return json;
     }
 

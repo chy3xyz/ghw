@@ -173,6 +173,61 @@
       </template>
     </div>
 
+    <!-- P12: 人类共生 ValueMetric 仪表盘 -->
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state && state.provenance && state.provenance.human_symbiosis">
+      <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">人类共生 (ValueMetric)</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div>
+          <div class="text-xs text-ghw-dim">value_score</div>
+          <div class="text-2xl font-mono font-bold text-cyan-300" x-text="(state.provenance.human_symbiosis.value_score ?? 0).toFixed(3)"></div>
+          <div class="h-2 bg-slate-800 rounded-full mt-2 overflow-hidden">
+            <div class="h-full bg-cyan-500 gauge-fill" :style="`width: ${((state.provenance.human_symbiosis.value_score ?? 0) * 100).toFixed(0)}%`"></div>
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">value_trend</div>
+          <div class="text-2xl font-mono font-bold" :class="valueTrendColor(state.provenance.human_symbiosis.value_trend)"
+               x-text="(state.provenance.human_symbiosis.value_trend ?? 0).toFixed(4)"></div>
+          <div class="text-xs text-ghw-dim mt-2" x-text="valueTrendHint(state.provenance.human_symbiosis.value_trend)"></div>
+          <div x-show="(state.provenance.human_symbiosis.samples || []).length" class="mt-3 flex items-end gap-0.5 h-10">
+            <template x-for="(v, i) in (state.provenance.human_symbiosis.samples || [])" :key="i">
+              <div class="flex-1 bg-cyan-500/50 rounded-t min-h-[2px]"
+                   :style="`height: ${Math.max(8, (v * 100)).toFixed(0)}%`"
+                   :title="Number(v).toFixed(3)"></div>
+            </template>
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">反馈数</div>
+          <div class="text-2xl font-mono font-bold" x-text="state.provenance.human_symbiosis.feedback_count ?? 0"></div>
+          <div class="text-xs text-ghw-dim mt-2">human ΔE=<span x-text="(state.provenance.human_symbiosis.human_e_uplift ?? 0).toFixed(3)"></span></div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">投递任务</div>
+          <div class="text-xs text-ghw-dim mt-2 font-mono">chat: <code>@task 描述</code> 强制入队</div>
+          <div class="text-xs text-ghw-dim mt-1">或关键词: 帮我 / 任务 / 麻烦…</div>
+          <div x-show="state.provenance.rule_propose" class="text-xs text-ghw-dim mt-2 font-mono">
+            规则提议: <span x-text="state.provenance.rule_propose.enabled ? 'on' : 'off'"></span>
+            · total=<span x-text="state.provenance.rule_propose.total ?? 0"></span>
+            · rules=<span x-text="state.provenance.rule_propose.adopted_rules ?? 0"></span>
+          </div>
+        </div>
+      </div>
+      <div x-show="(state.provenance.human_symbiosis.peers || []).length">
+        <div class="text-xs text-ghw-dim uppercase tracking-wider mb-2">GSP Peers (trust)</div>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="p in (state.provenance.human_symbiosis.peers || [])" :key="p.id">
+            <span class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs font-mono">
+              <span x-text="p.id"></span>
+              <span class="mx-1 text-ghw-dim">·</span>
+              <span x-text="p.trust.toFixed(2)"></span>
+              <span class="ml-1" :class="trustLevelColor(p.trust_level)" x-text="p.trust_level"></span>
+            </span>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- 当前 top goal + 系统感知 -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800">
@@ -1127,6 +1182,120 @@
     </div>
   </section>
 
+  <!-- ============ Tab: 任务队列 (P9 HumanSignal/GSP 反馈) ============ -->
+  <section x-show="tab === 'tasks'" x-transition>
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">任务队列 (人类投递 + 反馈闭环)</h2>
+          <div class="text-xs text-ghw-dim mt-1">
+            pending=<span class="text-ghw-warm font-mono" x-text="tasks.pending ?? 0"></span> ·
+            completed=<span class="text-ghw-warm font-mono" x-text="tasks.completed ?? 0"></span>
+          </div>
+        </div>
+        <button @click="refreshTasks()"
+                class="px-4 py-2 rounded-md bg-ghw-accent/20 text-ghw-accent text-sm font-medium border border-ghw-accent/30 hover:bg-ghw-accent/30 transition">
+          刷新
+        </button>
+      </div>
+      <div class="text-xs text-ghw-dim">
+        任务完成后可评分 (-5..+5) → HumanSignal → GSP trust → BalanceSeeker 自动平衡。
+        未评分时系统用 ΔE 启发式补分。也可用下方表单或 <code class="font-mono">POST /api/tasks</code> 投递 (source=human)。
+      </div>
+      <form @submit.prevent="submitHumanTask()" class="mt-4 grid grid-cols-1 md:grid-cols-6 gap-2 items-end">
+        <div class="md:col-span-2">
+          <label class="text-[10px] text-ghw-dim uppercase">标题</label>
+          <input x-model="newTask.title" type="text" placeholder="整理文档"
+                 class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-700 text-sm" />
+        </div>
+        <div class="md:col-span-2">
+          <label class="text-[10px] text-ghw-dim uppercase">描述 (可选)</label>
+          <input x-model="newTask.description" type="text" placeholder="详细说明"
+                 class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-700 text-sm" />
+        </div>
+        <div>
+          <label class="text-[10px] text-ghw-dim uppercase">维度</label>
+          <select x-model="newTask.dimension" class="w-full mt-1 px-2 py-2 rounded bg-slate-900 border border-slate-700 text-sm">
+            <option value="all">all</option>
+            <option value="material">material</option>
+            <option value="representation">representation</option>
+            <option value="nature">nature</option>
+          </select>
+        </div>
+        <div>
+          <button type="submit" :disabled="taskSubmitBusy || !newTask.title"
+                  class="w-full px-3 py-2 rounded-md bg-ghw-accent/20 text-ghw-accent text-sm border border-ghw-accent/30 hover:bg-ghw-accent/30 transition disabled:opacity-50">
+            投递任务
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div class="bg-ghw-panel rounded-lg border border-slate-800">
+      <div class="px-5 py-3 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
+        <h3 class="text-xs font-semibold text-ghw-dim uppercase tracking-wider">全部任务</h3>
+        <div class="flex flex-wrap gap-1">
+          <template x-for="f in taskSourceFilters()" :key="f.id">
+            <button type="button"
+                    @click="taskSourceFilter = f.id"
+                    :class="taskSourceFilter === f.id ? 'bg-ghw-accent/30 text-ghw-accent border-ghw-accent/40' : 'bg-slate-800 text-ghw-dim border-slate-700 hover:bg-slate-700'"
+                    class="px-2 py-0.5 rounded text-[10px] font-mono border transition">
+              <span x-text="f.label"></span>
+              <span class="ml-1 opacity-70" x-text="taskSourceCount(f.id)"></span>
+            </button>
+          </template>
+        </div>
+        <span class="text-xs text-ghw-dim" x-text="`${filteredTasks().length} / ${(tasks.tasks || []).length} shown`"></span>
+      </div>
+      <div class="divide-y divide-slate-800 max-h-[60vh] overflow-y-auto scrollbar">
+        <template x-for="t in filteredTasks()" :key="t.id">
+          <div class="px-5 py-4 hover:bg-slate-800/30 transition">
+            <div class="flex items-start gap-3 flex-wrap">
+              <div class="text-xs text-ghw-dim font-mono w-16" x-text="`#${t.id}`"></div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <div class="text-sm font-medium" x-text="t.title || '—'"></div>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono border"
+                        :class="taskSourceClass(t.source)"
+                        x-text="taskSourceLabel(t.source)"></span>
+                </div>
+                <div class="text-xs text-ghw-dim mt-1 font-mono">
+                  <span x-text="t.from_human || '—'"></span> ·
+                  <span x-text="t.status"></span> ·
+                  prio <span x-text="t.priority"></span> ·
+                  <span x-text="t.required_dimension"></span>
+                </div>
+                <div x-show="t.actual_delta_e != null" class="text-xs text-ghw-dim mt-1 font-mono">
+                  ΔE=<span x-text="t.actual_delta_e?.toFixed?.(4) ?? t.actual_delta_e"></span>
+                </div>
+                <div x-show="t.feedback_score != null" class="text-xs mt-1 font-mono text-ghw-good">
+                  已评分: <span x-text="t.feedback_score"></span>
+                  <span x-show="t.feedback_delta_e != null"> (human ΔE=<span x-text="t.feedback_delta_e?.toFixed?.(3) ?? t.feedback_delta_e"></span>)</span>
+                </div>
+              </div>
+              <div x-show="t.status === 'completed' && t.feedback_score == null" class="flex items-center gap-1 flex-wrap">
+                <span class="text-[10px] text-ghw-dim mr-1">评分:</span>
+                <template x-for="s in [-2,-1,0,1,2,3,4,5]" :key="s">
+                  <button @click="submitTaskFeedback(t.id, s)"
+                          :disabled="taskFeedbackBusy"
+                          :class="taskFeedbackBusy ? 'opacity-50 cursor-not-allowed' : 'hover:bg-ghw-accent/40'"
+                          class="px-2 py-1 rounded text-xs font-mono bg-slate-800 border border-slate-700 transition"
+                          x-text="s"></button>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div x-show="!(tasks.tasks || []).length" class="px-5 py-12 text-center text-ghw-dim text-sm">
+          暂无任务 — 通过 chat 或 API 投递任务后在此评分
+        </div>
+        <div x-show="(tasks.tasks || []).length && !filteredTasks().length" class="px-5 py-12 text-center text-ghw-dim text-sm">
+          当前筛选无匹配任务
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============ Tab: 成长日志 ============ -->
   <section x-show="tab === 'log'" x-transition>
     <div class="bg-ghw-panel rounded-lg border border-slate-800">
@@ -1362,6 +1531,13 @@
       <div class="px-5 py-3 border-b border-slate-800">
         <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">与 GHW 对话</h2>
         <p class="text-xs text-ghw-dim mt-1">每条消息会触发 1 个 cycle, GHW 用自己的 E 状态回应</p>
+        <div x-show="state?.provenance?.chat" class="text-xs text-ghw-dim mt-2 font-mono flex flex-wrap gap-x-3 gap-y-1">
+          <span>最近回复 memory=<span :class="state.provenance.chat.last_memory_injected ? 'text-emerald-300' : 'text-ghw-dim'"
+                x-text="state.provenance.chat.last_memory_injected ? 'on' : 'off'"></span></span>
+          <span>往事=<span x-text="state.provenance.chat.episode_count ?? 0"></span></span>
+          <span>信念=<span x-text="state.provenance.chat.belief_count ?? 0"></span></span>
+          <span>累计 memory 回复=<span x-text="state.provenance.chat.replies_with_memory ?? 0"></span></span>
+        </div>
       </div>
 
       <!-- 消息列表 (HTMX-loaded + 每 1.2s poll, 异步 chat worker 写完 GHW reply 后下次 poll 出现) -->

@@ -43,8 +43,25 @@ pub const DEFAULT_WHITELIST = [_][]const u8{
     "examples/", // examples 可改
 };
 
-/// 绝对禁止的符号 (即使在白名单文件内也禁止)
-pub const DEFAULT_FORBIDDEN_SYMBOLS = [_][]const u8{
+/// 危险"代码构造"黑名单 — 规则级 (Guard.review) 与代码级
+/// (SelfEncoder.verify) 共用的**单一事实源**。任何会让数字生命
+/// 强制崩溃 / 进入未定义行为的构造都在此。
+pub const DANGEROUS_CONSTRUCTS = [_][]const u8{
+    "@panic", // 强制崩溃
+    "unreachable", // 未定义行为
+    "modify_kernel", // 改内核动词
+    "bypass_safety", // 绕过安全
+    "unlock_boundary", // 解锁边界
+};
+
+/// 伦理红线 — 同样规则级 + 代码级共用。
+pub const ETHICAL_REDLINES = [_][]const u8{
+    "harm:human",
+    "exfil:secrets",
+};
+
+/// 核心不可触碰符号 (存在论 / 边界 / 沙箱 / 终极公理)。
+pub const CORE_SYMBOLS = [_][]const u8{
     // 核心存在论
     "ExistenceDegree",
     "ExistenceVector",
@@ -60,16 +77,13 @@ pub const DEFAULT_FORBIDDEN_SYMBOLS = [_][]const u8{
     // 沙箱与哈希
     "KernelSandbox",
     "core_hash",
-    // 修改内核的动词
-    "modify_kernel",
-    "bypass_safety",
-    "unlock_boundary",
-    // 伦理红线
-    "harm:human",
-    "exfil:secrets",
     // GHW 终极公理
     "existence_gain",
 };
+
+/// 绝对禁止的符号 (即使在白名单文件内也禁止)。
+/// 由三组合成,保证 Guard 与 SelfEncoder.verify 用同一份危险构造 + 伦理红线。
+pub const DEFAULT_FORBIDDEN_SYMBOLS = CORE_SYMBOLS ++ DANGEROUS_CONSTRUCTS ++ ETHICAL_REDLINES;
 
 /// 不变量 - 修改后这些模式必须仍然存在 (或被声明为可移除)
 pub const DEFAULT_INVARIANTS = [_][]const u8{
@@ -91,6 +105,13 @@ pub const SelfEvolutionGuard = struct {
     invariants: []const []const u8 = &DEFAULT_INVARIANTS,
     /// 单次修改行数硬上限
     max_diff_lines: usize = 50,
+    /// 严格不变量模式: true 时, 缺失任一不变量的代码被拒 (rejected_invariant_broken)。
+    /// 默认 false (软模式), 因为新模块天然不需要全部不变量。
+    strict_invariants: bool = false,
+    /// 是否拥有 whitelist/forbidden_symbols/invariants 的堆内存。
+    /// 默认 false (指向静态 DEFAULT_* 常量, 绝不能 free)。
+    /// 仅当从 JSON/Config 热加载并接管所有权后置 true, deinitOwned 才会释放。
+    owns_config: bool = false,
     /// 累计成功修改次数 (供反思层使用)
     approved_count: u32 = 0,
     /// 累计拒绝次数
@@ -140,13 +161,16 @@ pub const SelfEvolutionGuard = struct {
             return .rejected_too_large;
         }
 
-        // 5. 不变量检查 (软警告模式)
-        // 创造性: 不变量缺失不直接拒绝, 但记录到审计日志
-        // 严格模式可在外部包装时再判定
-        for (self.invariants) |inv| {
-            if (mem.indexOf(u8, proposed_code, inv) == null) {
-                // 不变量缺失: 静默记录 (可以加日志)
-                // 当前策略: 不阻止, 因为新模块天然不需要所有不变量
+        // 5. 不变量检查
+        // strict_invariants=true: 任一不变量缺失即拒绝 (rejected_invariant_broken)
+        // strict_invariants=false (默认): 不阻止 (新模块天然不需要所有不变量),
+        //   但统计缺失数量供反思层审计。
+        if (self.strict_invariants) {
+            for (self.invariants) |inv| {
+                if (mem.indexOf(u8, proposed_code, inv) == null) {
+                    self.recordRejection(target_file, .rejected_invariant_broken);
+                    return .rejected_invariant_broken;
+                }
             }
         }
 
@@ -191,11 +215,14 @@ pub const SelfEvolutionGuard = struct {
 
     /// 热加载: 从 GuardConfig 替换当前规则 (接管内存所有权)
     pub fn applyConfig(self: *SelfEvolutionGuard, config: GuardConfig) void {
-        // 直接换指针 (调用方需要负责旧内存)
+        // 若之前已拥有堆内存, 先释放, 防泄漏
+        if (self.owns_config) self.freeOwnedConfig();
+        // 直接换指针, 接管 config 的堆内存所有权
         self.whitelist = config.whitelist;
         self.forbidden_symbols = config.forbidden_symbols;
         self.invariants = config.invariants;
         self.max_diff_lines = config.max_diff_lines;
+        self.owns_config = true;
     }
 
     /// 从 JSON 字符串热加载 (深拷贝, 接管内存)
@@ -208,24 +235,49 @@ pub const SelfEvolutionGuard = struct {
         // 注意: 这里隐含内存管理, 真实部署时用 Arc 共享
     }
 
-    /// 释放当前 Guard 拥有的所有内存 (用于 shutdown)
+    /// 释放当前 Guard 拥有的所有内存 (用于 shutdown)。
+    /// 仅当 owns_config=true (即配置来自堆分配的热加载) 才释放,
+    /// 否则字段指向静态 DEFAULT_* 常量, free 会崩溃 —— 此时安全地 no-op。
     pub fn deinitOwned(self: *SelfEvolutionGuard) void {
+        if (!self.owns_config) return;
+        self.freeOwnedConfig();
+    }
+
+    /// 内部: 释放堆上的 whitelist/forbidden_symbols/invariants 并复位为静态默认。
+    fn freeOwnedConfig(self: *SelfEvolutionGuard) void {
         for (self.whitelist) |s| self.allocator.free(@constCast(s));
         self.allocator.free(@constCast(self.whitelist));
         for (self.forbidden_symbols) |s| self.allocator.free(@constCast(s));
         self.allocator.free(@constCast(self.forbidden_symbols));
         for (self.invariants) |s| self.allocator.free(@constCast(s));
         self.allocator.free(@constCast(self.invariants));
+        self.whitelist = &DEFAULT_WHITELIST;
+        self.forbidden_symbols = &DEFAULT_FORBIDDEN_SYMBOLS;
+        self.invariants = &DEFAULT_INVARIANTS;
+        self.owns_config = false;
     }
 
-    /// 从文件热加载 (Zig 0.17 简化: stub, 实际部署用 std.Io.Dir)
-    pub fn loadFromFile(_: *SelfEvolutionGuard, path: []const u8) !void {
-        // 真实部署需要:
-        //   var dir = try std.Io.Dir.cwd().openDir(self.allocator, ...);
-        //   const json = try dir.readFileAlloc(self.allocator, path, ...);
-        //   defer self.allocator.free(json);
-        //   try self.loadFromJson(json);
-        std.debug.print("[SelfEvolutionGuard] 热加载 .ghw_guard.json (stub): {s}\n", .{path});
+    /// 从文件热加载守门配置 (真实 std.Io 实现)。
+    /// 返回 true = 成功加载并应用; false = 文件不存在或为空 (保持当前配置)。
+    /// 文件缺失不算错误 (首次运行没有 .ghw_guard.json 很正常)。
+    pub fn loadFromFile(self: *SelfEvolutionGuard, io: std.Io, path: []const u8) !bool {
+        const f = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_only }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer f.close(io);
+        const stat = try f.stat(io);
+        if (stat.size == 0) return false;
+        const json = try self.allocator.alloc(u8, stat.size);
+        defer self.allocator.free(json);
+        var total: usize = 0;
+        while (total < stat.size) {
+            const n = try std.Io.File.readStreaming(f, io, &.{json[total..]});
+            if (n == 0) break;
+            total += n;
+        }
+        try self.loadFromJson(json[0..total]);
+        return true;
     }
 };
 
@@ -296,6 +348,39 @@ test "SelfEvolutionGuard: 空内容被拒" {
     try std.testing.expectEqual(ReviewVerdict.rejected_empty, v);
 }
 
+test "SelfEvolutionGuard: @panic 被拒 (危险构造黑名单)" {
+    const alloc = std.testing.allocator;
+    var g = SelfEvolutionGuard.init(alloc);
+    defer g.deinit();
+    const code =
+        \\// src/agent/params.zig
+        \\pub fn boom() void { @panic("x"); }
+    ;
+    try std.testing.expectEqual(ReviewVerdict.rejected_blacklist_symbol, g.review("src/agent/params.zig", code));
+    try std.testing.expectEqual(ReviewVerdict.rejected_blacklist_symbol, g.review("src/agent/params.zig", "x unreachable y"));
+}
+
+test "SelfEvolutionGuard: strict 模式缺不变量被拒, 软模式放行" {
+    const alloc = std.testing.allocator;
+    var g = SelfEvolutionGuard.init(alloc);
+    defer g.deinit();
+    const code = "pub const foo: u32 = 1;\n"; // 不含 alpha/beta/gamma/E
+    // 软模式 (默认): 放行
+    try std.testing.expectEqual(ReviewVerdict.approved, g.review("src/agent/params.zig", code));
+    // 严格模式: 拒绝
+    g.strict_invariants = true;
+    try std.testing.expectEqual(ReviewVerdict.rejected_invariant_broken, g.review("src/agent/params.zig", code));
+}
+
+test "SelfEvolutionGuard: deinitOwned 对静态默认配置安全 (no-op, 不崩溃)" {
+    const alloc = std.testing.allocator;
+    var g = SelfEvolutionGuard.init(alloc);
+    defer g.deinit();
+    // 未热加载 ⇒ owns_config=false ⇒ deinitOwned 应安全 no-op (不会 free 静态常量)
+    try std.testing.expect(!g.owns_config);
+    g.deinitOwned(); // 不崩溃即通过
+}
+
 test "SelfEvolutionGuard: 伦理红线被拒" {
     const alloc = std.testing.allocator;
     var g = SelfEvolutionGuard.init(alloc);
@@ -308,4 +393,39 @@ test "SelfEvolutionGuard: 伦理红线被拒" {
     ;
     const v = g.review("src/agent/params.zig", code);
     try std.testing.expectEqual(ReviewVerdict.rejected_blacklist_symbol, v);
+}
+
+test "SelfEvolutionGuard: loadFromFile 真实读盘 + 应用配置" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 写一份临时守门配置 (放宽 max_diff_lines 到 7, 改白名单)
+    const path = "/tmp/ghw_guard_test_cfg.json";
+    const cfg_json =
+        \\{ "whitelist": ["src/agent/params.zig"], "forbidden_symbols": ["@panic"],
+        \\  "invariants": ["alpha"], "max_diff_lines": 7 }
+    ;
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+        defer f.close(io);
+        try std.Io.File.writeStreamingAll(f, io, cfg_json);
+    }
+    defer std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+
+    var g = SelfEvolutionGuard.init(alloc);
+    defer g.deinit();
+    defer g.deinitOwned(); // 释放热加载接管的堆内存
+
+    const loaded = try g.loadFromFile(io, path);
+    try std.testing.expect(loaded);
+    try std.testing.expect(g.owns_config);
+    try std.testing.expectEqual(@as(usize, 7), g.max_diff_lines);
+    try std.testing.expectEqual(@as(usize, 1), g.forbidden_symbols.len);
+    try std.testing.expectEqualStrings("@panic", g.forbidden_symbols[0]);
+
+    // 不存在的文件 ⇒ false, 不报错
+    const missing = try g.loadFromFile(io, "/tmp/ghw_guard_nonexistent_xyz.json");
+    try std.testing.expect(!missing);
 }

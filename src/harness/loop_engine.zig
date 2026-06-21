@@ -559,50 +559,37 @@ pub const HarnessLoopEngine = struct {
         });
     }
 
-    /// 从 JSON 恢复 (启动时)
-    /// 简化: grep 风格找关键字段, hypothesis 列表全 fresh
-    /// (Boris 6.3 外置记忆 — 跨多轮不丢, 但 9 宫满血后新 hypothesis 才有意义, 老 hypothesis 让它自然 retired)
+    /// 从 JSON 恢复 (启动时)。用 std.json 健壮解析 (取代旧的 grep 式字符串切分)。
+    /// hypothesis 列表保持 fresh — 跨重启只恢复计数/游标, 老 hypothesis 让它自然 retired
+    /// (Boris 6.3 外置记忆: 跨多轮不丢关键状态, 但不复活过期假设)。
+    /// 容错: JSON 畸形时静默保持当前(fresh)状态, 不让坏存档拖垮启动。
     pub fn loadFromJson(self: *HarnessLoopEngine, alloc: Allocator, json: []const u8) !void {
-        // active_id
-        if (std.mem.indexOf(u8, json, "\"active_id\":")) |idx| {
-            const start = idx + "\"active_id\":".len;
-            var end = start;
-            while (end < json.len and json[end] != ',' and json[end] != '\n') : (end += 1) {}
-            const num_str = std.mem.trim(u8, json[start..end], " \t");
-            self.active_id = std.fmt.parseInt(u64, num_str, 10) catch 0;
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const obj = parsed.value.object;
+
+        if (jsonU64(obj.get("active_id"))) |v| self.active_id = v;
+        if (jsonU64(obj.get("next_id"))) |v| self.next_id = v;
+        if (jsonU64(obj.get("last_plan_tick"))) |v| self.last_plan_tick = v;
+
+        if (obj.get("kpi")) |kpi_v| {
+            if (kpi_v == .object) {
+                const ko = kpi_v.object;
+                if (jsonU64(ko.get("miss_streak"))) |v| self.kpi.consecutive_miss = @intCast(v);
+                if (jsonU64(ko.get("plan"))) |v| self.kpi.plan_count = v;
+            }
         }
-        // next_id
-        if (std.mem.indexOf(u8, json, "\"next_id\":")) |idx| {
-            const start = idx + "\"next_id\":".len;
-            var end = start;
-            while (end < json.len and json[end] != ',' and json[end] != '\n') : (end += 1) {}
-            const num_str = std.mem.trim(u8, json[start..end], " \t");
-            self.next_id = std.fmt.parseInt(u64, num_str, 10) catch 1;
-        }
-        // last_plan_tick
-        if (std.mem.indexOf(u8, json, "\"last_plan_tick\":")) |idx| {
-            const start = idx + "\"last_plan_tick\":".len;
-            var end = start;
-            while (end < json.len and json[end] != ',' and json[end] != '\n') : (end += 1) {}
-            const num_str = std.mem.trim(u8, json[start..end], " \t");
-            self.last_plan_tick = std.fmt.parseInt(u64, num_str, 10) catch 0;
-        }
-        // KPI: 简化只读 consecutive_miss (其他字段 fresh)
-        if (std.mem.indexOf(u8, json, "\"miss_streak\":")) |idx| {
-            const start = idx + "\"miss_streak\":".len;
-            var end = start;
-            while (end < json.len and json[end] != ',' and json[end] != '}' and json[end] != '\n') : (end += 1) {}
-            const num_str = std.mem.trim(u8, json[start..end], " \t");
-            self.kpi.consecutive_miss = std.fmt.parseInt(u32, num_str, 10) catch 0;
-        }
-        if (std.mem.indexOf(u8, json, "\"plan\":")) |idx| {
-            const start = idx + "\"plan\":".len;
-            var end = start;
-            while (end < json.len and json[end] != ',' and json[end] != '}' and json[end] != '\n') : (end += 1) {}
-            const num_str = std.mem.trim(u8, json[start..end], " \t");
-            self.kpi.plan_count = std.fmt.parseInt(u64, num_str, 10) catch 0;
-        }
-        _ = alloc;
+    }
+
+    /// 从 std.json.Value 取非负整数 (兼容 integer / 被 std.json 存为 number_string 的大整数)。
+    fn jsonU64(v: ?std.json.Value) ?u64 {
+        const val = v orelse return null;
+        return switch (val) {
+            .integer => |i| if (i >= 0) @intCast(i) else null,
+            .number_string => |s| std.fmt.parseInt(u64, s, 10) catch null,
+            else => null,
+        };
     }
 
     /// 保存到 file (Boris 6.3 外置记忆真落地)
@@ -612,21 +599,21 @@ pub const HarnessLoopEngine = struct {
         const json = try self.saveJson(alloc);
         defer alloc.free(json);
 
-        // 原子写: 先写 tmp, 再 rename (跟 state_serializer.writeToFile 同款)
+        // 原子写: 先把全文写进 tmp 并 close, 再 rename 覆盖目标。
+        // rename 在同一文件系统上是原子的 ⇒ 读者永远看到旧版或新版完整文件,
+        // 进程崩溃也不会留下半截 JSON。
         const tmp_path = try alloc.alloc(u8, path.len + 4);
         defer alloc.free(tmp_path);
         @memcpy(tmp_path[0..path.len], path);
         @memcpy(tmp_path[path.len..][0..4], ".tmp");
 
-        const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{});
-        defer f.close(io);
-        try std.Io.File.writePositionalAll(f, io, json, 0);
-        // 0.17 没 rename, 改用 delete + open (简化: 写覆盖, 崩溃时最多 1 周期丢)
-        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
-        // 复写: 重新 open + write (简化版本, 跟 L3 落盘同款)
-        const f2 = try std.Io.Dir.createFileAbsolute(io, path, .{});
-        defer f2.close(io);
-        try std.Io.File.writePositionalAll(f2, io, json, 0);
+        {
+            const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{});
+            defer f.close(io);
+            try std.Io.File.writePositionalAll(f, io, json, 0);
+        }
+        // renameAbsolute 覆盖式替换 (POSIX rename(2) 原子)
+        try std.Io.Dir.renameAbsolute(tmp_path, path, io);
     }
 
     /// 从 file 加载 (启动时调)
