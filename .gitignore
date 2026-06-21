@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # GHW (Goal-Harness-World) — Build Artifacts
 # Zig 0.17 dev
 
@@ -91,7 +90,7 @@ config.local.json
 # Build output of SDK C consumer
 ghw_c_test
 test_ghw_c
-=======
+
 .DS_Store
 
 # Python
@@ -105,7 +104,6 @@ __pycache__/
 .zig-cache/
 zig-out/
 zig-cache/
->>>>>>> feature/week4-consent-and-demo
 
 # Python (added by Phase 1 demo)
 __pycache__/

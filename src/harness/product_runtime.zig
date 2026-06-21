@@ -9,6 +9,7 @@ const product_intent = @import("product_intent.zig");
 const consent = @import("consent.zig");
 const crm_kpi = @import("crm_kpi.zig");
 const kpi_bridge = @import("kpi_bridge.zig");
+const state_json = @import("human_symbiosis/state_json.zig");
 const world = @import("../world/core.zig");
 
 const Allocator = std.mem.Allocator;
@@ -281,7 +282,75 @@ pub const ProductEvolutionRuntime = struct {
     pub fn auditJson(self: *const ProductEvolutionRuntime, alloc: Allocator) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
-        try out.appendSlice(alloc, "{\"audit\":[");
+        try out.appendSlice(alloc, "{\"audit\":");
+        try self.appendAuditArrayJson(alloc, &out);
+        try out.appendSlice(alloc, "}");
+        return out.toOwnedSlice(alloc);
+    }
+
+    /// 完整 runtime 状态: changes + audit + next ids。
+    /// ui_server/daemon 把它包进 state.json 的 `"product_runtime"` 字段。
+    pub fn toJson(self: *const ProductEvolutionRuntime, alloc: Allocator) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+        try out.print(alloc, "{{\"next_change_id\":{d},\"next_audit_id\":{d},\"changes\":[", .{
+            self.next_change_id,
+            self.next_audit_id,
+        });
+        for (self.changes.items, 0..) |change, i| {
+            if (i > 0) try out.append(alloc, ',');
+            try appendChangeJson(alloc, &out, &change);
+        }
+        try out.appendSlice(alloc, "],\"audit\":");
+        try self.appendAuditArrayJson(alloc, &out);
+        try out.appendSlice(alloc, "}");
+        return out.toOwnedSlice(alloc);
+    }
+
+    /// 从 state.json 的 `"product_runtime"` 块恢复。旧状态无该块时返回 false。
+    pub fn loadFromJson(self: *ProductEvolutionRuntime, json: []const u8) !bool {
+        const obj = state_json.extractObjectBlock(json, "product_runtime") orelse return false;
+        self.clearAll();
+
+        if (state_json.extractJsonNumber(obj, "next_change_id")) |n| {
+            self.next_change_id = std.fmt.parseInt(u64, n, 10) catch 1;
+        }
+        if (state_json.extractJsonNumber(obj, "next_audit_id")) |n| {
+            self.next_audit_id = std.fmt.parseInt(u64, n, 10) catch 1;
+        }
+
+        if (std.mem.indexOf(u8, obj, "\"changes\"")) |changes_pos| {
+            const arr_start = std.mem.indexOfPos(u8, obj, changes_pos, "[") orelse return true;
+            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr = obj[arr_start + 1 .. arr_end];
+            var i: usize = 0;
+            while (i < arr.len) {
+                const os = std.mem.indexOfPos(u8, arr, i, "{") orelse break;
+                const oe = state_json.findMatchingBrace(arr, os) orelse break;
+                try self.loadOneChange(arr[os .. oe + 1]);
+                i = oe + 1;
+            }
+        }
+
+        if (std.mem.indexOf(u8, obj, "\"audit\"")) |audit_pos| {
+            const arr_start = std.mem.indexOfPos(u8, obj, audit_pos, "[") orelse return true;
+            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr = obj[arr_start + 1 .. arr_end];
+            var i: usize = 0;
+            while (i < arr.len) {
+                const os = std.mem.indexOfPos(u8, arr, i, "{") orelse break;
+                const oe = state_json.findMatchingBrace(arr, os) orelse break;
+                try self.loadOneAudit(arr[os .. oe + 1]);
+                i = oe + 1;
+            }
+        }
+
+        self.recomputeNextIds();
+        return true;
+    }
+
+    fn appendAuditArrayJson(self: *const ProductEvolutionRuntime, alloc: Allocator, out: *std.ArrayList(u8)) !void {
+        try out.append(alloc, '[');
         for (self.audit.items, 0..) |entry, i| {
             if (i > 0) try out.append(alloc, ',');
             try out.print(alloc, "{{\"id\":{d},\"at\":{d},\"kind\":\"{s}\",\"change_id\":", .{
@@ -293,13 +362,12 @@ pub const ProductEvolutionRuntime = struct {
                 try out.appendSlice(alloc, "null");
             }
             try out.appendSlice(alloc, ",\"tenant_id\":\"");
-            try writeJsonString(alloc, &out, entry.tenant_id);
+            try writeJsonString(alloc, out, entry.tenant_id);
             try out.appendSlice(alloc, "\",\"detail\":\"");
-            try writeJsonString(alloc, &out, entry.detail);
+            try writeJsonString(alloc, out, entry.detail);
             try out.appendSlice(alloc, "\"}");
         }
-        try out.appendSlice(alloc, "]}");
-        return out.toOwnedSlice(alloc);
+        try out.append(alloc, ']');
     }
 
     pub fn findChange(self: *ProductEvolutionRuntime, change_id: u64) ?*ChangeProposal {
@@ -327,6 +395,107 @@ pub const ProductEvolutionRuntime = struct {
         });
         self.next_audit_id += 1;
     }
+
+    fn clearAll(self: *ProductEvolutionRuntime) void {
+        for (self.changes.items) |*c| c.deinit(self.alloc);
+        self.changes.clearRetainingCapacity();
+        for (self.audit.items) |*a| a.deinit(self.alloc);
+        self.audit.clearRetainingCapacity();
+        self.next_change_id = 1;
+        self.next_audit_id = 1;
+    }
+
+    fn recomputeNextIds(self: *ProductEvolutionRuntime) void {
+        var max_change: u64 = 0;
+        var max_audit: u64 = 0;
+        for (self.changes.items) |c| max_change = @max(max_change, c.id);
+        for (self.audit.items) |a| max_audit = @max(max_audit, a.id);
+        if (max_change >= self.next_change_id) self.next_change_id = max_change + 1;
+        if (max_audit >= self.next_audit_id) self.next_audit_id = max_audit + 1;
+    }
+
+    fn loadOneChange(self: *ProductEvolutionRuntime, one: []const u8) !void {
+        const id = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "id") orelse return, 10) catch return;
+        const tenant_id = state_json.extractJsonString(self.alloc, one, "tenant_id") orelse return;
+        errdefer self.alloc.free(tenant_id);
+        const target = state_json.extractJsonString(self.alloc, one, "target") orelse {
+            self.alloc.free(tenant_id);
+            return;
+        };
+        errdefer self.alloc.free(target);
+        const summary = state_json.extractJsonString(self.alloc, one, "summary") orelse {
+            self.alloc.free(tenant_id);
+            self.alloc.free(target);
+            return;
+        };
+        errdefer self.alloc.free(summary);
+        const rationale = state_json.extractJsonString(self.alloc, one, "rationale") orelse {
+            self.alloc.free(tenant_id);
+            self.alloc.free(target);
+            self.alloc.free(summary);
+            return;
+        };
+        errdefer self.alloc.free(rationale);
+
+        const kind_owned = state_json.extractJsonString(self.alloc, one, "kind");
+        const tier_owned = state_json.extractJsonString(self.alloc, one, "tier");
+        const status_owned = state_json.extractJsonString(self.alloc, one, "status");
+        defer if (kind_owned) |v| self.alloc.free(v);
+        defer if (tier_owned) |v| self.alloc.free(v);
+        defer if (status_owned) |v| self.alloc.free(v);
+
+        const decided_by = state_json.extractJsonString(self.alloc, one, "decided_by");
+        errdefer if (decided_by) |v| self.alloc.free(v);
+        const decision_note = state_json.extractJsonString(self.alloc, one, "decision_note");
+        errdefer if (decision_note) |v| self.alloc.free(v);
+
+        const tier = parseTier(if (tier_owned) |v| v else "minor");
+        try self.changes.append(self.alloc, .{
+            .id = id,
+            .tenant_id = tenant_id,
+            .kind = parseKind(if (kind_owned) |v| v else "config"),
+            .target = target,
+            .summary = summary,
+            .rationale = rationale,
+            .expected_delta_k = std.fmt.parseFloat(f32, state_json.extractJsonNumber(one, "expected_delta_k") orelse "0") catch 0,
+            .affected_users = @intCast(std.fmt.parseInt(u32, state_json.extractJsonNumber(one, "affected_users") orelse "0", 10) catch 0),
+            .reversible = parseBool(one, "reversible", true),
+            .tier = tier,
+            .risk = .{
+                .severity = std.fmt.parseFloat(f32, state_json.extractJsonNumber(one, "risk_severity") orelse "0") catch 0,
+                .blast = std.fmt.parseFloat(f32, state_json.extractJsonNumber(one, "risk_blast") orelse "0") catch 0,
+                .reversibility = std.fmt.parseFloat(f32, state_json.extractJsonNumber(one, "risk_reversibility") orelse "0") catch 0,
+            },
+            .timeout_seconds = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "timeout_seconds") orelse "0", 10) catch 0,
+            .required_approvers = consent.requiredApprovers(tier, self.product),
+            .status = parseStatus(if (status_owned) |v| v else "proposed"),
+            .created_at = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "created_at") orelse "0", 10) catch 0,
+            .decided_at = if (std.mem.indexOf(u8, one, "\"decided_at\":null") != null) null else std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "decided_at") orelse "0", 10) catch null,
+            .decided_by = decided_by,
+            .decision_note = decision_note,
+        });
+    }
+
+    fn loadOneAudit(self: *ProductEvolutionRuntime, one: []const u8) !void {
+        const id = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "id") orelse return, 10) catch return;
+        const kind_owned = state_json.extractJsonString(self.alloc, one, "kind");
+        defer if (kind_owned) |v| self.alloc.free(v);
+        const tenant_id = state_json.extractJsonString(self.alloc, one, "tenant_id") orelse return;
+        errdefer self.alloc.free(tenant_id);
+        const detail = state_json.extractJsonString(self.alloc, one, "detail") orelse {
+            self.alloc.free(tenant_id);
+            return;
+        };
+        errdefer self.alloc.free(detail);
+        try self.audit.append(self.alloc, .{
+            .id = id,
+            .at_unix = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "at") orelse "0", 10) catch 0,
+            .kind = parseAuditKind(if (kind_owned) |v| v else "change_proposed"),
+            .change_id = if (std.mem.indexOf(u8, one, "\"change_id\":null") != null) null else std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "change_id") orelse "0", 10) catch null,
+            .tenant_id = tenant_id,
+            .detail = detail,
+        });
+    }
 };
 
 fn writeJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
@@ -340,6 +509,86 @@ fn writeJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !vo
             else => if (c < 0x20) try buf.print(alloc, "\\u{x:0>4}", .{c}) else try buf.append(alloc, c),
         }
     }
+}
+
+fn appendChangeJson(alloc: Allocator, buf: *std.ArrayList(u8), c: *const ChangeProposal) !void {
+    try buf.print(alloc, "{{\"id\":{d},\"tenant_id\":\"", .{c.id});
+    try writeJsonString(alloc, buf, c.tenant_id);
+    try buf.print(alloc, "\",\"kind\":\"{s}\",\"target\":\"", .{@tagName(c.kind)});
+    try writeJsonString(alloc, buf, c.target);
+    try buf.appendSlice(alloc, "\",\"summary\":\"");
+    try writeJsonString(alloc, buf, c.summary);
+    try buf.appendSlice(alloc, "\",\"rationale\":\"");
+    try writeJsonString(alloc, buf, c.rationale);
+    try buf.print(alloc, "\",\"expected_delta_k\":{d:.6},\"affected_users\":{d},\"reversible\":{s},\"tier\":\"{s}\",\"risk_severity\":{d:.6},\"risk_blast\":{d:.6},\"risk_reversibility\":{d:.6},\"timeout_seconds\":{d},\"status\":\"{s}\",\"created_at\":{d},\"decided_at\":", .{
+        c.expected_delta_k,
+        c.affected_users,
+        if (c.reversible) "true" else "false",
+        @tagName(c.tier),
+        c.risk.severity,
+        c.risk.blast,
+        c.risk.reversibility,
+        c.timeout_seconds,
+        @tagName(c.status),
+        c.created_at,
+    });
+    if (c.decided_at) |v| try buf.print(alloc, "{d}", .{v}) else try buf.appendSlice(alloc, "null");
+    try buf.appendSlice(alloc, ",\"decided_by\":");
+    if (c.decided_by) |v| {
+        try buf.append(alloc, '"');
+        try writeJsonString(alloc, buf, v);
+        try buf.append(alloc, '"');
+    } else {
+        try buf.appendSlice(alloc, "null");
+    }
+    try buf.appendSlice(alloc, ",\"decision_note\":");
+    if (c.decision_note) |v| {
+        try buf.append(alloc, '"');
+        try writeJsonString(alloc, buf, v);
+        try buf.append(alloc, '"');
+    } else {
+        try buf.appendSlice(alloc, "null");
+    }
+    try buf.append(alloc, '}');
+}
+
+fn parseKind(s: []const u8) ProductChangeKind {
+    inline for (std.enums.values(ProductChangeKind)) |v| {
+        if (std.mem.eql(u8, s, @tagName(v))) return v;
+    }
+    return .config;
+}
+
+fn parseStatus(s: []const u8) ChangeStatus {
+    inline for (std.enums.values(ChangeStatus)) |v| {
+        if (std.mem.eql(u8, s, @tagName(v))) return v;
+    }
+    return .proposed;
+}
+
+fn parseAuditKind(s: []const u8) AuditKind {
+    inline for (std.enums.values(AuditKind)) |v| {
+        if (std.mem.eql(u8, s, @tagName(v))) return v;
+    }
+    return .change_proposed;
+}
+
+fn parseTier(s: []const u8) consent.ConsentTier {
+    inline for (std.enums.values(consent.ConsentTier)) |v| {
+        if (std.mem.eql(u8, s, @tagName(v))) return v;
+    }
+    return .minor;
+}
+
+fn parseBool(obj: []const u8, key: []const u8, default: bool) bool {
+    var needle: [128]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&needle, "\"{s}\":", .{key}) catch return default;
+    const pos = std.mem.indexOf(u8, obj, prefix) orelse return default;
+    var i = pos + prefix.len;
+    while (i < obj.len and (obj[i] == ' ' or obj[i] == '\t' or obj[i] == '\n')) : (i += 1) {}
+    if (std.mem.startsWith(u8, obj[i..], "true")) return true;
+    if (std.mem.startsWith(u8, obj[i..], "false")) return false;
+    return default;
 }
 
 const testing = std.testing;
@@ -450,4 +699,30 @@ test "ProductEvolutionRuntime: auditJson includes proposal and decision" {
     try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"change_proposed\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"tenant_id\":\"bravo\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"consent_decision\"") != null);
+}
+
+test "ProductEvolutionRuntime: toJson/loadFromJson changes and audit roundtrip" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+    var rt = ProductEvolutionRuntime.init(alloc, &intent);
+    defer rt.deinit();
+
+    const id = try rt.proposeCrmFollowupTightening("charlie", 45, 0.04, 100);
+    try rt.approve(id, "ops", "ship behind flag", 200);
+
+    const json = try rt.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"product_runtime\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+
+    var restored = ProductEvolutionRuntime.init(alloc, &intent);
+    defer restored.deinit();
+    try testing.expect(try restored.loadFromJson(wrapped));
+    try testing.expectEqual(@as(usize, 1), restored.changes.items.len);
+    try testing.expectEqual(@as(usize, 2), restored.audit.items.len);
+    try testing.expectEqual(ChangeStatus.approved, restored.findChange(id).?.status);
+    try testing.expectEqualStrings("charlie", restored.findChange(id).?.tenant_id);
+    try testing.expect(restored.next_change_id > id);
+    try testing.expect(restored.next_audit_id > 2);
 }

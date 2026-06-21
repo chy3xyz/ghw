@@ -101,6 +101,7 @@
 | L4'''''''''''''''' (筛选+chat provenance) | ✅ 新 | 任务来源筛选 + chat memory badge |
 | L4''''''''''''''''' (产品数字生命底座) | ✅ 新 | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
 | L4'''''''''''''''''' (产品底座 SDK) | ✅ 新 | ghw_product_* C ABI |
+| L4''''''''''''''''''' (产品运行时持久化/API) | ✅ 新 | product_runtime state + ui_server product API |
 | L5 (自我写代码) | ✅ | SelfEncoder (规则合成 + 形式验证) |
 
 ### LLM 闭环 (2026-06, P0)
@@ -344,6 +345,22 @@ P16 只有 Zig 内部 runtime; P17 把产品数字生命能力暴露给宿主产
   宿主产品必须显式审批后才能应用, 回滚也进入 audit。
 - **`ghw_product_audit_json`**: 返回产品进化审计日志 JSON (C caller 用 `ghw_free_string`)。
 - `ghw.h` 已同步声明; `zig build install-sdk` 验证 SDK artifact 可安装。
+
+### 产品运行时持久化/API (2026-06, P18)
+
+P17 让宿主产品能经 SDK 调用 runtime, 但 ui_server/daemon 场景仍缺"重启不丢变更上下文"与 HTTP 操作面:
+
+- **`ProductEvolutionRuntime.toJson/loadFromJson`**: 持久化 `next_change_id` /
+  `next_audit_id` / `changes` / `audit`, 恢复后重算 next ids; `required_approvers`
+  从当前 ProductIntent 策略重新派生, 避免复制过期策略。
+- **状态接线**: `ui_server --product-intent PATH` 显式启用产品模式; `saveState`
+  写入 `"product_runtime"` 块, 启动恢复 changes/audit。未传参数时旧行为不变。
+- **产品 HTTP API**: `GET /api/product/runtime`, `GET /api/product/audit`,
+  `POST /api/product/propose-crm-followup`, `POST /api/product/approve`,
+  `POST /api/product/apply`, `POST /api/product/rollback`。
+- **错误可用性**: 产品 runtime 未启用返回 503 JSON; 非法状态转换返回 400 JSON,
+  不让连接级错误代替产品语义错误。
+- 单测: `ProductEvolutionRuntime` changes+audit roundtrip; 全量 `zig build test` / `zig build`。
 
 ---
 

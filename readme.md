@@ -1,6 +1,6 @@
 # GHW — Goal-Harness-World Digital Life Framework
 
-> 🇨🇳 中文版: [readme.zh-CN.md](readme.zh-CN.md) · 📋 [CHANGELOG.md](CHANGELOG.md) · 📐 [ARCHITECTURE.md](ARCHITECTURE.md)
+> 🇨🇳 中文版: [readme.zh-CN.md](readme.zh-CN.md) · 📚 [VitePress docs](site/docs/index.md) · 📋 [CHANGELOG.md](CHANGELOG.md) · 📐 [ARCHITECTURE.md](ARCHITECTURE.md)
 
 > A self-driving digital life that thinks in **math + rules + feedback loops**, not
 > in a single neural network. **LLM is fuel, not the brain.** The framework writes,
@@ -288,6 +288,7 @@ Highlights:
 
 ## Documentation
 
+- [`site/docs/`](site/docs/index.md) — VitePress documentation site for overview, product runtime, API, SDK, and operations
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — layered view, data flow, 9-palace state machine
 - [`SDK.md`](SDK.md) — C ABI v0.3 spec
 - [`FAQ.md`](FAQ.md) — 10 common questions (memory usage, deployment, LLM choice, etc.)

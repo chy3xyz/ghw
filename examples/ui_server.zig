@@ -178,6 +178,8 @@ const LLMReplyResult = struct {
     meta: ghw_harness.human_symbiosis.chat_reply.Meta = .{},
 };
 
+const ProductTransitionAction = enum { approve, apply, rollback };
+
 /// 构造 LLM 回复 (worker 用, 独立函数避免 worker struct 太大)
 fn buildLLMReply(
     app: *App,
@@ -253,6 +255,9 @@ const App = struct {
     human_signal: HumanSignal,
     /// P11: 人类 value_score 趋势 (驱动 goal 提议加速 + provenance)
     value_tracker: ghw_harness.human_symbiosis.ValueTrendTracker = .{},
+    /// P18: 产品数字生命 runtime (显式 --product-intent 启用)
+    product_intent: ?ghw_harness.product_intent.ProductIntent = null,
+    product_runtime: ?ghw_harness.product_runtime.ProductEvolutionRuntime = null,
     reflection: ?Reflection,
     /// Reflect 互斥锁: 后台 thread 跑 reflect 时, 主 thread 访问 memory 用这锁保护
     /// 避免 main thread 跟 reflect thread 同时改 self_narrative / beliefs 时 race
@@ -1006,6 +1011,8 @@ const Args = struct {
     peers_file: []const u8 = "",
     /// Peer health-check interval (seconds)
     peer_health_interval_s: u64 = 30,
+    /// ProductIntent JSON path; empty disables product-runtime mode.
+    product_intent_path: []const u8 = "",
 };
 
 fn parseArgs(raw: []const []const u8) Args {
@@ -1049,6 +1056,9 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--peer-health-interval-s")) {
             i += 1;
             if (i < raw.len) a.peer_health_interval_s = std.fmt.parseInt(u64, raw[i], 10) catch 30;
+        } else if (std.mem.eql(u8, arg, "--product-intent")) {
+            i += 1;
+            if (i < raw.len) a.product_intent_path = raw[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -1072,6 +1082,7 @@ fn printHelp() void {
         \\  --auto-tick-ms N      auto-tick interval, 0=manual only (default 0)
         \\  --id STR              agent id (default ghw-ui)
         \\  --seed N              LCG seed (default 42)
+        \\  --product-intent PATH Enable product-runtime mode with ProductIntent JSON
         \\  --help                show this
         \\
     , .{});
@@ -1642,6 +1653,8 @@ fn saveState(app: *App) !void {
     defer app.alloc.free(sig_json);
     const vt_json = try app.value_tracker.toJson(app.alloc);
     defer app.alloc.free(vt_json);
+    const product_json = if (app.product_runtime) |*rt| try rt.toJson(app.alloc) else null;
+    defer if (product_json) |p| app.alloc.free(p);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(app.alloc);
     try buf.appendSlice(app.alloc, json_a);
@@ -1655,6 +1668,10 @@ fn saveState(app: *App) !void {
     try buf.appendSlice(app.alloc, sig_json);
     try buf.appendSlice(app.alloc, ",\"value_tracker\":");
     try buf.appendSlice(app.alloc, vt_json);
+    if (product_json) |p| {
+        try buf.appendSlice(app.alloc, ",\"product_runtime\":");
+        try buf.appendSlice(app.alloc, p);
+    }
     try buf.append(app.alloc, '}');
     const json = try buf.toOwnedSlice(app.alloc);
     defer app.alloc.free(json);
@@ -3917,6 +3934,105 @@ fn handleGetTasks(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
     try writeResponse(conn, io, resp);
 }
 
+/// GET /api/product/audit — 产品进化审计日志 (P18)
+fn handleGetProductAudit(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    const body = if (app.product_runtime) |*rt| try rt.auditJson(alloc) else try alloc.dupe(u8, "{\"enabled\":false,\"audit\":[]}");
+    defer alloc.free(body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// GET /api/product/runtime — 产品变更 + 审计完整快照 (P18)
+fn handleGetProductRuntime(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    const body = if (app.product_runtime) |*rt| try rt.toJson(alloc) else try alloc.dupe(u8, "{\"enabled\":false,\"changes\":[],\"audit\":[]}");
+    defer alloc.free(body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+fn requireProductRuntime(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !?*ghw_harness.product_runtime.ProductEvolutionRuntime {
+    if (app.product_runtime) |*rt| return rt;
+    const err_body = "{\"error\":\"product runtime disabled; start ui_server with --product-intent PATH\"}";
+    const resp = try makeHttpResponse(alloc, 503, "Service Unavailable", "application/json", err_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+    return null;
+}
+
+/// POST /api/product/propose-crm-followup — 提交 canonical CRM 产品变更 (P18)
+fn handlePostProductProposeCrm(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
+    const rt = (try requireProductRuntime(alloc, conn, io, app)) orelse return;
+    const tenant_owned = (try formValue(alloc, body_text, "tenant_id")) orelse try alloc.dupe(u8, "default");
+    defer alloc.free(tenant_owned);
+    const users_owned = try formValue(alloc, body_text, "affected_users");
+    defer if (users_owned) |v| alloc.free(v);
+    const delta_owned = try formValue(alloc, body_text, "expected_delta_k");
+    defer if (delta_owned) |v| alloc.free(v);
+    const affected_users: u32 = if (users_owned) |v| std.fmt.parseInt(u32, v, 10) catch 0 else 0;
+    const expected_delta_k: f32 = if (delta_owned) |v| std.fmt.parseFloat(f32, v) catch 0 else 0;
+    const now: u64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    const id = rt.proposeCrmFollowupTightening(tenant_owned, affected_users, expected_delta_k, now) catch |err| {
+        const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(err_body);
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    saveState(app) catch {};
+    const ok_body = try std.fmt.allocPrint(alloc, "{{\"change_id\":{d},\"status\":\"{s}\"}}", .{
+        id,
+        @tagName(rt.findChange(id).?.status),
+    });
+    defer alloc.free(ok_body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", ok_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+fn handlePostProductTransition(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, action: ProductTransitionAction) !void {
+    const rt = (try requireProductRuntime(alloc, conn, io, app)) orelse return;
+    const id_owned = try formValue(alloc, body_text, "change_id");
+    defer if (id_owned) |v| alloc.free(v);
+    const change_id: u64 = if (id_owned) |v| std.fmt.parseInt(u64, v, 10) catch 0 else 0;
+    if (change_id == 0) {
+        const err_body = "{\"error\":\"missing change_id\"}";
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+    const now: u64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    const op_result: anyerror!void = switch (action) {
+        .approve => blk: {
+            const approver_owned = try formValue(alloc, body_text, "approver");
+            defer if (approver_owned) |v| alloc.free(v);
+            const note_owned = try formValue(alloc, body_text, "note");
+            defer if (note_owned) |v| alloc.free(v);
+            break :blk rt.approve(change_id, approver_owned orelse "human", note_owned orelse "", now);
+        },
+        .apply => rt.applyApproved(change_id, now),
+        .rollback => rt.rollbackApplied(change_id, now),
+    };
+    op_result catch |err| {
+        const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(err_body);
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    saveState(app) catch {};
+    const status = if (rt.findChange(change_id)) |c| @tagName(c.status) else "unknown";
+    const ok_body = try std.fmt.allocPrint(alloc, "{{\"ok\":true,\"change_id\":{d},\"status\":\"{s}\"}}", .{ change_id, status });
+    defer alloc.free(ok_body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", ok_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
 /// POST /api/tasks — 人类显式投递任务 (P14: source=human)
 fn handlePostTask(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
     const title_owned = (try formValue(alloc, body_text, "title")) orelse {
@@ -4291,6 +4407,10 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetEvolved(alloc, &stream, io, app, req.path["/api/evolved".len..]);
             } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
                 try handleGetTasks(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/audit")) {
+                try handleGetProductAudit(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/runtime")) {
+                try handleGetProductRuntime(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/propose")) {
                 try handleGetPropose(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/memory/search")) {
@@ -4316,6 +4436,14 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handlePostTaskFeedback(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
                 try handlePostTask(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/product/propose-crm-followup")) {
+                try handlePostProductProposeCrm(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/product/approve")) {
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .approve);
+            } else if (std.mem.eql(u8, req.path, "/api/product/apply")) {
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .apply);
+            } else if (std.mem.eql(u8, req.path, "/api/product/rollback")) {
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .rollback);
             } else if (std.mem.eql(u8, req.path, "/api/action/run-now")) {
                 try handlePostActionRun(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/peer/query")) {
@@ -4414,6 +4542,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try app.human_gsp.register("human");
     try app.human_gsp.register("llm_proposer");
     try app.human_gsp.register("system");
+
+    if (args.product_intent_path.len > 0) {
+        app.product_intent = ghw_harness.product_intent.load(alloc, args.product_intent_path) catch |err| blk: {
+            std.debug.print("[ui] ProductIntent 加载失败 {s}: {t}; 产品 runtime 禁用\n", .{ args.product_intent_path, err });
+            break :blk null;
+        };
+        if (app.product_intent) |*intent| {
+            app.product_runtime = ghw_harness.product_runtime.ProductEvolutionRuntime.init(alloc, intent);
+            std.debug.print("[ui] ProductRuntime 启用: product_id={s} intent={s}\n", .{
+                intent.product_id,
+                args.product_intent_path,
+            });
+        }
+    }
 
     // === GHW Link: 必须在 ActionRunner 之前 (ActionRunner 需要 &app.link) ===
     // 注意: 不能 defer 释放 link_path — thread 启动后 defer 会先于 thread 跑,
@@ -4590,6 +4732,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer app.human_gsp.deinit();
     defer app.human_signal.deinit();
     defer app.personality.deinit();
+    defer if (app.product_intent) |*intent| intent.deinit();
+    defer if (app.product_runtime) |*rt| rt.deinit();
     // 停 link server: 不能用 defer (runServer 不返回时 defer 永远不跑; runServer 返 error
     // 时 defer join 又会卡住 — link thread 在 accept 阻塞, 没看到 stop flag).
     // 改成: 在 runServer 之前 spawn, runServer 返 error 时由 errdefer 停 link, 正常退出时不
@@ -4741,6 +4885,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 });
             } else |err| {
                 std.debug.print("[ui] value_tracker loadFromJson 失败: {t}\n", .{err});
+            }
+            if (app.product_runtime) |*rt| {
+                if (rt.loadFromJson(json)) |loaded| {
+                    if (loaded) std.debug.print("[ui] ProductRuntime 恢复: changes={d} audit={d}\n", .{
+                        rt.changes.items.len,
+                        rt.audit.items.len,
+                    });
+                } else |err| {
+                    std.debug.print("[ui] product_runtime loadFromJson 失败: {t}\n", .{err});
+                }
             }
         } else |_| {}
     } else |_| {}
