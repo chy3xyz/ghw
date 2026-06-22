@@ -180,6 +180,20 @@ const LLMReplyResult = struct {
 
 const ProductTransitionAction = enum { approve, apply, rollback };
 
+const HttpRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    body: []u8,
+    admin_token: ?[]const u8 = null,
+
+    fn deinit(self: *const HttpRequest, alloc: Allocator) void {
+        alloc.free(self.method);
+        alloc.free(self.path);
+        alloc.free(self.body);
+        if (self.admin_token) |token| alloc.free(token);
+    }
+};
+
 /// 构造 LLM 回复 (worker 用, 独立函数避免 worker struct 太大)
 fn buildLLMReply(
     app: *App,
@@ -258,6 +272,10 @@ const App = struct {
     /// P18: 产品数字生命 runtime (显式 --product-intent 启用)
     product_intent: ?ghw_harness.product_intent.ProductIntent = null,
     product_runtime: ?ghw_harness.product_runtime.ProductEvolutionRuntime = null,
+    product_config_adapter: ?ghw_harness.FileConfigAdapter = null,
+    product_intent_hash: []const u8 = "",
+    product_kpi_last_feed_unix: i64 = 0,
+    admin_token: []const u8 = "",
     reflection: ?Reflection,
     /// Reflect 互斥锁: 后台 thread 跑 reflect 时, 主 thread 访问 memory 用这锁保护
     /// 避免 main thread 跟 reflect thread 同时改 self_narrative / beliefs 时 race
@@ -1013,6 +1031,10 @@ const Args = struct {
     peer_health_interval_s: u64 = 30,
     /// ProductIntent JSON path; empty disables product-runtime mode.
     product_intent_path: []const u8 = "",
+    /// Product adapter config output path; empty keeps ProductRuntime audit-only.
+    product_config_path: []const u8 = "",
+    /// Env var containing admin token for mutating APIs. Empty disables auth.
+    admin_token_env: []const u8 = "GHW_ADMIN_TOKEN",
 };
 
 fn parseArgs(raw: []const []const u8) Args {
@@ -1059,6 +1081,12 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--product-intent")) {
             i += 1;
             if (i < raw.len) a.product_intent_path = raw[i];
+        } else if (std.mem.eql(u8, arg, "--product-config")) {
+            i += 1;
+            if (i < raw.len) a.product_config_path = raw[i];
+        } else if (std.mem.eql(u8, arg, "--admin-token-env")) {
+            i += 1;
+            if (i < raw.len) a.admin_token_env = raw[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -1083,6 +1111,8 @@ fn printHelp() void {
         \\  --id STR              agent id (default ghw-ui)
         \\  --seed N              LCG seed (default 42)
         \\  --product-intent PATH Enable product-runtime mode with ProductIntent JSON
+        \\  --product-config PATH Enable file ProductAdapter output for approved changes
+        \\  --admin-token-env ENV Env var for X-GHW-Admin-Token protected writes
         \\  --help                show this
         \\
     , .{});
@@ -3961,8 +3991,83 @@ fn requireProductRuntime(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io,
     return null;
 }
 
+fn requireAdminToken(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, presented: ?[]const u8) !bool {
+    if (app.admin_token.len == 0) return true;
+    if (presented) |token| {
+        if (std.mem.eql(u8, token, app.admin_token)) return true;
+    }
+    const err_body = "{\"error\":\"admin token required\"}";
+    const resp = try makeHttpResponse(alloc, 401, "Unauthorized", "application/json", err_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+    return false;
+}
+
+/// GET /api/product/intent — ProductIntent identity/governance metadata (P22)
+fn handleGetProductIntent(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    if (app.product_intent) |*intent| {
+        try body.appendSlice(alloc, "{\"enabled\":true,\"product_id\":\"");
+        try appendJsonString(alloc, &body, intent.product_id);
+        try body.appendSlice(alloc, "\",\"version\":\"");
+        try appendJsonString(alloc, &body, intent.version);
+        try body.print(alloc, "\",\"update_epoch\":{d},\"approved_by\":\"", .{intent.update_epoch});
+        try appendJsonString(alloc, &body, intent.approved_by);
+        try body.appendSlice(alloc, "\",\"manifest_hash\":\"");
+        try appendJsonString(alloc, &body, app.product_intent_hash);
+        try body.print(alloc, "\",\"adapter_enabled\":{s},\"kpi_last_feed_unix\":{d}}}", .{
+            if (app.product_config_adapter != null) "true" else "false",
+            app.product_kpi_last_feed_unix,
+        });
+    } else {
+        try body.appendSlice(alloc, "{\"enabled\":false}");
+    }
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// GET /api/product/approvals — approval desk data surface (P23)
+fn handleGetProductApprovals(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, "{\"enabled\":");
+    try body.appendSlice(alloc, if (app.product_runtime != null) "true" else "false");
+    try body.appendSlice(alloc, ",\"pending\":[");
+    if (app.product_runtime) |*rt| {
+        var first = true;
+        for (rt.changes.items) |c| {
+            if (c.status != .pending_consent and c.status != .approved) continue;
+            if (!first) try body.append(alloc, ',');
+            first = false;
+            try body.print(alloc, "{{\"id\":{d},\"status\":\"{s}\",\"tier\":\"{s}\",\"tenant_id\":\"", .{
+                c.id,
+                @tagName(c.status),
+                @tagName(c.tier),
+            });
+            try appendJsonString(alloc, &body, c.tenant_id);
+            try body.appendSlice(alloc, "\",\"target\":\"");
+            try appendJsonString(alloc, &body, c.target);
+            try body.appendSlice(alloc, "\",\"summary\":\"");
+            try appendJsonString(alloc, &body, c.summary);
+            try body.print(alloc, "\",\"expected_delta_k\":{d:.6},\"affected_users\":{d},\"required_approvers\":\"", .{
+                c.expected_delta_k,
+                c.affected_users,
+            });
+            try appendJsonString(alloc, &body, c.required_approvers);
+            try body.appendSlice(alloc, "\"}");
+        }
+    }
+    try body.appendSlice(alloc, "]}");
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
 /// POST /api/product/propose-crm-followup — 提交 canonical CRM 产品变更 (P18)
-fn handlePostProductProposeCrm(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
+fn handlePostProductProposeCrm(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, admin_token: ?[]const u8) !void {
+    if (!try requireAdminToken(alloc, conn, io, app, admin_token)) return;
     const rt = (try requireProductRuntime(alloc, conn, io, app)) orelse return;
     const tenant_owned = (try formValue(alloc, body_text, "tenant_id")) orelse try alloc.dupe(u8, "default");
     defer alloc.free(tenant_owned);
@@ -3992,7 +4097,8 @@ fn handlePostProductProposeCrm(alloc: Allocator, conn: *std.Io.net.Stream, io: s
     try writeResponse(conn, io, resp);
 }
 
-fn handlePostProductTransition(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, action: ProductTransitionAction) !void {
+fn handlePostProductTransition(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, action: ProductTransitionAction, admin_token: ?[]const u8) !void {
+    if (!try requireAdminToken(alloc, conn, io, app, admin_token)) return;
     const rt = (try requireProductRuntime(alloc, conn, io, app)) orelse return;
     const id_owned = try formValue(alloc, body_text, "change_id");
     defer if (id_owned) |v| alloc.free(v);
@@ -4027,6 +4133,52 @@ fn handlePostProductTransition(alloc: Allocator, conn: *std.Io.net.Stream, io: s
     saveState(app) catch {};
     const status = if (rt.findChange(change_id)) |c| @tagName(c.status) else "unknown";
     const ok_body = try std.fmt.allocPrint(alloc, "{{\"ok\":true,\"change_id\":{d},\"status\":\"{s}\"}}", .{ change_id, status });
+    defer alloc.free(ok_body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", ok_body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/product/kpi — real product KPI feed entry (P24)
+fn handlePostProductKpi(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, admin_token: ?[]const u8) !void {
+    if (!try requireAdminToken(alloc, conn, io, app, admin_token)) return;
+    const rt = (try requireProductRuntime(alloc, conn, io, app)) orelse return;
+    const nrr_owned = try formValue(alloc, body_text, "nrr_quarterly");
+    defer if (nrr_owned) |v| alloc.free(v);
+    const win_owned = try formValue(alloc, body_text, "deal_win_rate");
+    defer if (win_owned) |v| alloc.free(v);
+    const cycle_owned = try formValue(alloc, body_text, "sales_cycle_days_p50");
+    defer if (cycle_owned) |v| alloc.free(v);
+    const active_owned = try formValue(alloc, body_text, "weekly_active_sales_pct");
+    defer if (active_owned) |v| alloc.free(v);
+    const csat_owned = try formValue(alloc, body_text, "csat");
+    defer if (csat_owned) |v| alloc.free(v);
+    const incident_owned = try formValue(alloc, body_text, "incident_rate");
+    defer if (incident_owned) |v| alloc.free(v);
+
+    const raw = ghw_harness.crm_kpi.RawKpi{
+        .nrr_quarterly = if (nrr_owned) |v| std.fmt.parseFloat(f32, v) catch 0 else 0,
+        .deal_win_rate = if (win_owned) |v| std.fmt.parseFloat(f32, v) catch 0 else 0,
+        .sales_cycle_days_p50 = if (cycle_owned) |v| std.fmt.parseFloat(f32, v) catch 0 else 0,
+        .weekly_active_sales_pct = if (active_owned) |v| std.fmt.parseFloat(f32, v) catch 0 else 0,
+        .csat = if (csat_owned) |v| std.fmt.parseFloat(f32, v) catch null else null,
+        .incident_rate = if (incident_owned) |v| std.fmt.parseFloat(f32, v) catch null else null,
+    };
+    const now = std.Io.Clock.real.now(app.io).toSeconds();
+    app.product_kpi_last_feed_unix = now;
+    const refreshed = rt.feedKpi(&app.agent.ed, raw, now) catch |err| {
+        const err_body = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(err_body);
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    saveState(app) catch {};
+    const ok_body = try std.fmt.allocPrint(alloc, "{{\"ok\":true,\"refreshed\":{s},\"kpi_last_feed_unix\":{d}}}", .{
+        if (refreshed) "true" else "false",
+        app.product_kpi_last_feed_unix,
+    });
     defer alloc.free(ok_body);
     const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", ok_body);
     defer alloc.free(resp);
@@ -4267,7 +4419,7 @@ fn handlePostChat(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
 }
 
 // ===== 接收 HTTP 请求 =====
-fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !struct { method: []const u8, path: []const u8, body: []u8 } {
+fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !HttpRequest {
     // 读全部 request (一般 < 8KB)
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
@@ -4287,6 +4439,7 @@ fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !st
                 cl = std.fmt.parseInt(usize, v, 10) catch 0;
             }
         }
+        if (cl > buf.len or end_hdr + 4 + cl > buf.len) return error.RequestTooLarge;
         if (total >= end_hdr + 4 + cl) break;
     }
     // 解析首行
@@ -4295,12 +4448,26 @@ fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !st
     const sp1 = std.mem.indexOf(u8, first_line, " ") orelse return error.Malformed;
     const sp2 = std.mem.indexOfPos(u8, first_line, sp1 + 1, " ") orelse return error.Malformed;
     const method = try alloc.dupe(u8, first_line[0..sp1]);
+    errdefer alloc.free(method);
     const path = try alloc.dupe(u8, first_line[sp1 + 1 .. sp2]);
+    errdefer alloc.free(path);
+    var admin_token: ?[]u8 = null;
+    errdefer if (admin_token) |token| alloc.free(token);
+    const full_header = buf[0 .. (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return error.Malformed)];
+    var header_it = std.mem.splitScalar(u8, full_header, '\n');
+    while (header_it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \r");
+        if (std.ascii.startsWithIgnoreCase(line, "X-GHW-Admin-Token:")) {
+            const v = std.mem.trim(u8, line["X-GHW-Admin-Token:".len..], " \t\r");
+            admin_token = try alloc.dupe(u8, v);
+            break;
+        }
+    }
     // body
     const body_start = (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") orelse return error.Malformed) + 4;
     const body_slice = buf[body_start..total];
     const body = try alloc.dupe(u8, body_slice);
-    return .{ .method = method, .path = path, .body = body };
+    return .{ .method = method, .path = path, .body = body, .admin_token = admin_token };
 }
 
 // ===== HTTP server 主循环 =====
@@ -4373,9 +4540,7 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
             stream.close(io);
             continue;
         };
-        defer alloc.free(req.method);
-        defer alloc.free(req.path);
-        defer alloc.free(req.body);
+        defer req.deinit(alloc);
 
         // 路由
         if (std.mem.eql(u8, req.method, "GET")) {
@@ -4411,6 +4576,10 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetProductAudit(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/product/runtime")) {
                 try handleGetProductRuntime(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/intent")) {
+                try handleGetProductIntent(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/approvals")) {
+                try handleGetProductApprovals(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/propose")) {
                 try handleGetPropose(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/memory/search")) {
@@ -4437,13 +4606,15 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
             } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
                 try handlePostTask(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/product/propose-crm-followup")) {
-                try handlePostProductProposeCrm(alloc, &stream, io, app, req.body);
+                try handlePostProductProposeCrm(alloc, &stream, io, app, req.body, req.admin_token);
             } else if (std.mem.eql(u8, req.path, "/api/product/approve")) {
-                try handlePostProductTransition(alloc, &stream, io, app, req.body, .approve);
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .approve, req.admin_token);
             } else if (std.mem.eql(u8, req.path, "/api/product/apply")) {
-                try handlePostProductTransition(alloc, &stream, io, app, req.body, .apply);
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .apply, req.admin_token);
             } else if (std.mem.eql(u8, req.path, "/api/product/rollback")) {
-                try handlePostProductTransition(alloc, &stream, io, app, req.body, .rollback);
+                try handlePostProductTransition(alloc, &stream, io, app, req.body, .rollback, req.admin_token);
+            } else if (std.mem.eql(u8, req.path, "/api/product/kpi")) {
+                try handlePostProductKpi(alloc, &stream, io, app, req.body, req.admin_token);
             } else if (std.mem.eql(u8, req.path, "/api/action/run-now")) {
                 try handlePostActionRun(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/peer/query")) {
@@ -4461,6 +4632,39 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
             try writeResponse(&stream, io, resp);
         }
     }
+}
+
+fn readSmallFilePosix(alloc: Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    const path_z = try alloc.allocSentinel(u8, path.len, 0);
+    defer alloc.free(path_z);
+    @memcpy(path_z, path);
+    const oflag: std.c.O = @bitCast(@as(u32, 0));
+    const fd = std.c.open(path_z, oflag, @as(c_uint, 0));
+    if (fd < 0) return error.FileNotFound;
+    defer _ = std.c.close(fd);
+    var st: std.c.Stat = undefined;
+    if (std.c.stat(path_z, &st) != 0) return error.FileNotFound;
+    const size: usize = @intCast(@as(u64, @bitCast(st.size)));
+    if (size > max_bytes) return error.FileTooLarge;
+    const buf = try alloc.alloc(u8, size);
+    errdefer alloc.free(buf);
+    const n = std.c.read(fd, buf.ptr, size);
+    if (n < 0 or @as(usize, @intCast(n)) != size) return error.ReadFailed;
+    return buf;
+}
+
+fn sha256HexAlloc(alloc: Allocator, bytes: []const u8) ![]u8 {
+    var digest: [32]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(bytes);
+    hasher.final(&digest);
+    const out = try alloc.alloc(u8, digest.len * 2);
+    const alphabet = "0123456789abcdef";
+    for (digest, 0..) |b, i| {
+        out[i * 2] = alphabet[b >> 4];
+        out[i * 2 + 1] = alphabet[b & 0x0f];
+    }
+    return out;
 }
 
 // ===== Main =====
@@ -4514,6 +4718,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("[ui] sqlite 打开失败: {t}, 降级到 state.json\n", .{err});
     }
     defer if (sqlite_db) |*db| db.close();
+    const admin_token_value = std.process.Environ.getPosix(init.environ, args.admin_token_env) orelse "";
 
     var app = App{
         .alloc = alloc,
@@ -4535,6 +4740,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .state_path = args.state,
         .ui_dir = args.ui_dir,
         .port = args.port,
+        .admin_token = admin_token_value,
     };
     app.agent = try GHWAgent.init(alloc, args.agent_id, 4, .{ 3, 3, 3 }, args.seed);
     app.agent.bindTaskQueue(&app.task_queue);
@@ -4550,6 +4756,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         if (app.product_intent) |*intent| {
             app.product_runtime = ghw_harness.product_runtime.ProductEvolutionRuntime.init(alloc, intent);
+            const manifest = readSmallFilePosix(alloc, args.product_intent_path, 1024 * 1024) catch null;
+            if (manifest) |bytes| {
+                defer alloc.free(bytes);
+                app.product_intent_hash = sha256HexAlloc(alloc, bytes) catch "";
+            }
+            if (args.product_config_path.len > 0) {
+                app.product_config_adapter = ghw_harness.FileConfigAdapter.init(alloc, io, args.product_config_path) catch |err| blk: {
+                    std.debug.print("[ui] ProductAdapter 初始化失败 {s}: {t}; apply 回退审计模式\n", .{ args.product_config_path, err });
+                    break :blk null;
+                };
+                if (app.product_config_adapter) |*adapter| {
+                    app.product_runtime.?.setAdapter(adapter.asAdapter());
+                    std.debug.print("[ui] ProductAdapter 启用: file_config={s}\n", .{adapter.path});
+                }
+            }
             std.debug.print("[ui] ProductRuntime 启用: product_id={s} intent={s}\n", .{
                 intent.product_id,
                 args.product_intent_path,
@@ -4734,6 +4955,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer app.personality.deinit();
     defer if (app.product_intent) |*intent| intent.deinit();
     defer if (app.product_runtime) |*rt| rt.deinit();
+    defer if (app.product_config_adapter) |*adapter| adapter.deinit();
+    defer if (app.product_intent_hash.len > 0) alloc.free(app.product_intent_hash);
     // 停 link server: 不能用 defer (runServer 不返回时 defer 永远不跑; runServer 返 error
     // 时 defer join 又会卡住 — link thread 在 accept 阻塞, 没看到 stop flag).
     // 改成: 在 runServer 之前 spawn, runServer 返 error 时由 errdefer 停 link, 正常退出时不

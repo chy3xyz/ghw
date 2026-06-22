@@ -9,8 +9,11 @@
   --port 8765 \
   --state /tmp/ghw-state.json \
   --ui-dir ui \
-  --product-intent product_intent.example.crm.json
+  --product-intent product_intent.example.crm.json \
+  --product-config /tmp/ghw-product-config.json
 ```
+
+生产写接口建议设置 `GHW_ADMIN_TOKEN`，调用时传 `X-GHW-Admin-Token`。
 
 ## 核心状态
 
@@ -52,10 +55,13 @@ curl -X POST http://127.0.0.1:8765/api/tasks \
 | --- | --- | --- |
 | `GET` | `/api/product/runtime` | 查询 changes + audit 完整状态 |
 | `GET` | `/api/product/audit` | 只查询 audit |
+| `GET` | `/api/product/intent` | 查询 ProductIntent identity、update_epoch、manifest_hash、adapter 状态 |
+| `GET` | `/api/product/approvals` | 查询审批台数据：pending/approved changes |
 | `POST` | `/api/product/propose-crm-followup` | 提交 CRM 样板提案 |
 | `POST` | `/api/product/approve` | 审批变更 |
 | `POST` | `/api/product/apply` | 应用已审批变更 |
 | `POST` | `/api/product/rollback` | 回滚已应用变更 |
+| `POST` | `/api/product/kpi` | feed 真实产品 KPI 到 ProductRuntime |
 
 未启用 `--product-intent` 时，产品接口返回 503 JSON：
 
@@ -66,6 +72,24 @@ curl -X POST http://127.0.0.1:8765/api/tasks \
 ```
 
 非法状态转换返回 400 JSON，例如未审批就 apply。
+
+受保护写接口示例：
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/product/propose-crm-followup \
+  -H "X-GHW-Admin-Token: $GHW_ADMIN_TOKEN" \
+  -d 'tenant_id=acme&affected_users=45&expected_delta_k=0.05'
+```
+
+KPI feed 示例：
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/product/kpi \
+  -H "X-GHW-Admin-Token: $GHW_ADMIN_TOKEN" \
+  -d 'nrr_quarterly=0.88&deal_win_rate=0.24&sales_cycle_days_p50=48&weekly_active_sales_pct=0.71&csat=0.92&incident_rate=0.01'
+```
+
+启用 `--product-config PATH` 后，`/api/product/apply` 会通过文件 adapter 写入宿主产品配置，`/api/product/rollback` 会写回 `rolled_back` 状态。审计日志包含 `previous_hash` 与 `current_hash`。
 
 ## 自演化与行动
 
@@ -88,4 +112,4 @@ curl -X POST http://127.0.0.1:8765/api/tasks \
 
 - 当前 HTTP server 是轻量内置实现，不是完整反向代理。
 - 生产部署建议放在内网或反向代理之后。
-- 产品变更 API 应加认证、权限和审计转发后再暴露给多人使用。
+- `GHW_ADMIN_TOKEN` 是最小鉴权主干；多人生产环境仍应在反向代理或宿主产品里接入身份、RBAC 和审计转发。

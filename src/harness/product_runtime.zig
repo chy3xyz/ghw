@@ -25,6 +25,7 @@ pub const ProductRuntimeError = error{
     NotApproved,
     AlreadyApplied,
     NotApplied,
+    AuditHashMismatch,
     OutOfMemory,
 };
 
@@ -51,6 +52,8 @@ pub const AuditKind = enum {
     consent_decision,
     change_applied,
     change_rolled_back,
+    change_apply_failed,
+    change_rollback_failed,
 };
 
 pub const ChangeProposal = struct {
@@ -90,10 +93,38 @@ pub const AuditEntry = struct {
     change_id: ?u64 = null,
     tenant_id: []const u8,
     detail: []const u8,
+    previous_hash: []const u8,
+    current_hash: []const u8,
 
     fn deinit(self: *AuditEntry, alloc: Allocator) void {
         alloc.free(self.tenant_id);
         alloc.free(self.detail);
+        alloc.free(self.previous_hash);
+        alloc.free(self.current_hash);
+    }
+};
+
+pub const ProductAdapter = struct {
+    ctx: *anyopaque,
+    validateFn: *const fn (*anyopaque, *const ChangeProposal) anyerror!void,
+    applyFn: *const fn (*anyopaque, *const ChangeProposal) anyerror!void,
+    verifyFn: *const fn (*anyopaque, *const ChangeProposal) anyerror!void,
+    rollbackFn: *const fn (*anyopaque, *const ChangeProposal) anyerror!void,
+
+    pub fn validate(self: ProductAdapter, change: *const ChangeProposal) !void {
+        try self.validateFn(self.ctx, change);
+    }
+
+    pub fn apply(self: ProductAdapter, change: *const ChangeProposal) !void {
+        try self.applyFn(self.ctx, change);
+    }
+
+    pub fn verify(self: ProductAdapter, change: *const ChangeProposal) !void {
+        try self.verifyFn(self.ctx, change);
+    }
+
+    pub fn rollback(self: ProductAdapter, change: *const ChangeProposal) !void {
+        try self.rollbackFn(self.ctx, change);
     }
 };
 
@@ -101,6 +132,7 @@ pub const ProductEvolutionRuntime = struct {
     alloc: Allocator,
     product: *const ProductIntent,
     bridge: KpiBridge,
+    adapter: ?ProductAdapter = null,
     next_change_id: u64 = 1,
     next_audit_id: u64 = 1,
     changes: std.ArrayList(ChangeProposal) = .empty,
@@ -112,6 +144,10 @@ pub const ProductEvolutionRuntime = struct {
             .product = product,
             .bridge = KpiBridge.initFromIntent(product),
         };
+    }
+
+    pub fn setAdapter(self: *ProductEvolutionRuntime, adapter: ProductAdapter) void {
+        self.adapter = adapter;
     }
 
     pub fn deinit(self: *ProductEvolutionRuntime) void {
@@ -242,41 +278,78 @@ pub const ProductEvolutionRuntime = struct {
     pub fn approve(self: *ProductEvolutionRuntime, change_id: u64, approver: []const u8, note: []const u8, now_unix: u64) !void {
         const p = self.findChange(change_id) orelse return error.ChangeNotFound;
         if (p.status == .applied or p.status == .rolled_back) return error.AlreadyTerminal;
+        const approver_owned = try self.alloc.dupe(u8, approver);
+        const note_owned = self.alloc.dupe(u8, note) catch |err| {
+            self.alloc.free(approver_owned);
+            return err;
+        };
+        errdefer self.alloc.free(approver_owned);
+        errdefer self.alloc.free(note_owned);
+        try self.appendAudit(.consent_decision, change_id, p.tenant_id, "approved", now_unix);
         p.status = .approved;
         p.decided_at = now_unix;
         if (p.decided_by) |v| self.alloc.free(v);
         if (p.decision_note) |v| self.alloc.free(v);
-        p.decided_by = try self.alloc.dupe(u8, approver);
-        p.decision_note = try self.alloc.dupe(u8, note);
-        try self.appendAudit(.consent_decision, change_id, p.tenant_id, "approved", now_unix);
+        p.decided_by = approver_owned;
+        p.decision_note = note_owned;
     }
 
     pub fn deny(self: *ProductEvolutionRuntime, change_id: u64, approver: []const u8, note: []const u8, now_unix: u64) !void {
         const p = self.findChange(change_id) orelse return error.ChangeNotFound;
         if (p.status == .applied or p.status == .rolled_back) return error.AlreadyTerminal;
+        const approver_owned = try self.alloc.dupe(u8, approver);
+        const note_owned = self.alloc.dupe(u8, note) catch |err| {
+            self.alloc.free(approver_owned);
+            return err;
+        };
+        errdefer self.alloc.free(approver_owned);
+        errdefer self.alloc.free(note_owned);
+        try self.appendAudit(.consent_decision, change_id, p.tenant_id, "denied", now_unix);
         p.status = .denied;
         p.decided_at = now_unix;
         if (p.decided_by) |v| self.alloc.free(v);
         if (p.decision_note) |v| self.alloc.free(v);
-        p.decided_by = try self.alloc.dupe(u8, approver);
-        p.decision_note = try self.alloc.dupe(u8, note);
-        try self.appendAudit(.consent_decision, change_id, p.tenant_id, "denied", now_unix);
+        p.decided_by = approver_owned;
+        p.decision_note = note_owned;
     }
 
     pub fn applyApproved(self: *ProductEvolutionRuntime, change_id: u64, now_unix: u64) !void {
         const p = self.findChange(change_id) orelse return error.ChangeNotFound;
         if (p.status == .applied) return error.AlreadyApplied;
         if (p.status != .approved) return error.NotApproved;
-        p.status = .applied;
+        if (self.adapter) |adapter| {
+            adapter.validate(p) catch |err| {
+                try self.appendAudit(.change_apply_failed, change_id, p.tenant_id, @errorName(err), now_unix);
+                return err;
+            };
+            adapter.apply(p) catch |err| {
+                try self.appendAudit(.change_apply_failed, change_id, p.tenant_id, @errorName(err), now_unix);
+                return err;
+            };
+            adapter.verify(p) catch |err| {
+                adapter.rollback(p) catch |rollback_err| {
+                    try self.appendAudit(.change_rollback_failed, change_id, p.tenant_id, @errorName(rollback_err), now_unix);
+                };
+                try self.appendAudit(.change_apply_failed, change_id, p.tenant_id, @errorName(err), now_unix);
+                return err;
+            };
+        }
         try self.appendAudit(.change_applied, change_id, p.tenant_id, p.summary, now_unix);
+        p.status = .applied;
     }
 
     pub fn rollbackApplied(self: *ProductEvolutionRuntime, change_id: u64, now_unix: u64) !void {
         const p = self.findChange(change_id) orelse return error.ChangeNotFound;
         if (p.status != .applied) return error.NotApplied;
         if (!p.reversible) return error.ConsentRequired;
-        p.status = .rolled_back;
+        if (self.adapter) |adapter| {
+            adapter.rollback(p) catch |err| {
+                try self.appendAudit(.change_rollback_failed, change_id, p.tenant_id, @errorName(err), now_unix);
+                return err;
+            };
+        }
         try self.appendAudit(.change_rolled_back, change_id, p.tenant_id, p.summary, now_unix);
+        p.status = .rolled_back;
     }
 
     pub fn auditJson(self: *const ProductEvolutionRuntime, alloc: Allocator) ![]u8 {
@@ -346,6 +419,10 @@ pub const ProductEvolutionRuntime = struct {
         }
 
         self.recomputeNextIds();
+        if (!try self.verifyAuditChain()) {
+            self.clearAll();
+            return error.AuditHashMismatch;
+        }
         return true;
     }
 
@@ -365,9 +442,34 @@ pub const ProductEvolutionRuntime = struct {
             try writeJsonString(alloc, out, entry.tenant_id);
             try out.appendSlice(alloc, "\",\"detail\":\"");
             try writeJsonString(alloc, out, entry.detail);
+            try out.appendSlice(alloc, "\",\"previous_hash\":\"");
+            try writeJsonString(alloc, out, entry.previous_hash);
+            try out.appendSlice(alloc, "\",\"current_hash\":\"");
+            try writeJsonString(alloc, out, entry.current_hash);
             try out.appendSlice(alloc, "\"}");
         }
         try out.append(alloc, ']');
+    }
+
+    pub fn verifyAuditChain(self: *const ProductEvolutionRuntime) !bool {
+        var previous: []const u8 = "genesis";
+        for (self.audit.items) |entry| {
+            if (!std.mem.eql(u8, entry.previous_hash, previous)) return false;
+            const expected = try computeAuditHash(
+                self.alloc,
+                entry.previous_hash,
+                entry.id,
+                entry.at_unix,
+                entry.kind,
+                entry.change_id,
+                entry.tenant_id,
+                entry.detail,
+            );
+            defer self.alloc.free(expected);
+            if (!std.mem.eql(u8, expected, entry.current_hash)) return false;
+            previous = entry.current_hash;
+        }
+        return true;
     }
 
     pub fn findChange(self: *ProductEvolutionRuntime, change_id: u64) ?*ChangeProposal {
@@ -385,13 +487,24 @@ pub const ProductEvolutionRuntime = struct {
         detail: []const u8,
         at_unix: u64,
     ) !void {
+        const previous_hash = if (self.audit.items.len > 0) self.audit.items[self.audit.items.len - 1].current_hash else "genesis";
+        const current_hash = try computeAuditHash(self.alloc, previous_hash, self.next_audit_id, at_unix, kind, change_id, tenant_id, detail);
+        errdefer self.alloc.free(current_hash);
+        const previous_owned = try self.alloc.dupe(u8, previous_hash);
+        errdefer self.alloc.free(previous_owned);
+        const tenant_owned = try self.alloc.dupe(u8, tenant_id);
+        errdefer self.alloc.free(tenant_owned);
+        const detail_owned = try self.alloc.dupe(u8, detail);
+        errdefer self.alloc.free(detail_owned);
         try self.audit.append(self.alloc, .{
             .id = self.next_audit_id,
             .at_unix = at_unix,
             .kind = kind,
             .change_id = change_id,
-            .tenant_id = try self.alloc.dupe(u8, tenant_id),
-            .detail = try self.alloc.dupe(u8, detail),
+            .tenant_id = tenant_owned,
+            .detail = detail_owned,
+            .previous_hash = previous_owned,
+            .current_hash = current_hash,
         });
         self.next_audit_id += 1;
     }
@@ -487,6 +600,20 @@ pub const ProductEvolutionRuntime = struct {
             return;
         };
         errdefer self.alloc.free(detail);
+        const default_previous_hash = if (self.audit.items.len > 0) self.audit.items[self.audit.items.len - 1].current_hash else "genesis";
+        const previous_hash = state_json.extractJsonString(self.alloc, one, "previous_hash") orelse try self.alloc.dupe(u8, default_previous_hash);
+        errdefer self.alloc.free(previous_hash);
+        const current_hash = state_json.extractJsonString(self.alloc, one, "current_hash") orelse try computeAuditHash(
+            self.alloc,
+            previous_hash,
+            id,
+            std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "at") orelse "0", 10) catch 0,
+            parseAuditKind(if (kind_owned) |v| v else "change_proposed"),
+            if (std.mem.indexOf(u8, one, "\"change_id\":null") != null) null else std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "change_id") orelse "0", 10) catch null,
+            tenant_id,
+            detail,
+        );
+        errdefer self.alloc.free(current_hash);
         try self.audit.append(self.alloc, .{
             .id = id,
             .at_unix = std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "at") orelse "0", 10) catch 0,
@@ -494,6 +621,8 @@ pub const ProductEvolutionRuntime = struct {
             .change_id = if (std.mem.indexOf(u8, one, "\"change_id\":null") != null) null else std.fmt.parseInt(u64, state_json.extractJsonNumber(one, "change_id") orelse "0", 10) catch null,
             .tenant_id = tenant_id,
             .detail = detail,
+            .previous_hash = previous_hash,
+            .current_hash = current_hash,
         });
     }
 };
@@ -509,6 +638,51 @@ fn writeJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !vo
             else => if (c < 0x20) try buf.print(alloc, "\\u{x:0>4}", .{c}) else try buf.append(alloc, c),
         }
     }
+}
+
+fn computeAuditHash(
+    alloc: Allocator,
+    previous_hash: []const u8,
+    id: u64,
+    at_unix: u64,
+    kind: AuditKind,
+    change_id: ?u64,
+    tenant_id: []const u8,
+    detail: []const u8,
+) ![]u8 {
+    var digest: [32]u8 = undefined;
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var scratch: [64]u8 = undefined;
+
+    hasher.update(previous_hash);
+    hasher.update("|");
+    const id_s = try std.fmt.bufPrint(&scratch, "{d}", .{id});
+    hasher.update(id_s);
+    hasher.update("|");
+    const at_s = try std.fmt.bufPrint(&scratch, "{d}", .{at_unix});
+    hasher.update(at_s);
+    hasher.update("|");
+    hasher.update(@tagName(kind));
+    hasher.update("|");
+    if (change_id) |cid| {
+        const cid_s = try std.fmt.bufPrint(&scratch, "{d}", .{cid});
+        hasher.update(cid_s);
+    } else {
+        hasher.update("null");
+    }
+    hasher.update("|");
+    hasher.update(tenant_id);
+    hasher.update("|");
+    hasher.update(detail);
+    hasher.final(&digest);
+
+    const out = try alloc.alloc(u8, digest.len * 2);
+    const alphabet = "0123456789abcdef";
+    for (digest, 0..) |b, i| {
+        out[i * 2] = alphabet[b >> 4];
+        out[i * 2 + 1] = alphabet[b & 0x0f];
+    }
+    return out;
 }
 
 fn appendChangeJson(alloc: Allocator, buf: *std.ArrayList(u8), c: *const ChangeProposal) !void {

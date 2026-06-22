@@ -102,6 +102,7 @@
 | L4''''''''''''''''' (产品数字生命底座) | ✅ 新 | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
 | L4'''''''''''''''''' (产品底座 SDK) | ✅ 新 | ghw_product_* C ABI |
 | L4''''''''''''''''''' (产品运行时持久化/API) | ✅ 新 | product_runtime state + ui_server product API |
+| L4'''''''''''''''''''' (产品可用级主干) | ✅ 新 | ProductAdapter + auth + audit hash + KPI HTTP + acceptance |
 | L5 (自我写代码) | ✅ | SelfEncoder (规则合成 + 形式验证) |
 
 ### LLM 闭环 (2026-06, P0)
@@ -361,6 +362,28 @@ P17 让宿主产品能经 SDK 调用 runtime, 但 ui_server/daemon 场景仍缺"
 - **错误可用性**: 产品 runtime 未启用返回 503 JSON; 非法状态转换返回 400 JSON,
   不让连接级错误代替产品语义错误。
 - 单测: `ProductEvolutionRuntime` changes+audit roundtrip; 全量 `zig build test` / `zig build`。
+
+### 产品可用级主干 (2026-06, P19-P25)
+
+P18 仍是"可审计控制面"; P19-P25 把它推进到能被宿主产品安全接入的最小生产主干:
+
+- **P19 ProductAdapter**: `ProductRuntime` 支持可选 `ProductAdapter` vtable
+  (`validate/apply/verify/rollback`); `product_adapter.zig` 提供 `FileConfigAdapter`,
+  `ui_server --product-config PATH` 后 `applyApproved` 会真实写配置文件并 verify,
+  `rollbackApplied` 写回 `rolled_back`。
+- **P20 HTTP 鉴权**: `ui_server --admin-token-env ENV` 读取 token; 产品写接口要求
+  `X-GHW-Admin-Token`。环境变量未设置时保持本地开发兼容。
+- **P21 审计可信化**: `AuditEntry` 增加 `previous_hash/current_hash` hash chain;
+  adapter apply/rollback 失败也写 `change_apply_failed` / `change_rollback_failed` audit。
+- **P22 ProductIntent 治理**: parse 层拒绝空 `product_id/version/approved_by` 与
+  `update_epoch=0`; `GET /api/product/intent` 暴露 manifest hash / update_epoch /
+  adapter 状态 / KPI 最近 feed 时间。
+- **P23 审批台数据面**: `GET /api/product/approvals` 返回 pending/approved changes
+  (tier/target/summary/expected_delta_k/required_approvers), 前端可直接挂审批台。
+- **P24 KPI HTTP feed**: `POST /api/product/kpi` 接收 CRM KPI + 可选 `csat` /
+  `incident_rate`, 经 `ProductRuntime.feedKpi` 限频写 E 并返回 `refreshed`。
+- **P25 验收脚本**: `scripts/product_runtime_acceptance.sh` 构建测试 + 启动 product mode
+  + 走 propose→approve→apply→rollback, 验证文件 adapter 与 audit hash 字段。
 
 ---
 

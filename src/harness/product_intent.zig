@@ -364,18 +364,23 @@ pub fn parse(allocator: std.mem.Allocator, json_buf: []const u8) LoadError!Produ
     // top-level strings (duplicated to allocator)
     const product_id = try dupString(allocator, getString(obj, "product_id") orelse return error.InvalidJson);
     errdefer allocator.free(product_id);
+    if (product_id.len == 0) return error.InvalidJson;
 
     const product_type_str = getString(obj, "product_type") orelse return error.InvalidJson;
     const product_type = ProductType.fromString(product_type_str) catch return error.UnknownProductType;
 
     const version = try dupString(allocator, getString(obj, "version") orelse return error.InvalidJson);
     errdefer allocator.free(version);
+    if (version.len == 0) return error.InvalidJson;
 
-    const update_epoch = @as(u64, @intCast(getInt(obj, "update_epoch") orelse return error.InvalidJson));
+    const update_epoch_raw = getInt(obj, "update_epoch") orelse return error.InvalidJson;
+    if (update_epoch_raw <= 0) return error.InvalidJson;
+    const update_epoch = @as(u64, @intCast(update_epoch_raw));
     const last_updated = @as(i64, @intCast(getInt(obj, "last_updated") orelse return error.InvalidJson));
 
     const approved_by = try dupString(allocator, getString(obj, "approved_by") orelse return error.InvalidJson);
     errdefer allocator.free(approved_by);
+    if (approved_by.len == 0) return error.InvalidJson;
 
     // manifesto + sacrosanct
     const manifesto = try dupString(allocator, getString(obj, "manifesto") orelse return error.InvalidJson);
@@ -383,11 +388,15 @@ pub fn parse(allocator: std.mem.Allocator, json_buf: []const u8) LoadError!Produ
 
     const sacrosanct_arr = getArray(obj, "sacrosanct") orelse return error.InvalidJson;
     var sacrosanct = try allocator.alloc([]const u8, sacrosanct_arr.items.len);
-    errdefer allocator.free(sacrosanct);
+    var sacrosanct_filled: usize = 0;
+    errdefer {
+        for (sacrosanct[0..sacrosanct_filled]) |s| allocator.free(s);
+        allocator.free(sacrosanct);
+    }
     for (sacrosanct_arr.items, 0..) |item, i| {
         if (item != .string) return error.InvalidJson;
         sacrosanct[i] = try dupString(allocator, item.string);
-        errdefer for (sacrosanct[0..i]) |s| allocator.free(s);
+        sacrosanct_filled = i + 1;
     }
 
     // KPI
@@ -395,8 +404,9 @@ pub fn parse(allocator: std.mem.Allocator, json_buf: []const u8) LoadError!Produ
     errdefer allocator.free(north_star_kpi);
 
     var secondary_kpis: []const []const u8 = &[_][]const u8{};
+    var secondary_filled: usize = 0;
     errdefer {
-        for (secondary_kpis) |s| allocator.free(s);
+        for (secondary_kpis[0..secondary_filled]) |s| allocator.free(s);
         allocator.free(secondary_kpis);
     }
     if (getArray(obj, "secondary_kpis")) |arr| {
@@ -410,6 +420,7 @@ pub fn parse(allocator: std.mem.Allocator, json_buf: []const u8) LoadError!Produ
             // assign back to secondary_kpis on the next iteration.
             const slot: *[]const u8 = &allocated[i];
             slot.* = try dupString(allocator, item.string);
+            secondary_filled = i + 1;
         }
     }
 
@@ -585,6 +596,11 @@ fn parseChannelRouting(allocator: std.mem.Allocator, obj: std.json.ObjectMap) Lo
         if (arr.items.len == 0) return error.MissingChannel;
         const slice = try allocator.alloc([]const u8, arr.items.len);
         var filled: usize = 0;
+        var committed = false;
+        errdefer if (!committed) {
+            for (slice[0..filled]) |s| allocator.free(s);
+            allocator.free(slice);
+        };
         for (arr.items, 0..) |item, i| {
             if (item != .string) return error.InvalidJson;
             const slot: *[]const u8 = @constCast(&slice[i]);
@@ -594,6 +610,7 @@ fn parseChannelRouting(allocator: std.mem.Allocator, obj: std.json.ObjectMap) Lo
         @field(result, key) = slice;
         completed[completed_count] = .{ .slice = slice, .filled = filled };
         completed_count += 1;
+        committed = true;
     }
     return result;
 }
