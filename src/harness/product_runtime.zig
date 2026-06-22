@@ -383,8 +383,24 @@ pub const ProductEvolutionRuntime = struct {
     /// 从 state.json 的 `"product_runtime"` 块恢复。旧状态无该块时返回 false。
     pub fn loadFromJson(self: *ProductEvolutionRuntime, json: []const u8) !bool {
         const obj = state_json.extractObjectBlock(json, "product_runtime") orelse return false;
-        self.clearAll();
+        var loaded = ProductEvolutionRuntime.init(self.alloc, self.product);
+        loaded.adapter = self.adapter;
+        errdefer loaded.deinit();
+        try loaded.loadObjectBlock(obj);
+        loaded.recomputeNextIds();
+        if (!try loaded.verifyAuditChain()) return error.AuditHashMismatch;
 
+        self.deinitAllStorage();
+        self.next_change_id = loaded.next_change_id;
+        self.next_audit_id = loaded.next_audit_id;
+        self.changes = loaded.changes;
+        self.audit = loaded.audit;
+        loaded.changes = .empty;
+        loaded.audit = .empty;
+        return true;
+    }
+
+    fn loadObjectBlock(self: *ProductEvolutionRuntime, obj: []const u8) !void {
         if (state_json.extractJsonNumber(obj, "next_change_id")) |n| {
             self.next_change_id = std.fmt.parseInt(u64, n, 10) catch 1;
         }
@@ -393,8 +409,8 @@ pub const ProductEvolutionRuntime = struct {
         }
 
         if (std.mem.indexOf(u8, obj, "\"changes\"")) |changes_pos| {
-            const arr_start = std.mem.indexOfPos(u8, obj, changes_pos, "[") orelse return true;
-            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr_start = std.mem.indexOfPos(u8, obj, changes_pos, "[") orelse return;
+            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return;
             const arr = obj[arr_start + 1 .. arr_end];
             var i: usize = 0;
             while (i < arr.len) {
@@ -406,8 +422,8 @@ pub const ProductEvolutionRuntime = struct {
         }
 
         if (std.mem.indexOf(u8, obj, "\"audit\"")) |audit_pos| {
-            const arr_start = std.mem.indexOfPos(u8, obj, audit_pos, "[") orelse return true;
-            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return true;
+            const arr_start = std.mem.indexOfPos(u8, obj, audit_pos, "[") orelse return;
+            const arr_end = state_json.findMatchingBracket(obj, arr_start) orelse return;
             const arr = obj[arr_start + 1 .. arr_end];
             var i: usize = 0;
             while (i < arr.len) {
@@ -417,13 +433,6 @@ pub const ProductEvolutionRuntime = struct {
                 i = oe + 1;
             }
         }
-
-        self.recomputeNextIds();
-        if (!try self.verifyAuditChain()) {
-            self.clearAll();
-            return error.AuditHashMismatch;
-        }
-        return true;
     }
 
     fn appendAuditArrayJson(self: *const ProductEvolutionRuntime, alloc: Allocator, out: *std.ArrayList(u8)) !void {
@@ -514,6 +523,17 @@ pub const ProductEvolutionRuntime = struct {
         self.changes.clearRetainingCapacity();
         for (self.audit.items) |*a| a.deinit(self.alloc);
         self.audit.clearRetainingCapacity();
+        self.next_change_id = 1;
+        self.next_audit_id = 1;
+    }
+
+    fn deinitAllStorage(self: *ProductEvolutionRuntime) void {
+        for (self.changes.items) |*c| c.deinit(self.alloc);
+        self.changes.deinit(self.alloc);
+        self.changes = .empty;
+        for (self.audit.items) |*a| a.deinit(self.alloc);
+        self.audit.deinit(self.alloc);
+        self.audit = .empty;
         self.next_change_id = 1;
         self.next_audit_id = 1;
     }
@@ -899,4 +919,152 @@ test "ProductEvolutionRuntime: toJson/loadFromJson changes and audit roundtrip" 
     try testing.expectEqualStrings("charlie", restored.findChange(id).?.tenant_id);
     try testing.expect(restored.next_change_id > id);
     try testing.expect(restored.next_audit_id > 2);
+}
+
+test "ProductEvolutionRuntime: successful load replaces existing state" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+
+    var source = ProductEvolutionRuntime.init(alloc, &intent);
+    defer source.deinit();
+    const source_id = try source.proposeCrmFollowupTightening("new-state", 42, 0.04, 100);
+    try source.approve(source_id, "ops", "new approved", 200);
+
+    const json = try source.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"product_runtime\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+
+    var existing = ProductEvolutionRuntime.init(alloc, &intent);
+    defer existing.deinit();
+    const old_id = try existing.proposeCrmFollowupTightening("old-state", 12, 0.01, 10);
+    try existing.approve(old_id, "ops", "old approved", 20);
+
+    try testing.expect(try existing.loadFromJson(wrapped));
+    try testing.expectEqual(@as(usize, 1), existing.changes.items.len);
+    try testing.expectEqual(@as(usize, 2), existing.audit.items.len);
+    try testing.expectEqualStrings("new-state", existing.changes.items[0].tenant_id);
+    try testing.expectEqualStrings("new-state", existing.findChange(source_id).?.tenant_id);
+    try testing.expect(try existing.verifyAuditChain());
+}
+
+test "ProductEvolutionRuntime: adapter apply verify rollback is driven by runtime" {
+    const FakeAdapter = struct {
+        applied: bool = false,
+        verified: bool = false,
+        rolled_back: bool = false,
+
+        fn asAdapter(self: *@This()) ProductAdapter {
+            return .{
+                .ctx = @ptrCast(self),
+                .validateFn = validate,
+                .applyFn = apply,
+                .verifyFn = verify,
+                .rollbackFn = rollback,
+            };
+        }
+
+        fn validate(_: *anyopaque, change: *const ChangeProposal) !void {
+            if (change.status != .approved) return error.ChangeNotApproved;
+        }
+
+        fn apply(ctx: *anyopaque, _: *const ChangeProposal) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.applied = true;
+        }
+
+        fn verify(ctx: *anyopaque, _: *const ChangeProposal) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.applied) return error.AdapterVerifyFailed;
+            self.verified = true;
+        }
+
+        fn rollback(ctx: *anyopaque, _: *const ChangeProposal) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.rolled_back = true;
+        }
+    };
+
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+    var rt = ProductEvolutionRuntime.init(alloc, &intent);
+    defer rt.deinit();
+    var adapter = FakeAdapter{};
+    rt.setAdapter(adapter.asAdapter());
+
+    const id = try rt.proposeCrmFollowupTightening("adapter-tenant", 30, 0.04, 100);
+    try rt.approve(id, "ops", "adapter test", 110);
+    try rt.applyApproved(id, 120);
+    try testing.expect(adapter.applied);
+    try testing.expect(adapter.verified);
+    try testing.expectEqual(ChangeStatus.applied, rt.findChange(id).?.status);
+
+    try rt.rollbackApplied(id, 130);
+    try testing.expect(adapter.rolled_back);
+    try testing.expectEqual(ChangeStatus.rolled_back, rt.findChange(id).?.status);
+    try testing.expect(try rt.verifyAuditChain());
+}
+
+test "ProductEvolutionRuntime: load rejects tampered audit hash from empty state" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+    var rt = ProductEvolutionRuntime.init(alloc, &intent);
+    defer rt.deinit();
+
+    const id = try rt.proposeCrmFollowupTightening("tamper", 45, 0.04, 100);
+    try rt.approve(id, "ops", "hash chain", 200);
+
+    const json = try rt.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"product_runtime\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+    const tampered = try alloc.dupe(u8, wrapped);
+    defer alloc.free(tampered);
+
+    const marker = "\"current_hash\":\"";
+    const pos = std.mem.indexOf(u8, tampered, marker) orelse return error.SkipZigTest;
+    const hash_pos = pos + marker.len;
+    tampered[hash_pos] = if (tampered[hash_pos] == '0') '1' else '0';
+
+    var restored = ProductEvolutionRuntime.init(alloc, &intent);
+    defer restored.deinit();
+    try testing.expectError(error.AuditHashMismatch, restored.loadFromJson(tampered));
+    try testing.expectEqual(@as(usize, 0), restored.changes.items.len);
+    try testing.expectEqual(@as(usize, 0), restored.audit.items.len);
+}
+
+test "ProductEvolutionRuntime: tampered load does not destroy existing state" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+
+    var source = ProductEvolutionRuntime.init(alloc, &intent);
+    defer source.deinit();
+    const source_id = try source.proposeCrmFollowupTightening("source", 45, 0.04, 100);
+    try source.approve(source_id, "ops", "source state", 200);
+
+    const json = try source.toJson(alloc);
+    defer alloc.free(json);
+    const wrapped = try std.fmt.allocPrint(alloc, "{{\"product_runtime\":{s}}}", .{json});
+    defer alloc.free(wrapped);
+    const tampered = try alloc.dupe(u8, wrapped);
+    defer alloc.free(tampered);
+    const marker = "\"current_hash\":\"";
+    const pos = std.mem.indexOf(u8, tampered, marker) orelse return error.SkipZigTest;
+    const hash_pos = pos + marker.len;
+    tampered[hash_pos] = if (tampered[hash_pos] == '0') '1' else '0';
+
+    var existing = ProductEvolutionRuntime.init(alloc, &intent);
+    defer existing.deinit();
+    const existing_id = try existing.proposeCrmFollowupTightening("existing", 30, 0.02, 300);
+    try existing.approve(existing_id, "ops", "keep this", 400);
+
+    try testing.expectError(error.AuditHashMismatch, existing.loadFromJson(tampered));
+    try testing.expectEqual(@as(usize, 1), existing.changes.items.len);
+    try testing.expectEqual(@as(usize, 2), existing.audit.items.len);
+    try testing.expectEqualStrings("existing", existing.findChange(existing_id).?.tenant_id);
+    try testing.expect(try existing.verifyAuditChain());
 }

@@ -24,6 +24,10 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 0
 fi
 
+curl_status() {
+  curl -sS -o /tmp/ghw-product-curl-body.json -w '%{http_code}' "$@"
+}
+
 echo "[acceptance] start ui_server on :$PORT"
 GHW_ADMIN_TOKEN="$TOKEN" ./zig-out/bin/ui_server \
   --host 127.0.0.1 \
@@ -46,6 +50,14 @@ done
 grep -q '"enabled":true' /tmp/ghw-product-intent.json
 grep -q '"manifest_hash":"' /tmp/ghw-product-intent.json
 
+echo "[acceptance] auth rejects protected writes without token"
+NO_TOKEN_STATUS="$(
+  curl_status -X POST "http://127.0.0.1:$PORT/api/product/propose-crm-followup" \
+    -d 'tenant_id=blocked&affected_users=1&expected_delta_k=0.01'
+)"
+test "$NO_TOKEN_STATUS" = "401"
+grep -q '"admin token required"' /tmp/ghw-product-curl-body.json
+
 echo "[acceptance] propose -> approve -> apply -> rollback"
 PROPOSED="$(
   curl -fsS -X POST "http://127.0.0.1:$PORT/api/product/propose-crm-followup" \
@@ -54,6 +66,10 @@ PROPOSED="$(
 )"
 CHANGE_ID="$(printf '%s' "$PROPOSED" | sed -n 's/.*"change_id":\([0-9][0-9]*\).*/\1/p')"
 test -n "$CHANGE_ID"
+
+curl -fsS "http://127.0.0.1:$PORT/api/product/approvals" >/tmp/ghw-product-approvals.json
+grep -q "\"id\":$CHANGE_ID" /tmp/ghw-product-approvals.json
+grep -q '"required_approvers":"' /tmp/ghw-product-approvals.json
 
 curl -fsS -X POST "http://127.0.0.1:$PORT/api/product/approve" \
   -H "X-GHW-Admin-Token: $TOKEN" \
@@ -72,8 +88,17 @@ curl -fsS -X POST "http://127.0.0.1:$PORT/api/product/rollback" \
 
 grep -q '"status":"rolled_back"' "$CONFIG"
 
+curl -fsS -X POST "http://127.0.0.1:$PORT/api/product/kpi" \
+  -H "X-GHW-Admin-Token: $TOKEN" \
+  -d 'nrr_quarterly=0.88&deal_win_rate=0.24&sales_cycle_days_p50=48&weekly_active_sales_pct=0.71&csat=0.92&incident_rate=0.01' \
+  >/tmp/ghw-product-kpi.json
+grep -q '"ok":true' /tmp/ghw-product-kpi.json
+grep -q '"refreshed":true' /tmp/ghw-product-kpi.json
+grep -q '"kpi_last_feed_unix":' /tmp/ghw-product-kpi.json
+
 curl -fsS "http://127.0.0.1:$PORT/api/product/audit" >/tmp/ghw-product-audit.json
 grep -q '"previous_hash":"' /tmp/ghw-product-audit.json
 grep -q '"current_hash":"' /tmp/ghw-product-audit.json
+grep -q '"kind":"kpi_refreshed"' /tmp/ghw-product-audit.json
 
 echo "[acceptance] passed"

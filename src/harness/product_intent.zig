@@ -853,3 +853,49 @@ test "parse: rejects missing channel" {
     const res = parse(allocator, bad_json);
     try std.testing.expectError(error.MissingChannel, res);
 }
+
+test "parse: rejects empty identity fields" {
+    const allocator = std.testing.allocator;
+    const bad_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "product_id": "", "product_type": "saas_web", "version": "0.1",
+        \\  "update_epoch": 1, "last_updated": 0, "approved_by": "ops",
+        \\  "manifesto": "x", "sacrosanct": ["do no harm"],
+        \\  "north_star_kpi": "x", "kpi_aggregator": "mean",
+        \\  "kpi_evaluation_window": "daily",
+        \\  "value_weights": {"user_satisfaction":0.25,"retention":0.25,"revenue":0.25,"safety":0.25},
+        \\  "consent_defaults": {},
+        \\  "channel_routing": {
+        \\    "e_saturated":["a"],"user_quiet_24h":["a"],"l5_about_to_apply":["a"],
+        \\    "anomaly":["a"],"experiment_done":["a"]
+        \\  },
+        \\  "rhythm": {"cycle_interval_seconds":300,"kpi_refresh_interval_hours":24}
+        \\}
+    ;
+    const res = parse(allocator, bad_json);
+    try std.testing.expectError(error.InvalidJson, res);
+}
+
+test "parse: rejects non-positive update_epoch" {
+    const allocator = std.testing.allocator;
+    const bad_json =
+        \\{
+        \\  "schema_version": 1,
+        \\  "product_id": "x", "product_type": "saas_web", "version": "0.1",
+        \\  "update_epoch": -1, "last_updated": 0, "approved_by": "ops",
+        \\  "manifesto": "x", "sacrosanct": ["do no harm"],
+        \\  "north_star_kpi": "x", "kpi_aggregator": "mean",
+        \\  "kpi_evaluation_window": "daily",
+        \\  "value_weights": {"user_satisfaction":0.25,"retention":0.25,"revenue":0.25,"safety":0.25},
+        \\  "consent_defaults": {},
+        \\  "channel_routing": {
+        \\    "e_saturated":["a"],"user_quiet_24h":["a"],"l5_about_to_apply":["a"],
+        \\    "anomaly":["a"],"experiment_done":["a"]
+        \\  },
+        \\  "rhythm": {"cycle_interval_seconds":300,"kpi_refresh_interval_hours":24}
+        \\}
+    ;
+    const res = parse(allocator, bad_json);
+    try std.testing.expectError(error.InvalidJson, res);
+}
