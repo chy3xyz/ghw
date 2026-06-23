@@ -50,6 +50,8 @@ pub fn build(b: *std.Build) void {
         "src/harness/loop_engine.zig",
         "src/harness/ghw_link.zig",
         "src/harness/config_loader.zig",
+        "src/harness/product_instance.zig",
+        "src/harness/co_evolution.zig",
         "src/util/math.zig",
         "src/sandbox/sqlite_db.zig",
     };

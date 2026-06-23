@@ -275,6 +275,12 @@ const App = struct {
     product_config_adapter: ?ghw_harness.FileConfigAdapter = null,
     product_intent_hash: []const u8 = "",
     product_kpi_last_feed_unix: i64 = 0,
+    /// P28: 跨 GHW 共同进化洞察缓存
+    co_evolution: ?ghw_harness.CoEvolutionRegistry = null,
+    /// P27: Cross-host Link (TCP + HMAC)
+    cross_link: ?ghw_harness.ghw_link_tcp.CrossLink = null,
+    cross_link_thread: ?std.Thread = null,
+    cross_link_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     admin_token: []const u8 = "",
     reflection: ?Reflection,
     /// Reflect 互斥锁: 后台 thread 跑 reflect 时, 主 thread 访问 memory 用这锁保护
@@ -909,6 +915,33 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
 }
 
 // ===== GHW Link: handler 让 peer 调本机时能拿到状态 =====
+fn extractJsonStringField(json: []const u8, key: []const u8) ?[]const u8 {
+    var buf: [96]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, "\"{s}\":\"", .{key}) catch return null;
+    const pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    var i = pos + needle.len;
+    while (i < json.len) : (i += 1) {
+        if (json[i] == '\\' and i + 1 < json.len) {
+            i += 1;
+            continue;
+        }
+        if (json[i] == '"') return json[pos + needle.len .. i];
+    }
+    return null;
+}
+
+fn extractJsonFloatField(json: []const u8, key: []const u8) ?f32 {
+    var buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buf, "\"{s}\":", .{key}) catch return null;
+    const pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    var i = pos + needle.len;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
+    const start = i;
+    while (i < json.len and ((json[i] >= '0' and json[i] <= '9') or json[i] == '.' or json[i] == '-' or json[i] == 'e' or json[i] == '+')) : (i += 1) {}
+    if (i == start) return null;
+    return std.fmt.parseFloat(f32, json[start..i]) catch null;
+}
+
 fn linkHandler(method: []const u8, params: []const u8, ctx: *anyopaque, alloc: Allocator) anyerror!ghw.harness.ghw_link.Response {
     const app: *App = @ptrCast(@alignCast(ctx));
 
@@ -1000,6 +1033,63 @@ fn linkHandler(method: []const u8, params: []const u8, ctx: *anyopaque, alloc: A
         return .{ .ok = false, .payload = try alloc.dupe(u8, "\"sqlite not enabled\"") };
     }
 
+    if (std.mem.eql(u8, method, "query_product_identity")) {
+        if (app.product_runtime) |*rt| {
+            var body: std.ArrayList(u8) = .empty;
+            errdefer body.deinit(alloc);
+            try body.appendSlice(alloc, "{\"enabled\":true,");
+            if (rt.instance) |*id| {
+                try id.appendJsonFields(&body);
+            } else if (app.product_intent) |*intent| {
+                try body.print(alloc, "\"binding_mode\":\"one_product_one_ghw\",\"product_id\":\"", .{});
+                try appendJsonString(alloc, &body, intent.product_id);
+                try body.appendSlice(alloc, "\",\"product_type\":\"");
+                try body.appendSlice(alloc, @tagName(intent.product_type));
+                try body.appendSlice(alloc, "\",\"instance_id\":null,\"node_id\":null");
+            }
+            try body.appendSlice(alloc, "}");
+            return .{ .ok = true, .payload = try body.toOwnedSlice(alloc) };
+        }
+        return .{ .ok = true, .payload = try alloc.dupe(u8, "{\"enabled\":false}") };
+    }
+
+    if (std.mem.eql(u8, method, "query_product_evolution")) {
+        if (app.product_runtime) |*rt| {
+            var body: std.ArrayList(u8) = .empty;
+            errdefer body.deinit(alloc);
+            try rt.appendEvolutionSnapshotJson(alloc, &body, 8);
+            return .{ .ok = true, .payload = try body.toOwnedSlice(alloc) };
+        }
+        return .{ .ok = true, .payload = try alloc.dupe(u8, "{\"changes\":[]}") };
+    }
+
+    if (std.mem.eql(u8, method, "share_evolution_insight")) {
+        if (app.co_evolution) |*reg| {
+            const peer_id = extractJsonStringField(params, "peer_id") orelse app.agent.self_id;
+            const product_id = extractJsonStringField(params, "product_id") orelse "";
+            const product_type = extractJsonStringField(params, "product_type") orelse "";
+            const target = extractJsonStringField(params, "target") orelse "";
+            const summary = extractJsonStringField(params, "summary") orelse "";
+            if (product_id.len == 0 or target.len == 0 or summary.len == 0) {
+                return .{ .ok = false, .payload = try alloc.dupe(u8, "\"missing fields\"") };
+            }
+            const delta = extractJsonFloatField(params, "expected_delta_k") orelse 0;
+            const accepted = reg.recordInsight(
+                peer_id,
+                product_id,
+                product_type,
+                target,
+                summary,
+                delta,
+                @intCast(@max(app.agent.tick, 0)),
+            ) catch false;
+            return .{ .ok = true, .payload = try std.fmt.allocPrint(alloc, "{{\"accepted\":{s}}}", .{
+                if (accepted) "true" else "false",
+            }) };
+        }
+        return .{ .ok = false, .payload = try alloc.dupe(u8, "\"co_evolution disabled\"") };
+    }
+
     return .{ .ok = false, .payload = try alloc.dupe(u8, "\"unknown method\"") };
 }
 
@@ -1035,6 +1125,16 @@ const Args = struct {
     product_config_path: []const u8 = "",
     /// Env var containing admin token for mutating APIs. Empty disables auth.
     admin_token_env: []const u8 = "GHW_ADMIN_TOKEN",
+    /// P26: 显式 GHW 实例 ID (默认 {product_id}@{node_id})
+    ghw_instance_id: []const u8 = "",
+    /// P26: GHW 节点 ID (默认 --agent-id)
+    ghw_node_id: []const u8 = "",
+    /// P27: Cross-host Link 监听端口; 0 = 禁用
+    cross_link_port: u16 = 0,
+    /// P27: Cross-host shared secret
+    cross_link_secret: []const u8 = "",
+    /// P27: Cross-host peers.txt (peer_id:host:port:secret)
+    cross_link_peers_file: []const u8 = "",
 };
 
 fn parseArgs(raw: []const []const u8) Args {
@@ -1087,6 +1187,21 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--admin-token-env")) {
             i += 1;
             if (i < raw.len) a.admin_token_env = raw[i];
+        } else if (std.mem.eql(u8, arg, "--ghw-instance-id")) {
+            i += 1;
+            if (i < raw.len) a.ghw_instance_id = raw[i];
+        } else if (std.mem.eql(u8, arg, "--ghw-node-id")) {
+            i += 1;
+            if (i < raw.len) a.ghw_node_id = raw[i];
+        } else if (std.mem.eql(u8, arg, "--cross-link-port")) {
+            i += 1;
+            if (i < raw.len) a.cross_link_port = std.fmt.parseInt(u16, raw[i], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "--cross-link-secret")) {
+            i += 1;
+            if (i < raw.len) a.cross_link_secret = raw[i];
+        } else if (std.mem.eql(u8, arg, "--cross-link-peers")) {
+            i += 1;
+            if (i < raw.len) a.cross_link_peers_file = raw[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -1685,6 +1800,8 @@ fn saveState(app: *App) !void {
     defer app.alloc.free(vt_json);
     const product_json = if (app.product_runtime) |*rt| try rt.toJson(app.alloc) else null;
     defer if (product_json) |p| app.alloc.free(p);
+    const co_evo_json = if (app.co_evolution) |*reg| try reg.toJson(app.alloc) else null;
+    defer if (co_evo_json) |p| app.alloc.free(p);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(app.alloc);
     try buf.appendSlice(app.alloc, json_a);
@@ -1700,6 +1817,10 @@ fn saveState(app: *App) !void {
     try buf.appendSlice(app.alloc, vt_json);
     if (product_json) |p| {
         try buf.appendSlice(app.alloc, ",\"product_runtime\":");
+        try buf.appendSlice(app.alloc, p);
+    }
+    if (co_evo_json) |p| {
+        try buf.appendSlice(app.alloc, ",\"co_evolution\":");
         try buf.appendSlice(app.alloc, p);
     }
     try buf.append(app.alloc, '}');
@@ -1771,6 +1892,9 @@ fn jsonEscape(alloc: Allocator, s: []const u8) ![]u8 {
 /// 之前放 defer block 里, 但 runServer 返 error 时 defer join link_thread 会卡死
 /// (link thread 在 accept 阻塞, 没看到 stop flag). 改成 manual call 配 errdefer
 fn stopLinkServer(app: *App, alloc: Allocator, io: std.Io) void {
+    app.cross_link_stop.store(true, .release);
+    if (app.cross_link_thread) |t| t.join();
+    if (app.cross_link) |*cl| cl.deinit();
     app.link_stop.store(true, .release);
     if (app.link_thread) |t| t.join();
     // Phase 1 production: 停 peer health thread
@@ -1786,6 +1910,29 @@ fn stopLinkServer(app: *App, alloc: Allocator, io: std.Io) void {
         alloc.free(p.peer_id);
     }
     app.peers.deinit(alloc);
+}
+
+/// 从 peer 的 query_product_evolution 响应中提取变更并写入 CoEvolutionRegistry。
+fn ingestPeerEvolutionResponse(app: *App, peer_id: []const u8, response: []const u8) void {
+    const intent = app.product_intent orelse return;
+    if (app.co_evolution) |*reg| {
+        var search_from: usize = 0;
+        while (std.mem.indexOfPos(u8, response, search_from, "\"target\":\"")) |tpos| {
+            const target = extractJsonStringField(response[tpos..], "target") orelse break;
+            const summary = extractJsonStringField(response[tpos..], "summary") orelse target;
+            const delta = extractJsonFloatField(response[tpos..], "expected_delta_k") orelse 0;
+            _ = reg.recordInsight(
+                peer_id,
+                intent.product_id,
+                @tagName(intent.product_type),
+                target,
+                summary,
+                delta,
+                @intCast(@max(app.agent.tick, 0)),
+            ) catch {};
+            search_from = tpos + 8;
+        }
+    }
 }
 
 /// Phase 1 production: 从 peers_file 加载 peer 列表
@@ -1945,6 +2092,20 @@ fn peerHealthLoop(app: *App) void {
                     p.last_tick = v;
                     p.last_seen_tick = v;
                 }
+
+                if (app.co_evolution != null) {
+                    const evo_resp = l.query(p.path, "query_product_evolution", "{}") catch continue;
+                    defer app.alloc.free(evo_resp);
+                    ingestPeerEvolutionResponse(app, p.peer_id, evo_resp);
+                }
+            }
+        }
+
+        if (app.cross_link) |*cl| {
+            for (cl.peers.items) |*peer| {
+                const evo_resp = cl.query(peer.peer_id, "query_product_evolution", "{}") catch continue;
+                defer app.alloc.free(evo_resp);
+                ingestPeerEvolutionResponse(app, peer.peer_id, evo_resp);
             }
         }
     }
@@ -4065,6 +4226,47 @@ fn handleGetProductApprovals(alloc: Allocator, conn: *std.Io.net.Stream, io: std
     try writeResponse(conn, io, resp);
 }
 
+/// GET /api/product/identity — 一产品一 GHW 实例契约 (P26)
+fn handleGetProductIdentity(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    if (app.product_runtime) |*rt| {
+        try body.appendSlice(alloc, "{\"enabled\":true,");
+        if (rt.instance) |*id| {
+            try id.appendJsonFields(&body);
+        } else if (app.product_intent) |*intent| {
+            try body.print(alloc, "\"binding_mode\":\"one_product_one_ghw\",\"product_id\":\"", .{});
+            try appendJsonString(alloc, &body, intent.product_id);
+            try body.appendSlice(alloc, "\",\"product_type\":\"");
+            try body.appendSlice(alloc, @tagName(intent.product_type));
+            try body.appendSlice(alloc, "\",\"instance_id\":null,\"node_id\":null");
+        }
+        try body.appendSlice(alloc, ",\"cross_link_enabled\":");
+        try body.appendSlice(alloc, if (app.cross_link != null) "true" else "false");
+        try body.appendSlice(alloc, "}");
+    } else {
+        try body.appendSlice(alloc, "{\"enabled\":false,\"binding_mode\":\"one_product_one_ghw\"}");
+    }
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// GET /api/product/co-evolution — 来自 peer 的共同进化洞察 (P28)
+fn handleGetProductCoEvolution(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    const body = if (app.co_evolution) |*reg| try reg.toJson(alloc) else try alloc.dupe(u8, "{\"local_product_id\":\"\",\"insights\":[]}");
+    defer alloc.free(body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+fn crossLinkServerTask(cl: *ghw_harness.ghw_link_tcp.CrossLink, ctx: *anyopaque, stop: *std.atomic.Value(bool)) void {
+    cl.runServer(linkHandler, ctx, stop) catch |err| {
+        std.debug.print("[ui] cross-link listener 异常: {t}\n", .{err});
+    };
+}
+
 /// POST /api/product/propose-crm-followup — 提交 canonical CRM 产品变更 (P18)
 fn handlePostProductProposeCrm(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8, admin_token: ?[]const u8) !void {
     if (!try requireAdminToken(alloc, conn, io, app, admin_token)) return;
@@ -4580,6 +4782,10 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetProductIntent(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/product/approvals")) {
                 try handleGetProductApprovals(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/identity")) {
+                try handleGetProductIdentity(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/product/co-evolution")) {
+                try handleGetProductCoEvolution(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/propose")) {
                 try handleGetPropose(alloc, &stream, io, app);
             } else if (std.mem.startsWith(u8, req.path, "/api/memory/search")) {
@@ -4775,6 +4981,35 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 intent.product_id,
                 args.product_intent_path,
             });
+            const node_id = if (args.ghw_node_id.len > 0) args.ghw_node_id else args.agent_id;
+            const identity = if (args.ghw_instance_id.len > 0)
+                ghw_harness.ProductInstanceIdentity.init(alloc, intent, node_id, args.ghw_instance_id) catch |err| blk: {
+                    std.debug.print("[ui] ProductInstance 绑定失败: {t}\n", .{err});
+                    break :blk null;
+                }
+            else
+                ghw_harness.ProductInstanceIdentity.initDefault(alloc, intent, node_id) catch |err| blk: {
+                    std.debug.print("[ui] ProductInstance 绑定失败: {t}\n", .{err});
+                    break :blk null;
+                };
+            if (identity) |id| {
+                app.product_runtime.?.bindInstance(id);
+                app.co_evolution = ghw_harness.CoEvolutionRegistry.init(
+                    alloc,
+                    intent.product_id,
+                    @tagName(intent.product_type),
+                ) catch |err| blk: {
+                    std.debug.print("[ui] CoEvolutionRegistry 初始化失败: {t}\n", .{err});
+                    break :blk null;
+                };
+                if (app.product_runtime.?.instance) |*bound| {
+                    std.debug.print("[ui] 一产品一 GHW: product_id={s} instance_id={s} node_id={s}\n", .{
+                        bound.product_id,
+                        bound.instance_id,
+                        bound.node_id,
+                    });
+                }
+            }
         }
     }
 
@@ -4819,6 +5054,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
         app.peer_health_stop = std.atomic.Value(bool).init(false);
         app.peer_health_thread = try std.Thread.spawn(.{}, peerHealthLoop, .{ &app });
         std.debug.print("[ui] Peer health check thread spawned (interval={d}s)\n", .{args.peer_health_interval_s});
+    }
+
+    if (args.cross_link_port > 0 and args.cross_link_secret.len > 0) {
+        const cross_node_id = if (args.ghw_node_id.len > 0) args.ghw_node_id else args.agent_id;
+        var cl = ghw_harness.ghw_link_tcp.CrossLink.init(alloc, io, cross_node_id, "0.0.0.0", args.cross_link_port, args.cross_link_secret);
+        if (args.cross_link_peers_file.len > 0) {
+            cl.loadPeersFromFile(args.cross_link_peers_file) catch |err| {
+                std.debug.print("[ui] cross-link peers 加载失败: {t}\n", .{err});
+            };
+        }
+        app.cross_link = cl;
+        const ctx_holder: *anyopaque = @ptrCast(&app);
+        app.cross_link_thread = try std.Thread.spawn(.{}, crossLinkServerTask, .{ &app.cross_link.?, ctx_holder, &app.cross_link_stop });
+        std.debug.print("[ui] CrossLink 启用: port={d} peers={d}\n", .{ args.cross_link_port, app.cross_link.?.peers.items.len });
     }
 
     // L1-L5 自演化: 初始化 StaticCodeGenerator + SelfEvolver + SelfEncoder + CompileVerifier
@@ -4955,6 +5204,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer app.personality.deinit();
     defer if (app.product_intent) |*intent| intent.deinit();
     defer if (app.product_runtime) |*rt| rt.deinit();
+    defer if (app.co_evolution) |*reg| reg.deinit();
     defer if (app.product_config_adapter) |*adapter| adapter.deinit();
     defer if (app.product_intent_hash.len > 0) alloc.free(app.product_intent_hash);
     // 停 link server: 不能用 defer (runServer 不返回时 defer 永远不跑; runServer 返 error
@@ -5117,6 +5367,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     });
                 } else |err| {
                     std.debug.print("[ui] product_runtime loadFromJson 失败: {t}\n", .{err});
+                }
+            }
+            if (app.co_evolution) |*reg| {
+                if (reg.loadFromJson(json)) |loaded| {
+                    if (loaded) std.debug.print("[ui] CoEvolution 恢复: insights={d}\n", .{reg.insights.items.len});
+                } else |err| {
+                    std.debug.print("[ui] co_evolution loadFromJson 失败: {t}\n", .{err});
                 }
             }
         } else |_| {}

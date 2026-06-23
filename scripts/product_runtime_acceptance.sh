@@ -101,4 +101,15 @@ grep -q '"previous_hash":"' /tmp/ghw-product-audit.json
 grep -q '"current_hash":"' /tmp/ghw-product-audit.json
 grep -q '"kind":"kpi_refreshed"' /tmp/ghw-product-audit.json
 
+echo "[acceptance] one-product-one-ghw identity"
+curl -fsS "http://127.0.0.1:$PORT/api/product/identity" >/tmp/ghw-product-identity.json
+grep -q '"binding_mode":"one_product_one_ghw"' /tmp/ghw-product-identity.json
+grep -q '"product_id":"ghw-crm-acme-prod"' /tmp/ghw-product-identity.json
+grep -q '"instance_id":"ghw-crm-acme-prod@' /tmp/ghw-product-identity.json
+
+echo "[acceptance] co-evolution registry"
+curl -fsS "http://127.0.0.1:$PORT/api/product/co-evolution" >/tmp/ghw-product-coevo.json
+grep -q '"local_product_id":"ghw-crm-acme-prod"' /tmp/ghw-product-coevo.json
+grep -q '"insights":\[' /tmp/ghw-product-coevo.json
+
 echo "[acceptance] passed"

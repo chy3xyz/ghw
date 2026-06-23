@@ -67,6 +67,30 @@ rollback(change)
 
 `scripts/product_runtime_acceptance.sh` 会运行构建测试、启动 `ui_server --product-intent --product-config`，并走 propose → approve → apply → rollback，验证文件 adapter 与 audit hash 字段。
 
+## P26：一产品一 GHW
+
+状态：已完成实例绑定契约。
+
+- `ProductInstanceIdentity`：`product_id` + `instance_id` + `node_id` + `binding_mode=one_product_one_ghw`
+- `ProductRuntime` 持久化块嵌入 identity 字段；加载时校验 `product_id` 与当前 ProductIntent 一致
+- CLI：`--ghw-instance-id`（默认 `{product_id}@{node_id}`）、`--ghw-node-id`（默认 `--agent-id`）
+- API：`GET /api/product/identity`
+
+## P27：分布式 CrossLink
+
+状态：已完成 ui_server 接线。
+
+- `--cross-link-port` / `--cross-link-secret` / `--cross-link-peers` 启用 TCP+HMAC 跨主机 Link
+- GHW Link 扩展：`query_product_identity`、`query_product_evolution`、`share_evolution_insight`
+
+## P28：GHW 共同进化
+
+状态：已完成最小洞察交换闭环。
+
+- `CoEvolutionRegistry`：接收/缓存 peer 的产品变更洞察（同 product_id 信任 1.0，同 product_type 0.55）
+- peer health 周期同步 `query_product_evolution`
+- API：`GET /api/product/co-evolution`；state.json `"co_evolution"` 块持久化
+
 ## 非目标
 
 短期不做：

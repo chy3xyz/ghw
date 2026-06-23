@@ -385,6 +385,20 @@ P18 仍是"可审计控制面"; P19-P25 把它推进到能被宿主产品安全�
 - **P25 验收脚本**: `scripts/product_runtime_acceptance.sh` 构建测试 + 启动 product mode
   + 走 propose→approve→apply→rollback, 验证文件 adapter 与 audit hash 字段。
 
+### 一产品一 GHW + 分布式共同进化 (2026-06, P26-P28)
+
+P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探索多 GHW 互联:
+
+- **P26 一产品一 GHW**: `ProductInstanceIdentity` 绑定 `product_id` + `instance_id` + `node_id`;
+  `ProductRuntime.toJson/loadFromJson` 嵌入/校验 `product_id`, 快照 product_id 不匹配则拒绝加载;
+  `ui_server --ghw-instance-id` / `--ghw-node-id`; `GET /api/product/identity`。
+- **P27 分布式 Link**: `ui_server --cross-link-port` + `--cross-link-secret` + `--cross-link-peers`
+  启用 TCP+HMAC CrossLink (复用 daemon 同款); GHW Link 新增 `query_product_identity` /
+  `query_product_evolution` / `share_evolution_insight`。
+- **P28 共同进化**: `CoEvolutionRegistry` 缓存 peer 已验证变更洞察 (同 product_id 优先);
+  peer health 周期拉取 `query_product_evolution`; `GET /api/product/co-evolution`;
+  state.json 持久化 `co_evolution` 块。
+
 ---
 
 ## 4. 部署准则

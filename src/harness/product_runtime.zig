@@ -10,6 +10,7 @@ const consent = @import("consent.zig");
 const crm_kpi = @import("crm_kpi.zig");
 const kpi_bridge = @import("kpi_bridge.zig");
 const state_json = @import("human_symbiosis/state_json.zig");
+const product_instance = @import("product_instance.zig");
 const world = @import("../world/core.zig");
 
 const Allocator = std.mem.Allocator;
@@ -26,6 +27,7 @@ pub const ProductRuntimeError = error{
     AlreadyApplied,
     NotApplied,
     AuditHashMismatch,
+    ProductIdMismatch,
     OutOfMemory,
 };
 
@@ -128,11 +130,15 @@ pub const ProductAdapter = struct {
     }
 };
 
+pub const ProductInstanceIdentity = product_instance.ProductInstanceIdentity;
+
 pub const ProductEvolutionRuntime = struct {
     alloc: Allocator,
     product: *const ProductIntent,
     bridge: KpiBridge,
     adapter: ?ProductAdapter = null,
+    /// 一产品一 GHW 实例身份 (product mode 启用后绑定)。
+    instance: ?ProductInstanceIdentity = null,
     next_change_id: u64 = 1,
     next_audit_id: u64 = 1,
     changes: std.ArrayList(ChangeProposal) = .empty,
@@ -146,15 +152,42 @@ pub const ProductEvolutionRuntime = struct {
         };
     }
 
+    pub fn bindInstance(self: *ProductEvolutionRuntime, identity: ProductInstanceIdentity) void {
+        if (self.instance) |*old| old.deinit();
+        self.instance = identity;
+    }
+
     pub fn setAdapter(self: *ProductEvolutionRuntime, adapter: ProductAdapter) void {
         self.adapter = adapter;
     }
 
     pub fn deinit(self: *ProductEvolutionRuntime) void {
+        if (self.instance) |*id| id.deinit();
         for (self.changes.items) |*c| c.deinit(self.alloc);
         self.changes.deinit(self.alloc);
         for (self.audit.items) |*a| a.deinit(self.alloc);
         self.audit.deinit(self.alloc);
+    }
+
+    /// 最近已应用/已回滚变更, 供 GHW Link `query_product_evolution` 共享。
+    pub fn appendEvolutionSnapshotJson(self: *const ProductEvolutionRuntime, alloc: Allocator, out: *std.ArrayList(u8), limit: usize) !void {
+        try out.appendSlice(alloc, "{\"changes\":[");
+        var count: usize = 0;
+        var first = true;
+        var i = self.changes.items.len;
+        while (i > 0 and count < limit) : (i -= 1) {
+            const c = self.changes.items[i - 1];
+            if (c.status != .applied and c.status != .rolled_back) continue;
+            if (!first) try out.append(alloc, ',');
+            first = false;
+            count += 1;
+            try out.print(alloc, "{{\"id\":{d},\"status\":\"{s}\",\"target\":\"", .{ c.id, @tagName(c.status) });
+            try writeJsonString(alloc, out, c.target);
+            try out.appendSlice(alloc, "\",\"summary\":\"");
+            try writeJsonString(alloc, out, c.summary);
+            try out.print(alloc, "\",\"expected_delta_k\":{d:.6}}}", .{c.expected_delta_k});
+        }
+        try out.appendSlice(alloc, "]}");
     }
 
     /// 产品后端可高频 feed KPI; runtime 按 ProductIntent.rhythm 限频写入 E。
@@ -366,7 +399,18 @@ pub const ProductEvolutionRuntime = struct {
     pub fn toJson(self: *const ProductEvolutionRuntime, alloc: Allocator) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(alloc);
-        try out.print(alloc, "{{\"next_change_id\":{d},\"next_audit_id\":{d},\"changes\":[", .{
+        try out.append(alloc, '{');
+        if (self.instance) |*id| {
+            try id.appendJsonFields(&out);
+            try out.append(alloc, ',');
+        } else {
+            try out.print(alloc, "\"binding_mode\":\"{s}\",\"product_id\":\"", .{product_instance.BindingMode.one_product_one_ghw.tag()});
+            try writeJsonString(alloc, &out, self.product.product_id);
+            try out.appendSlice(alloc, "\",\"product_type\":\"");
+            try out.appendSlice(alloc, @tagName(self.product.product_type));
+            try out.appendSlice(alloc, "\",\"instance_id\":null,\"node_id\":null,");
+        }
+        try out.print(alloc, "\"next_change_id\":{d},\"next_audit_id\":{d},\"changes\":[", .{
             self.next_change_id,
             self.next_audit_id,
         });
@@ -401,6 +445,14 @@ pub const ProductEvolutionRuntime = struct {
     }
 
     fn loadObjectBlock(self: *ProductEvolutionRuntime, obj: []const u8) !void {
+        if (state_json.extractJsonString(self.alloc, obj, "product_id")) |stored_pid| {
+            defer self.alloc.free(stored_pid);
+            if (self.instance) |*id| {
+                try id.verifyStoredProductId(stored_pid);
+            } else if (!std.mem.eql(u8, stored_pid, self.product.product_id)) {
+                return error.ProductIdMismatch;
+            }
+        }
         if (state_json.extractJsonNumber(obj, "next_change_id")) |n| {
             self.next_change_id = std.fmt.parseInt(u64, n, 10) catch 1;
         }
@@ -1067,4 +1119,36 @@ test "ProductEvolutionRuntime: tampered load does not destroy existing state" {
     try testing.expectEqual(@as(usize, 2), existing.audit.items.len);
     try testing.expectEqualStrings("existing", existing.findChange(existing_id).?.tenant_id);
     try testing.expect(try existing.verifyAuditChain());
+}
+
+test "ProductEvolutionRuntime: load rejects mismatched product_id" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+    var rt = ProductEvolutionRuntime.init(alloc, &intent);
+    defer rt.deinit();
+    const identity = try ProductInstanceIdentity.initDefault(alloc, &intent, "node-a");
+    rt.bindInstance(identity);
+
+    const json =
+        \\{"product_runtime":{"binding_mode":"one_product_one_ghw","product_id":"other-product",
+        \\"instance_id":"x","node_id":"y","next_change_id":1,"next_audit_id":1,"changes":[],"audit":[]}}
+    ;
+    try testing.expectError(error.ProductIdMismatch, rt.loadFromJson(json));
+}
+
+test "ProductEvolutionRuntime: evolution snapshot lists applied changes" {
+    const alloc = testing.allocator;
+    var intent = try product_intent.parse(alloc, crm_intent_json);
+    defer intent.deinit();
+    var rt = ProductEvolutionRuntime.init(alloc, &intent);
+    defer rt.deinit();
+    const id = try rt.proposeCrmFollowupTightening("snap", 10, 0.03, 100);
+    try rt.approve(id, "ops", "snap", 110);
+    try rt.applyApproved(id, 120);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try rt.appendEvolutionSnapshotJson(alloc, &out, 8);
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"status\":\"applied\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "crm.followup_cadence_days") != null);
 }
