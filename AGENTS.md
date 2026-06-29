@@ -82,27 +82,27 @@
 | L1 (调参) | ✅ | SelfEncoder.tune_params, ExistenceWeights.adapt |
 | L2 (LLM 提议代码) | ✅ | SelfEvolver + MockLLM/ShellLLM/HttpLLM |
 | L3 (状态序列化) | ✅ | StateSerializer (原子写 tmp+rename) |
-| L4 (双进程迁移) | ✅ | SelfMigration (真 spawn/wait/落盘/回滚) + SelfMigrateCLI |
-| L4' (LLM 提议规则) | ✅ | RuleProposer + SelfEvolutionGuard |
-| L4'' (规则闭环回主循环) | ✅ | GHWAgent.bindRuleLib → selectTopGoal 偏置 + RuleBias provenance |
-| L4''' (连续记忆注入) | ✅ | Memory.buildContext → RuleProposer.setMemory 注入自传体上下文 |
-| L4'''' (全通道记忆 + 语义检索) | ✅ | Reflection/LLMGoalProposer 注入 + token Jaccard 检索 |
-| L4''''' (演化/完善/长跑记忆) | ✅ | SelfEvolver/TemplateEnhancer 注入 + daemon recordAt + char trigram |
-| L4'''''' (任务队列闭环) | ✅ | GHWAgent.bindTaskQueue → TaskBias + provenance |
-| L4''''''' (任务执行+记忆写回) | ✅ | runTask→recordAt + ui_server/daemon 全链路 |
-| L4'''''''' (TaskQueue 持久化) | ✅ | TaskQueue.toJson/loadFromJson → state.json |
-| L4''''''''' (ui 全路径统一) | ✅ | runPostCyclePipeline + provenance API |
-| L4'''''''''' (人类反馈闭环) | ✅ | task_feedback → HumanSignal/GSP + UI 评分 |
-| L4''''''''''' (GSP/Signal 持久化) | ✅ | human_gsp/human_signal → state.json |
-| L4'''''''''''' (人类价值闭环) | ✅ | chat 任务 + value 趋势 → 提议触发 |
-| L4''''''''''''' (价值趋势持久化+UI) | ✅ | value_tracker JSON + status 仪表盘 |
-| L4'''''''''''''' (任务来源+规则提议) | ✅ 新 | Task.Source + RuleProposer ui_server |
-| L4''''''''''''''' (chat记忆+人类投递) | ✅ 新 | chat buildContext + POST /api/tasks |
-| L4'''''''''''''''' (筛选+chat provenance) | ✅ 新 | 任务来源筛选 + chat memory badge |
-| L4''''''''''''''''' (产品数字生命底座) | ✅ 新 | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
-| L4'''''''''''''''''' (产品底座 SDK) | ✅ 新 | ghw_product_* C ABI |
-| L4''''''''''''''''''' (产品运行时持久化/API) | ✅ 新 | product_runtime state + ui_server product API |
-| L4'''''''''''''''''''' (产品可用级主干) | ✅ 新 | ProductAdapter + auth + audit hash + KPI HTTP + acceptance |
+| L4-0 (双进程迁移) | ✅ | SelfMigration (真 spawn/wait/落盘/回滚) + SelfMigrateCLI |
+| L4-1 (LLM 提议规则) | ✅ | RuleProposer + SelfEvolutionGuard |
+| L4-2 (规则闭环回主循环) | ✅ | GHWAgent.bindRuleLib → selectTopGoal 偏置 + RuleBias provenance |
+| L4-3 (连续记忆注入) | ✅ | Memory.buildContext → RuleProposer.setMemory 注入自传体上下文 |
+| L4-4 (全通道记忆 + 语义检索) | ✅ | Reflection/LLMGoalProposer 注入 + token Jaccard 检索 |
+| L4-5 (演化/完善/长跑记忆) | ✅ | SelfEvolver/TemplateEnhancer 注入 + daemon recordAt + char trigram |
+| L4-6 (任务队列闭环) | ✅ | GHWAgent.bindTaskQueue → TaskBias + provenance |
+| L4-7 (任务执行+记忆写回) | ✅ | runTask→recordAt + ui_server/daemon 全链路 |
+| L4-8 (TaskQueue 持久化) | ✅ | TaskQueue.toJson/loadFromJson → state.json |
+| L4-9 (ui 全路径统一) | ✅ | runPostCyclePipeline + provenance API |
+| L4-10 (人类反馈闭环) | ✅ | task_feedback → HumanSignal/GSP + UI 评分 |
+| L4-11 (GSP/Signal 持久化) | ✅ | human_gsp/human_signal → state.json |
+| L4-12 (人类价值闭环) | ✅ | chat 任务 + value 趋势 → 提议触发 |
+| L4-13 (价值趋势持久化+UI) | ✅ | value_tracker JSON + status 仪表盘 |
+| L4-14 (任务来源+规则提议) | ✅ | Task.Source + RuleProposer ui_server |
+| L4-15 (chat记忆+人类投递) | ✅ | chat buildContext + POST /api/tasks |
+| L4-16 (筛选+chat provenance) | ✅ | 任务来源筛选 + chat memory badge |
+| L4-17 (产品数字生命底座) | ✅ | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
+| L4-18 (产品底座 SDK) | ✅ | ghw_product_* C ABI |
+| L4-19 (产品运行时持久化/API) | ✅ | product_runtime state + ui_server product API |
+| L4-20 (产品可用级主干) | ✅ | ProductAdapter + auth + audit hash + KPI HTTP + acceptance |
 | L5 (自我写代码) | ✅ | SelfEncoder (规则合成 + 形式验证) |
 
 ### LLM 闭环 (2026-06, P0)
@@ -459,7 +459,7 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
   `ed.recordKpi(crm_kpi.composite(...))`;SDK 经 `ghw_kpi_configure` +
   `ghw_kpi_feed(..., now_unix)` 暴露给产品后端 (见 `lib.zig` / `ghw.h`)。
 - KPI **趋势**驱动: `ExistenceDegree.kpiTrend()` 经 `RuleProposer.setKpiTrend` /
-  `shouldPropose` 接入 L4' 触发 — KPI 持续下滑即使 E 未跌穿也会主动提议补救。
+  `shouldPropose` 接入 L4-1 触发 — KPI 持续下滑即使 E 未跌穿也会主动提议补救。
 - SDK 返回的字符串统一用 c_allocator 分配, `ghw_free_string` 用 `free(3)` 回收
   (修掉了旧的 no-op 泄漏); 长跑嵌入不再无界增长。
 - SDK 错误可诊断: 各失败路径写入静态描述, C 端经 `ghw_last_error(g)` 区分

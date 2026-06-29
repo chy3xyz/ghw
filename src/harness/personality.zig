@@ -208,3 +208,82 @@ fn writeJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !vo
         }
     }
 }
+
+// ===== Tests =====
+
+test "Personality: init 默认值" {
+    const alloc = std.testing.allocator;
+    var p = Personality.init(alloc);
+    defer p.deinit();
+    try std.testing.expectEqual(Mood.wandering, p.mood);
+    try std.testing.expectEqual(Dimension.balanced, p.bias);
+    try std.testing.expectEqual(Tempo.steady, p.tempo);
+    try std.testing.expectEqual(@as(u8, 0), p.maturity);
+    try std.testing.expectEqual(@as(u8, 0), p.connectedness);
+    try std.testing.expect(p.thinking_tags.items.len == 0);
+    try std.testing.expect(p.self_phrase.len > 0);
+}
+
+test "Personality: recompute thriving + material bias + active tempo" {
+    const alloc = std.testing.allocator;
+    var p = Personality.init(alloc);
+    defer p.deinit();
+
+    p.recompute(0.90, 0.05, 0.70, 0.20, 0.10, 25, 5, 3, 2);
+    try std.testing.expectEqual(Mood.thriving, p.mood);
+    try std.testing.expectEqual(Dimension.material, p.bias);
+    try std.testing.expectEqual(Tempo.active, p.tempo);
+    try std.testing.expect(p.maturity > 50);
+    try std.testing.expect(p.connectedness > 30);
+    var has_pragmatic = false;
+    for (p.thinking_tags.items) |tag| {
+        if (std.mem.eql(u8, tag, "务实型")) has_pragmatic = true;
+    }
+    try std.testing.expect(has_pragmatic);
+}
+
+test "Personality: recompute dormant + balanced + lethargic" {
+    const alloc = std.testing.allocator;
+    var p = Personality.init(alloc);
+    defer p.deinit();
+
+    p.recompute(0.15, -0.02, 0.34, 0.33, 0.33, 0, 0, 0, 0);
+    try std.testing.expectEqual(Mood.dormant, p.mood);
+    try std.testing.expectEqual(Dimension.balanced, p.bias);
+    try std.testing.expectEqual(Tempo.lethargic, p.tempo);
+    try std.testing.expectEqual(@as(u8, 0), p.maturity);
+    try std.testing.expectEqual(@as(u8, 0), p.connectedness);
+    var has_anxiety = false;
+    for (p.thinking_tags.items) |tag| {
+        if (std.mem.eql(u8, tag, "存在焦虑")) has_anxiety = true;
+    }
+    try std.testing.expect(has_anxiety);
+}
+
+test "Personality: toJson 输出结构" {
+    const alloc = std.testing.allocator;
+    var p = Personality.init(alloc);
+    defer p.deinit();
+    p.recompute(0.70, 0.03, 0.50, 0.30, 0.20, 10, 3, 1, 1);
+    const json = try p.toJson(alloc);
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"mood\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bias\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tempo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"maturity\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"connectedness\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"thinking_tags\"") != null);
+}
+
+test "Personality: JSON escaping 特殊字符" {
+    const alloc = std.testing.allocator;
+    var p = Personality.init(alloc);
+    defer p.deinit();
+    alloc.free(p.self_phrase);
+    p.self_phrase = try alloc.dupe(u8, "他说:\"你好\"\n世界");
+    p.recompute(0.50, 0.0, 0.33, 0.33, 0.34, 2, 1, 0, 0);
+    const json = try p.toJson(alloc);
+    defer alloc.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\n") != null);
+}

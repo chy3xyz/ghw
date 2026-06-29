@@ -1034,3 +1034,55 @@ test "GHWAgent: 边界守护者拒绝危险行动" {
     const violated = try agent.boundary.checkCoreBoundary(&bad);
     try std.testing.expect(violated);
 }
+
+test "GHWAgent: 空目标图 selectTopGoal 返回 null" {
+    const alloc = std.testing.allocator;
+    var agent = try GHWAgent.init(alloc, "empty-test", 4, .{ 3, 3, 3 }, 42);
+    defer agent.deinit();
+    // 没有注册任何目标 => selectTopGoal 应返回 null
+    const top = agent.selectTopGoal();
+    try std.testing.expect(top == null);
+}
+
+test "GHWAgent: runCycle 空信息流不崩溃" {
+    const alloc = std.testing.allocator;
+    var agent = try GHWAgent.init(alloc, "empty-cycles", 4, .{ 3, 3, 3 }, 42);
+    defer agent.deinit();
+    // 注册一个方法让 cycle 有行动可做
+    const Ctx = struct {
+        fn handler(ctx: *anyopaque, a: Allocator, act: Action) anyerror!ActionOutcome {
+            _ = ctx;
+            _ = a;
+            return .{ .success = true, .de_delta = 0.05, .representation_gain = 0.02, .material_cost = act.estimated_cost * 0.1, .log = "ok" };
+        }
+    };
+    _ = try agent.methods.register("default", .basic, .{ 1, 0, 0, 0 }, 0, Ctx.handler, null);
+    // 空信息流应正常完成 cycle, 不 panic 不崩溃
+    const report = try agent.runCycle(&.{});
+    try std.testing.expect(report.tick == 1);
+    try std.testing.expect(agent.ed.e() >= 0 and agent.ed.e() <= 1);
+}
+
+test "GHWAgent: 连续 16 个 cycle 不泄漏" {
+    const alloc = std.testing.allocator;
+    var agent = try GHWAgent.init(alloc, "stress-leak", 4, .{ 3, 3, 3 }, 42);
+    defer agent.deinit();
+    const Ctx = struct {
+        fn handler(ctx: *anyopaque, a: Allocator, act: Action) anyerror!ActionOutcome {
+            _ = ctx;
+            _ = a;
+            return .{ .success = true, .de_delta = 0.05, .representation_gain = 0.02, .material_cost = act.estimated_cost * 0.1, .log = "ok" };
+        }
+    };
+    _ = try agent.methods.register("default", .basic, .{ 1, 0, 0, 0 }, 0, Ctx.handler, null);
+    var info_stream: [3]Information = .{
+        .{ .id = 1, .label = "ping", .features = .{ 0.5, 0.5, 0.5, 0.5 } },
+        .{ .id = 2, .label = "pong", .features = .{ 0.6, 0.6, 0.6, 0.6 } },
+        .{ .id = 3, .label = "done", .features = .{ 0.4, 0.4, 0.4, 0.4 } },
+    };
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        _ = try agent.runCycle(&info_stream);
+    }
+    try std.testing.expect(agent.e_history.items.len == 16);
+}

@@ -110,3 +110,98 @@ pub fn extractObjectBlock(json: []const u8, field_name: []const u8) ?[]const u8 
     const obj_end = findMatchingBrace(json, obj_start) orelse return null;
     return json[obj_start .. obj_end + 1];
 }
+
+// ===== Tests =====
+
+test "state_json: findMatchingBrace 基本匹配" {
+    const json = "{\"a\":{\"b\":1}}";
+    const end = findMatchingBrace(json, 0);
+    try std.testing.expectEqual(@as(?usize, json.len - 1), end);
+}
+
+test "state_json: findMatchingBrace 嵌套 + 字符串跳过" {
+    const json = "{\"inner\":{\"x\":\"}\"},\"y\":1}";
+    const end = findMatchingBrace(json, 0);
+    try std.testing.expectEqual(@as(?usize, json.len - 1), end);
+}
+
+test "state_json: findMatchingBrace 不完整返回 null" {
+    const json = "{\"a\":{";
+    const end = findMatchingBrace(json, 0);
+    try std.testing.expect(end == null);
+}
+
+test "state_json: findMatchingBracket" {
+    const json = "[\"a\",[\"b\",\"c\"],\"d\"]";
+    const end = findMatchingBracket(json, 0);
+    try std.testing.expectEqual(@as(?usize, json.len - 1), end);
+}
+
+test "state_json: extractJsonNumber" {
+    const obj = "{\"score\":3.14,\"count\":42}";
+    const score = extractJsonNumber(obj, "score");
+    try std.testing.expect(score != null);
+    try std.testing.expectEqualStrings("3.14", score.?);
+
+    const count = extractJsonNumber(obj, "count");
+    try std.testing.expect(count != null);
+    try std.testing.expectEqualStrings("42", count.?);
+
+    try std.testing.expect(extractJsonNumber(obj, "missing") == null);
+}
+
+test "state_json: extractJsonString" {
+    const alloc = std.testing.allocator;
+    const obj = "{\"name\":\"hello\",\"empty\":\"\"}";
+
+    const name = extractJsonString(alloc, obj, "name");
+    defer if (name) |n| alloc.free(n);
+    try std.testing.expect(name != null);
+    try std.testing.expectEqualStrings("hello", name.?);
+
+    const empty = extractJsonString(alloc, obj, "empty");
+    defer if (empty) |e| alloc.free(e);
+    try std.testing.expect(empty != null);
+    try std.testing.expectEqualStrings("", empty.?);
+
+    try std.testing.expect(extractJsonString(alloc, obj, "missing") == null);
+}
+
+test "state_json: extractJsonString 转义字符" {
+    const alloc = std.testing.allocator;
+    const obj = "{\"msg\":\"line1\\nline2\\ttab\\\"quote\"}";
+    const msg = extractJsonString(alloc, obj, "msg");
+    defer if (msg) |m| alloc.free(m);
+    try std.testing.expect(msg != null);
+    try std.testing.expectEqualStrings("line1\\nline2\\ttab\\\"quote", msg.?);
+}
+
+test "state_json: writeJsonString" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try writeJsonString(alloc, &buf, "hello\"world\nline2");
+    const result = try buf.toOwnedSlice(alloc);
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("hello\\\"world\\nline2", result);
+}
+
+test "state_json: extractObjectBlock" {
+    const json =
+        \\{"version":1,"data":{"key":"val","nested":{"a":1}},"end":true}
+    ;
+    const block = extractObjectBlock(json, "data");
+    try std.testing.expect(block != null);
+    try std.testing.expect(block.?[0] == '{');
+    try std.testing.expect(block.?[block.?.len - 1] == '}');
+
+    try std.testing.expect(extractObjectBlock(json, "missing") == null);
+}
+
+test "state_json: extractObjectBlock 对象内有嵌套花括号" {
+    const json = "{\"cfg\":{\"rules\":[{\"a\":1},{\"b\":2}],\"enabled\":true}}";
+    const block = extractObjectBlock(json, "cfg");
+    try std.testing.expect(block != null);
+    // 应匹配到最外层 'cfg' 的整个对象
+    try std.testing.expectEqualStrings("{\"rules\":[{\"a\":1},{\"b\":2}],\"enabled\":true}", block.?);
+}

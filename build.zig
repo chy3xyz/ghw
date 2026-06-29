@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
     });
 
     // ===== ghw_sdk 静态库 (C ABI, Phase 3 + v0.2) =====
+    // 可选 macOS sqlite3 路径覆盖 (用户可传 -Dsqlite-path=/opt/homebrew/opt/sqlite/lib)
+    const sqlite_path = b.option([]const u8, "sqlite-path", "macOS: path to sqlite3 lib dir, e.g. /opt/homebrew/opt/sqlite/lib");
     const sdk_lib = b.addLibrary(.{
         .linkage = .static,
         .name = "ghw",
@@ -28,7 +30,8 @@ pub fn build(b: *std.Build) void {
     // SDK 自带 libsqlite3 (用户不用自己加 -lsqlite3)
     sdk_lib.root_module.linkSystemLibrary("sqlite3", .{});
     if (target.result.os.tag == .macos) {
-        sdk_lib.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/sqlite/3.49.2/lib" });
+        const path = sqlite_path orelse "/opt/homebrew/opt/sqlite/lib";
+        sdk_lib.root_module.addLibraryPath(.{ .cwd_relative = path });
     }
     b.installArtifact(sdk_lib);
 
@@ -125,7 +128,8 @@ pub fn build(b: *std.Build) void {
             exe.root_module.link_libc = true;
             exe.root_module.linkSystemLibrary("sqlite3", .{});
             if (target.result.os.tag == .macos) {
-                exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/sqlite/3.49.2/lib" });
+                const path = sqlite_path orelse "/opt/homebrew/opt/sqlite/lib";
+                exe.root_module.addLibraryPath(.{ .cwd_relative = path });
             }
         }
         b.installArtifact(exe);
