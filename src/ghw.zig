@@ -146,6 +146,10 @@ comptime {
     _ = harness.self_encoder;
     _ = harness.rule_proposer;
     _ = harness.world_collector;
+    _ = harness.world_sensor;
+    _ = harness.survival_remedy;
+    _ = harness.survival_learn;
+    _ = harness.task_executor;
     _ = harness.crm_kpi;
     _ = harness.product_intent;
     _ = harness.kpi_bridge;

@@ -80,6 +80,10 @@ pub const RuleProposer = struct {
     last_kpi_trend: F = 0.0,
     /// 人类价值趋势 (value-units/cycle, 来自 ValueTrendTracker.trend)。
     last_value_trend: F = 0.0,
+    /// 本机压力一行摘要 (可选; 空串 = 不注入)
+    last_system_pressure: []const u8 = "",
+    /// P4: 主机危机 (disk/mem/load 越阈) — 主动提议求存规则
+    last_host_crisis: bool = false,
     proposal_count: u32 = 0,
     accepted_count: u32 = 0,
     rejected_count: u32 = 0,
@@ -113,6 +117,8 @@ pub const RuleProposer = struct {
     pub const KPI_DECLINE_EPS: F = 0.005;
     /// 人类 value_score 趋势下滑阈值 (P11)
     pub const VALUE_DECLINE_EPS: F = 0.003;
+    /// E 饱和: ΔE 难再涨, 应提议多样性/同伴/价值规则
+    pub const E_SATURATED: F = 0.98;
 
     /// 喂入 KPI 趋势信号 (来自 ed.kpiTrend())。与 updateState 解耦, 不破坏旧调用。
     pub fn setKpiTrend(self: *RuleProposer, trend: F) void {
@@ -122,6 +128,17 @@ pub const RuleProposer = struct {
     /// 喂入人类价值趋势 (来自 ValueTrendTracker.trend())
     pub fn setValueTrend(self: *RuleProposer, trend: F) void {
         self.last_value_trend = trend;
+    }
+
+    /// 喂入本机压力摘要 (来自 SystemCollector / world_sensor.formatPressureLine)
+    /// 指针不拥有; caller 保证在 propose 期间有效, 或传静态/持久缓冲。
+    pub fn setSystemPressure(self: *RuleProposer, line: []const u8) void {
+        self.last_system_pressure = line;
+    }
+
+    /// P4: 主机危机标志 (生存压力 → 应提议 material 规则)
+    pub fn setHostCrisis(self: *RuleProposer, crisis: bool) void {
+        self.last_host_crisis = crisis;
     }
 
     /// 绑定自传体记忆, 让规则提议带上"我是谁/我相信什么/相关往事"。
@@ -168,10 +185,13 @@ pub const RuleProposer = struct {
             \\- last ΔE: {d:.3}
             \\- KPI trend (K/cycle, negative = product KPI declining): {d:.4}
             \\- Human value trend (score/cycle, negative = human satisfaction declining): {d:.4}
+            \\- Host pressure: {s}
+            \\- Host crisis (disk/mem/load over threshold): {s}
             \\
             \\Propose {d} new rules. Output ONLY a JSON array (no markdown), each object with:
             \\"name", "description", "condition", "action", "dimension" (material|representation|nature|all), "rationale".
             \\If your memory above is relevant, ground the rules in those past episodes/beliefs.
+            \\If host pressure is high or host crisis is true, prefer material/survival rules.
         , .{
             @as(f32, self.last_e),
             @as(f32, self.last_material),
@@ -182,16 +202,20 @@ pub const RuleProposer = struct {
             @as(f32, self.last_de),
             @as(f32, self.last_kpi_trend),
             @as(f32, self.last_value_trend),
+            if (self.last_system_pressure.len > 0) self.last_system_pressure else "(unavailable)",
+            if (self.last_host_crisis) "true" else "false",
             n,
         });
         return prompt_buf.toOwnedSlice(self.allocator);
     }
 
-    /// 是否应触发一次提议: E 跌穿阈值, KPI 或人类价值趋势明显下滑。
+    /// 是否应触发一次提议: E 跌穿 / KPI·价值下滑 / E 饱和 / 主机危机。
     pub fn shouldPropose(self: *const RuleProposer, e_threshold: F) bool {
         return self.last_e < e_threshold or
             self.last_kpi_trend < -KPI_DECLINE_EPS or
-            self.last_value_trend < -VALUE_DECLINE_EPS;
+            self.last_value_trend < -VALUE_DECLINE_EPS or
+            self.last_e >= E_SATURATED or
+            self.last_host_crisis;
     }
 
     /// 询问 LLM 提议 N 条规则候选
@@ -462,6 +486,19 @@ test "RuleProposer: shouldPropose — E 跌穿 或 KPI 下滑 都触发" {
     proposer.setKpiTrend(0.0);
     proposer.setValueTrend(-0.01);
     try testing.expect(proposer.shouldPropose(0.50));
+
+    // E 饱和 ⇒ 也提议 (改推多样性, 非再刷高 E)
+    proposer.updateState(0.99, 0.9, 0.9, 0.9, "explore", "(none)", 0.0);
+    proposer.setKpiTrend(0.0);
+    proposer.setValueTrend(0.0);
+    try testing.expect(proposer.shouldPropose(0.50));
+
+    // P4: 主机危机 ⇒ 也提议 (求存规则)
+    proposer.updateState(0.70, 0.6, 0.6, 0.6, "explore", "(none)", 0.0);
+    proposer.setHostCrisis(true);
+    try testing.expect(proposer.shouldPropose(0.50));
+    proposer.setHostCrisis(false);
+    try testing.expect(!proposer.shouldPropose(0.50));
 }
 
 test "RuleProposer: 端到端提议 + 守门 (Mock LLM)" {

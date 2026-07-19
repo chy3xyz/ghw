@@ -467,3 +467,19 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 - `crm_kpi` 的 `user_satisfaction` / `safety` 两轴不再是硬编码占位: `RawKpi.csat` /
   `RawKpi.incident_rate` 为**可选**真实来源 (null ⇒ 回退旧代理行为, 不破坏既有语义);
   SDK 经 `ghw_kpi_feed(..., csat, incident_rate, ...)` 传入 (NaN = 无来源)。
+
+## Learned User Preferences
+
+- 存在度公理、三源合恰等核心数学必须扎实落地（可证明性质 + 测试），不接受「加权和 + clamp + 外挂补丁」式实现
+- 收到品质/架构建议后，期望 agent 直接实施改进而非仅出方案（「按照你的建议来」「继续推进」）
+- 代码审查只要阻塞或高风险问题，按 path:line 简洁列出；无阻塞时明确说明并最多列 1–2 个可选改进
+- 长期目标是 GHW 作为可嵌入商城、CRM、研发工具等宿主产品的生产级数字生命底座，而非停留在研究 demo
+
+## Learned Workspace Facts
+
+- 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
+- UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN
+- ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程
+- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件 `x-data="ghwApp()"`；对可能为 null 的 state 字段用 `?.` 可选链
+- 项目文档站位于 `/site`（VitePress）；Node 依赖仅存在于 `/site/package.json`，主 Zig 工程保持零依赖
+- Sandbox/CI 中 `zig build test` 若遇 Zig 全局 cache 权限错误，可用工作区内 `ZIG_GLOBAL_CACHE_DIR`（或 `ZIG_LOCAL_CACHE_DIR`）重跑

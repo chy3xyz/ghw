@@ -116,7 +116,17 @@ const Config = struct {
     cross_host_secret: []const u8 = "default_secret_change_me_in_production",
     /// peers.txt 路径 (跨 host peer 配置)
     cross_host_peers_file: ?[]const u8 = null,
+    /// agent.tick 持久化 sanity 上限 (默认 10^9; 超过或像 Unix 时间戳则启动时重置)
+    max_agent_tick: u64 = harness.agent_tick_guard.DEFAULT_MAX_AGENT_TICK,
 };
+
+fn sanitizeLoadedAgentTick(stored: u64, now_unix: u64, max_tick: u64) u64 {
+    const r = harness.agent_tick_guard.sanitizeAgentTick(stored, now_unix, max_tick);
+    if (r.reset) {
+        std.debug.print("[daemon] agent_tick 异常 ({s}): {d} → 重置为 {d}\n", .{ r.reason, stored, r.tick });
+    }
+    return r.tick;
+}
 
 fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
     var cfg: Config = .{};
@@ -158,6 +168,10 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArg;
             cfg.tick_interval_ms = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, a, "--max-agent-tick")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArg;
+            cfg.max_agent_tick = try std.fmt.parseInt(u64, args[i], 10);
         } else if (std.mem.eql(u8, a, "--verbose") or std.mem.eql(u8, a, "-v")) {
             cfg.verbose = true;
         } else if (std.mem.eql(u8, a, "--id")) {
@@ -263,6 +277,7 @@ fn printHelp() void {
         \\  --stdout-jsonl          也把 cycle 报告打 stdout (生产不要开, 会爆 log)
         \\  --log-every N           进度日志间隔 (默认 256, 0=静默)
         \\  --tick-interval-ms N    每 cycle sleep 多少 ms (默认 100, 0=不 sleep)
+        \\  --max-agent-tick N      agent.tick 上限; 超限或像 Unix 时间戳则启动重置 (默认 10^9)
         \\  --id <string>           数字生命 id (默认 daemon-001)
         \\  --seed <N>              LCG 随机种子 (默认 42)
         \\  --llm <provider>        LLM: anthropic | openai | none (默认 none)
@@ -518,29 +533,33 @@ pub fn main(init: std.process.Init.Minimal) !void {
     agent.bindMemory(&memory, io);
     var world_ctx = harness.world_context.WorldContext.init(alloc, io, init.environ);
     defer world_ctx.deinit();
+    var sys_collector = harness.system_collector.SystemCollector.init(alloc, io, cfg.seed);
+    defer sys_collector.deinit();
+    var last_world_sensor_tick: u64 = 0;
 
     // ===== L3 真应用: state_in → 实际恢复 agent 状态 =====
     var snapshot_tick: u64 = 0;
     if (cfg.state_in) |path| {
         std.debug.print("[daemon] 加载状态: {s}\n", .{path});
+        const boot_now_unix: u64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
         if (readFile(alloc, io, path)) |json| {
             defer alloc.free(json);
             var ss = StateSerializer{ .allocator = alloc, .io = io };
             if (ss.parseMinimal(json)) |parsed_const| {
                 var parsed = parsed_const;
                 defer parsed.deinit();
-                // 真应用回 agent
-                agent.tick = parsed.tick;
+                // 真应用回 agent (agent_tick sanity check)
+                agent.tick = sanitizeLoadedAgentTick(parsed.tick, boot_now_unix, cfg.max_agent_tick);
                 agent.ed.v.material = parsed.material;
                 agent.ed.v.representation = parsed.representation;
                 agent.ed.v.nature = parsed.nature;
                 agent.ed.weights.alpha = parsed.alpha;
                 agent.ed.weights.beta = parsed.beta;
                 agent.ed.weights.gamma = parsed.gamma;
-                snapshot_tick = parsed.tick;
+                snapshot_tick = agent.tick;
                 std.debug.print(
-                    "[daemon] 状态恢复: tick={d} M={d:.3} R={d:.3} N={d:.3} α={d:.3} β={d:.3} γ={d:.3}\n",
-                    .{ parsed.tick, parsed.material, parsed.representation, parsed.nature, parsed.alpha, parsed.beta, parsed.gamma },
+                    "[daemon] 状态恢复: agent_tick={d} M={d:.3} R={d:.3} N={d:.3} α={d:.3} β={d:.3} γ={d:.3}\n",
+                    .{ agent.tick, parsed.material, parsed.representation, parsed.nature, parsed.alpha, parsed.beta, parsed.gamma },
                 );
             } else |err| {
                 std.debug.print("[daemon] state parse 失败: {t}, 用默认\n", .{err});
@@ -593,16 +612,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const last_opt = last_wal;
             if (last_opt) |last| {
                 defer alloc.destroy(last);
-                if (last.tick > snapshot_tick) {
+                const wal_tick = sanitizeLoadedAgentTick(last.tick, boot_now_unix, cfg.max_agent_tick);
+                if (wal_tick > snapshot_tick) {
                     // WAL 有 snapshot 之后的新 records, 补回
-                    agent.tick = last.tick;
+                    agent.tick = wal_tick;
                     agent.ed.v.material = last.M;
                     agent.ed.v.representation = last.R;
                     agent.ed.v.nature = last.N;
                     // self_evolve_count 是累加, 从 0 重新算 OK (小误差)
                     std.debug.print(
-                        "[daemon] WAL replay: tick={d} M={d:.3} R={d:.3} N={d:.3} (从 snapshot tick={d} 之后)\n",
-                        .{ last.tick, last.M, last.R, last.N, snapshot_tick },
+                        "[daemon] WAL replay: agent_tick={d} M={d:.3} R={d:.3} N={d:.3} (snapshot agent_tick={d})\n",
+                        .{ wal_tick, last.M, last.R, last.N, snapshot_tick },
                     );
                 }
             }
@@ -616,8 +636,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("[daemon] inbox 模式: {s} (TODO: 流式感知接入)\n", .{path});
     }
 
-    // 主循环
-    var tick: u64 = 0;
+    // 主循环 (loop_tick = 本进程迭代次数; agent.tick = 持久化 cycle 计数)
+    var loop_tick: u64 = 0;
     var self_evolve_count: u32 = 0;
     var llm_propose_count: u32 = 0;
     var last_time_log_ms: i64 = 0;
@@ -777,27 +797,45 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    while (true) : (tick += 1) {
+    while (true) : (loop_tick += 1) {
         // 跑完指定 cycles 退出 (cycles=0 永远跑)
-        if (cfg.cycles != 0 and tick >= cfg.cycles) break;
+        if (cfg.cycles != 0 and loop_tick >= cfg.cycles) break;
         // 收到 SIGTERM/SIGINT/SIGHUP → graceful shutdown
         if (should_stop.load(.acquire)) {
             std.debug.print("[daemon] 收到停止信号, 进入 graceful shutdown\n", .{});
             break;
         }
 
-        const info_stream = [_]Information{
-            .{ .id = tick * 5 + 0, .label = "msg-A", .features = .{ 0.5, 0.6, 0.3, 0.4 } },
-            .{ .id = tick * 5 + 1, .label = "msg-B", .features = .{ 0.7, 0.4, 0.8, 0.2 } },
-            .{ .id = tick * 5 + 2, .label = "msg-C", .features = .{ 0.3, 0.5, 0.2, 0.6 } },
-            .{ .id = tick * 5 + 3, .label = "msg-D", .features = .{ 0.8, 0.7, 0.6, 0.3 } },
-            .{ .id = tick * 5 + 4, .label = "msg-E", .features = .{ 0.4, 0.5, 0.4, 0.5 } },
-        };
-
-        const report = agent.runCycle(&info_stream) catch |err| {
-            std.debug.print("[daemon] cycle {d} 失败: {t}\n", .{ tick, err });
+        // 真本机感知 → runCycle (对齐 ui_server; 不再用假 msg-A..E)
+        const snap = sys_collector.collectCached(5 * std.time.ns_per_s) catch |err| {
+            std.debug.print("[daemon] SystemCollector 失败: {t}\n", .{err});
             continue;
         };
+        const info = sys_collector.toInformation(snap) catch |err| {
+            std.debug.print("[daemon] toInformation 失败: {t}\n", .{err});
+            continue;
+        };
+        defer sys_collector.freeInformation(info);
+
+        const report = agent.runCycle(info) catch |err| {
+            std.debug.print("[daemon] loop_tick={d} cycle 失败: {t}\n", .{ loop_tick, err });
+            continue;
+        };
+
+        // P1: 本机压力 → world_sensor 生存任务 (无 LLM 也能求存)
+        if (agent.tick > 0 and agent.tick % 8 == 0 and agent.tick != last_world_sensor_tick) {
+            last_world_sensor_tick = agent.tick;
+            if (sys_collector.last) |s| {
+                const wr = harness.world_sensor.maybeSubmitFromSnapshot(&task_queue, s, alloc) catch null;
+                if (wr) |r| {
+                    if (r.submitted > 0) {
+                        std.debug.print("[daemon] world_sensor 入队 {d} 个生存任务 pending={d}\n", .{
+                            r.submitted, task_queue.pending_count,
+                        });
+                    }
+                }
+            }
+        }
 
         if (report.self_evolved) self_evolve_count += 1;
 
@@ -806,12 +844,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const delta_e = report.e_after - report.e_before;
             const goal_name = if (report.top_goal) |g| @tagName(g.kind) else "none";
             const kind: EpisodeKind = if (report.self_evolved) .self_evolution else .system_event;
-            const summary = std.fmt.allocPrint(alloc, "cycle {d}: goal={s} E={d:.3} dE={d:.3}", .{
-                tick, goal_name, report.e_after, delta_e,
+            const summary = std.fmt.allocPrint(alloc, "loop_tick {d} agent_tick {d}: goal={s} E={d:.3} dE={d:.3}", .{
+                loop_tick, agent.tick, goal_name, report.e_after, delta_e,
             }) catch null;
             if (summary) |s| {
                 defer alloc.free(s);
-                memory.recordAt(io, kind, tick, s, null, weakestDim(&agent), delta_e) catch {};
+                memory.recordAt(io, kind, agent.tick, s, null, weakestDim(&agent), delta_e) catch {};
             }
         }
 
@@ -836,8 +874,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const since_propose = agent.tick -% gp.last_propose_at_tick;
             if (since_propose >= gp.auto_every or gp.last_propose_at_tick == 0) {
                 const ws = world_ctx.collectCached(300 * std.time.ns_per_s) catch null;
-                if (ws) |snap| propose_blk: {
-                    const owned = world_ctx.dupSnapshot(snap) catch |err| {
+                if (ws) |wsnap| propose_blk: {
+                    const owned = world_ctx.dupSnapshot(wsnap) catch |err| {
                         std.debug.print("[daemon] dupSnapshot failed: {t}\n", .{err});
                         break :propose_blk;
                     };
@@ -879,7 +917,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
 
-        // P6/P9: 执行 pending 任务 + 启发式人类反馈
+        // P6/P9/P2: 执行 pending 任务 (有界真执行) + 启发式人类反馈
         if (agent.tick > 0 and agent.tick % 32 == 0) {
             const ts: u64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
             const fb_ctx = harness.task_feedback.Context{
@@ -887,11 +925,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .gsp = &human_gsp,
                 .signal = &human_signal,
             };
-            if (harness.task_feedback.runNextPendingWithFeedback(&agent, &fb_ctx, alloc, ts)) |ran| {
+            var proc_buf: [8]harness.task_executor.ProcBrief = undefined;
+            var proc_n: usize = 0;
+            if (world_ctx.last) |ws| {
+                const lim = @min(ws.top_procs.len, proc_buf.len);
+                while (proc_n < lim) : (proc_n += 1) {
+                    const tp = ws.top_procs[proc_n];
+                    proc_buf[proc_n] = .{ .comm = tp.comm, .cpu_pct = tp.cpu_pct, .mem_pct = tp.mem_pct };
+                }
+            }
+            const exec_env = harness.task_executor.Env{
+                .snap = sys_collector.last,
+                .top_procs = proc_buf[0..proc_n],
+            };
+            if (harness.task_feedback.runNextPendingWithFeedbackEnv(&agent, &fb_ctx, alloc, ts, exec_env)) |ran| {
                 if (ran) |r| {
-                    std.debug.print("[daemon] task #{d} 「{s}」完成 ΔE={d:.3}\n", .{
-                        r.task_id, r.title, r.actual_delta_e,
+                    std.debug.print("[daemon] task #{d} 「{s}」完成 ΔE={d:.3} action={s} acted={} remedy=+{d} beliefs=+{d} crisis={}\n", .{
+                        r.task_id, r.title, r.actual_delta_e, r.action_kind, r.acted, r.remedy_submitted, r.beliefs_added, r.host_crisis,
                     });
+                    if (proposer_opt) |*p| {
+                        p.setHostCrisis(r.host_crisis);
+                    }
                 }
             } else |err| {
                 std.debug.print("[daemon] runNextPending failed: {t}\n", .{err});
@@ -903,89 +957,90 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         // ===== Loop Engine 4-phase PDCA (Boris) =====
         if (loop_engine_opt) |*le| {
-            // Plan: tick % kPlanCycle == 0 → 触发 hypothesis 提议
-            if (le.shouldPlan(tick)) {
-                // Boris PR 守夜简化版: 基于 E + ΔE 提 hypothesis
-                // 跟 LLM 提议不冲突, 这是更轻的 coordinator 视角
-                // 真正的 LLM 提议 (Phase 8.7) 在下面独立分支跑
-                const e_now = agent.ed.e();
-                const delta_e = report.e_after - report.e_before;
-                const plan_claim = if (e_now < cfg.rule_propose_threshold)
-                    "E 跌穿阈值, 优先恢复 E 平衡"
-                else if (delta_e > 0.01)
-                    "当前 hypothesis 有效, 继续推进"
-                else if (delta_e < -0.01)
-                    "E 下滑, 需要新策略"
-                else
-                    "E 稳态, 探索多源平衡";
-                const plan_reason = if (delta_e > 0)
-                    "Boris: gain positive"
-                else
-                    "Boris: gain negative or flat";
-                const new_id = le.addHypothesis(tick, plan_claim, plan_reason, 0.6, .llm_propose) catch 0;
-                le.markPlan(tick);
-                if (cfg.log_every != 0 and cfg.log_every <= 8 and tick > 0 and tick % cfg.log_every == 0) {
-                    std.debug.print("[daemon] Loop Plan tick={d} hyp_id={d} claim={s}\n", .{ tick, new_id, plan_claim });
-                }
-            }
-            // Do: 记录 ΔE 和 M/R/N
+            // Do + Check 先跑, 更新 e_saturated; E 饱和时跳过 Plan/Act 降频
             le.recordDo();
             le.recordEDelta(report.e_after - report.e_before);
             le.recordMrn(agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature);
-            // Check: 算 hit_rate (Boris 6.6 外部机制, 纯数学)
             const is_hit = le.check();
             if (is_hit) le.recordHit() else le.recordMiss();
-            // Act: 连续 miss 触发 retire / force_l4 (Boris 6.5 退出条件)
-            const act_result = le.act();
-            switch (act_result) {
-                .force_l4 => {
-                    // 强制 L4 提议: 给数字生命一个 boost, 让它跑 self_evolver
-                    if (cfg.log_every != 0) {
-                        std.debug.print("[daemon] Loop Act=force_l4 tick={d} miss_streak={d} → 触发 L4 提议\n", .{
-                            tick, le.kpi.consecutive_miss,
-                        });
+
+            const loop_idle = le.kpi.e_saturated and agent.ed.e() >= 0.99;
+            if (!loop_idle) {
+                if (le.shouldPlan(loop_tick)) {
+                    const e_now = agent.ed.e();
+                    const delta_e = report.e_after - report.e_before;
+                    const plan_claim = if (e_now < cfg.rule_propose_threshold)
+                        "E 跌穿阈值, 优先恢复 E 平衡"
+                    else if (delta_e > 0.01)
+                        "当前 hypothesis 有效, 继续推进"
+                    else if (delta_e < -0.01)
+                        "E 下滑, 需要新策略"
+                    else
+                        "E 稳态, 探索多源平衡";
+                    const plan_reason = if (delta_e > 0)
+                        "Boris: gain positive"
+                    else
+                        "Boris: gain negative or flat";
+                    const new_id = le.addHypothesis(loop_tick, plan_claim, plan_reason, 0.6, .llm_propose) catch 0;
+                    le.markPlan(loop_tick);
+                    if (cfg.log_every != 0 and cfg.log_every <= 8 and loop_tick > 0 and loop_tick % cfg.log_every == 0) {
+                        std.debug.print("[daemon] Loop Plan loop_tick={d} agent_tick={d} hyp_id={d} claim={s}\n", .{ loop_tick, agent.tick, new_id, plan_claim });
                     }
-                    // 复用现有 LLM propose 触发逻辑
-                    if (proposer_opt != null and encoder_opt != null and guard_opt != null) {
-                        if (proposer_opt) |*p| {
-                            if (encoder_opt) |*enc| {
-                                if (guard_opt) |*grd| {
-                                    p.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "loop-engine-force-l4", "consecutive_miss", -0.05);
-                                    var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
-                                        std.debug.print("[daemon] force_l4 proposeAndAdopt failed: {t}\n", .{err});
-                                        continue;
-                                    };
-                                    defer prop_result.deinit();
-                                    llm_propose_count += 1;
-                                    const prop_summary = std.fmt.allocPrint(alloc, "force_l4: accepted={d} rejected={d}", .{
-                                        prop_result.accepted, prop_result.rejected,
-                                    }) catch null;
-                                    if (prop_summary) |ps| {
-                                        defer alloc.free(ps);
-                                        memory.recordAt(io, .llm_proposal, tick, ps, null, weakestDim(&agent), 0) catch {};
+                }
+                const act_result = le.act();
+                switch (act_result) {
+                    .force_l4 => {
+                        if (cfg.log_every != 0) {
+                            std.debug.print("[daemon] Loop Act=force_l4 loop_tick={d} agent_tick={d} miss_streak={d} → 触发 L4 提议\n", .{
+                                loop_tick, agent.tick, le.kpi.consecutive_miss,
+                            });
+                        }
+                        if (proposer_opt != null and encoder_opt != null and guard_opt != null) {
+                            if (proposer_opt) |*p| {
+                                if (encoder_opt) |*enc| {
+                                    if (guard_opt) |*grd| {
+                                        p.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "loop-engine-force-l4", "consecutive_miss", -0.05);
+                                        var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
+                                            std.debug.print("[daemon] force_l4 proposeAndAdopt failed: {t}\n", .{err});
+                                            continue;
+                                        };
+                                        defer prop_result.deinit();
+                                        llm_propose_count += 1;
+                                        const prop_summary = std.fmt.allocPrint(alloc, "force_l4: accepted={d} rejected={d}", .{
+                                            prop_result.accepted, prop_result.rejected,
+                                        }) catch null;
+                                        if (prop_summary) |ps| {
+                                            defer alloc.free(ps);
+                                            memory.recordAt(io, .llm_proposal, agent.tick, ps, null, weakestDim(&agent), 0) catch {};
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                },
-                .retire => {
-                    if (cfg.log_every != 0) {
-                        std.debug.print("[daemon] Loop Act=retire tick={d} → 撤当前 hypothesis, 重新 Plan\n", .{tick});
-                    }
-                },
-                .promote => {
-                    if (cfg.log_every != 0) {
-                        std.debug.print("[daemon] Loop Act=promote tick={d} → 当前 hypothesis 升为长期\n", .{tick});
-                    }
-                },
-                .keep, .none => {},
+                    },
+                    .retire => {
+                        if (cfg.log_every != 0) {
+                            std.debug.print("[daemon] Loop Act=retire loop_tick={d} agent_tick={d} → 撤当前 hypothesis\n", .{ loop_tick, agent.tick });
+                        }
+                    },
+                    .promote => {
+                        if (cfg.log_every != 0) {
+                            std.debug.print("[daemon] Loop Act=promote loop_tick={d} agent_tick={d} → hypothesis 升为长期\n", .{ loop_tick, agent.tick });
+                        }
+                    },
+                    .keep, .none => {},
+                }
+            } else if (cfg.log_every != 0 and loop_tick > 0 and loop_tick % cfg.log_every == 0) {
+                std.debug.print("[daemon] LoopEngine idle (E saturated) loop_tick={d} agent_tick={d} E={d:.3}\n", .{
+                    loop_tick, agent.tick, agent.ed.e(),
+                });
             }
         }
 
         if (cfg.verbose) {
-            std.debug.print("[daemon] tick={d} E={d:.3}->{d:.3} goal={?s} self_evolved={}\n", .{
-                tick,
+            std.debug.print("[daemon] loop_tick={d} agent_tick={d} E={d:.3}->{d:.3} goal={?s} self_evolved={}\n", .{
+                loop_tick,
+                agent.tick,
                 report.e_before,
                 report.e_after,
                 if (report.top_goal) |g| @tagName(g.kind) else null,
@@ -1031,28 +1086,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (cfg.log_every != 0) std.debug.print("[daemon] WAL append 失败: {t}\n", .{err});
             };
 
-            // 2. 每 16 cycle 写 snapshot
-            if (tick > 0 and tick % 16 == 0) {
+            // 2. 每 16 loop_tick 写 snapshot
+            if (loop_tick > 0 and loop_tick % 16 == 0) {
                 writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, path, agent.tick, self_evolve_count) catch |err| {
                     if (cfg.log_every != 0) std.debug.print("[daemon] snapshot 失败: {t}\n", .{err});
                 };
 
-                // 3. 每 256 cycle truncate WAL (snapshot 已含)
-                if (tick % 256 == 0) {
+                // 3. 每 256 loop_tick truncate WAL (snapshot 已含)
+                if (loop_tick % 256 == 0) {
                     // Zig 0.17 std.Io.File 没有 truncate, 用 deleteFileAbsolute 删了重建
                     std.Io.Dir.deleteFileAbsolute(io, wal_path) catch {};
-                    if (cfg.log_every != 0) std.debug.print("[daemon] WAL truncated at tick={d}\n", .{tick});
+                    if (cfg.log_every != 0) std.debug.print("[daemon] WAL truncated loop_tick={d} agent_tick={d}\n", .{ loop_tick, agent.tick });
                 }
             }
         }
 
-        // 周期性进度日志 (默认每 256 tick, --log-every 0 关闭)
-        if (cfg.log_every != 0 and tick > 0 and tick % cfg.log_every == 0) {
-            std.debug.print("[daemon] tick={d} E={d:.3} self_evolved_total={d} self_evolution_rate={d:.4}\n", .{
-                tick,
+        // 周期性进度日志 (默认每 256 loop_tick, --log-every 0 关闭)
+        if (cfg.log_every != 0 and loop_tick > 0 and loop_tick % cfg.log_every == 0) {
+            std.debug.print("[daemon] loop_tick={d} agent_tick={d} E={d:.3} self_evolved_total={d} self_evolution_rate={d:.4}\n", .{
+                loop_tick,
+                agent.tick,
                 agent.ed.e(),
                 self_evolve_count,
-                @as(f64, @floatFromInt(self_evolve_count)) / @as(f64, @floatFromInt(tick)),
+                @as(f64, @floatFromInt(self_evolve_count)) / @as(f64, @floatFromInt(loop_tick)),
             });
         }
 
@@ -1064,14 +1120,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (last_time_log_ms == 0) {
                 last_time_log_ms = now_ms;
             } else if (now_ms - last_time_log_ms >= @as(i64, @intCast(cfg.log_every_ms))) {
-                std.debug.print("[daemon] TIME tick={d} E={d:.3} self_evolved_total={d}\n", .{
-                    tick,
+                std.debug.print("[daemon] TIME loop_tick={d} agent_tick={d} E={d:.3} self_evolved_total={d}\n", .{
+                    loop_tick,
+                    agent.tick,
                     agent.ed.e(),
                     self_evolve_count,
                 });
                 // Loop Engine KPI 摘要 (跟 exit 时一样, time-based 触发)
                 if (loop_engine_opt) |*le| {
-                    std.debug.print("  LoopEngine: tick={d} plan={d} do={d} act={d} hit_rate={d:.3} miss_streak={d} avg_de_8={d:.3}\n", .{
+                    std.debug.print("  LoopEngine: loop_tick={d} plan={d} do={d} act={d} hit_rate={d:.3} miss_streak={d} avg_de_8={d:.3} e_saturated={}\n", .{
                         le.kpi.loop_tick,
                         le.kpi.plan_count,
                         le.kpi.do_count,
@@ -1079,6 +1136,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         le.kpi.current_hit_rate,
                         le.kpi.consecutive_miss,
                         le.kpi.avg_delta_e_8cycle,
+                        le.kpi.e_saturated,
                     });
                     std.debug.print("  hypotheses ({}):\n", .{le.hypotheses.items.len});
                     for (le.hypotheses.items) |*h| {
@@ -1113,21 +1171,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
 
-        // LLM 提议触发: E 跌穿 / KPI 下滑 / 人类价值下滑
+        // LLM 提议触发: E 跌穿 / KPI 下滑 / 人类价值下滑 / E 饱和
         if (proposer_opt) |*p| {
             if (encoder_opt) |*enc| {
                 if (guard_opt) |*grd| {
                     p.updateState(agent.ed.e(), agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, "explore", "llm-propose-trigger", -0.05);
                     p.setKpiTrend(agent.ed.kpiTrend());
                     p.setValueTrend(value_tracker.trend());
+                    var pressure_owned: ?[]u8 = null;
+                    defer if (pressure_owned) |pl| alloc.free(pl);
+                    if (sys_collector.last) |s| {
+                        pressure_owned = harness.world_sensor.formatPressureLine(alloc, s) catch null;
+                        if (pressure_owned) |pl| p.setSystemPressure(pl);
+                        p.setHostCrisis(harness.survival_learn.isCrisisSnap(s));
+                    }
                     if (p.shouldPropose(cfg.rule_propose_threshold)) {
                         var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
                             std.debug.print("[daemon] proposeAndAdopt failed: {t}\n", .{err});
                             continue;
                         };
                         defer prop_result.deinit();
-                        std.debug.print("[daemon] LLM propose at tick {d}: accepted={d} rejected={d}\n", .{
-                            tick,
+                        std.debug.print("[daemon] LLM propose loop_tick={d} agent_tick={d}: accepted={d} rejected={d}\n", .{
+                            loop_tick,
+                            agent.tick,
                             prop_result.accepted,
                             prop_result.rejected,
                         });
@@ -1137,7 +1203,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         }) catch null;
                         if (prop_summary) |ps| {
                             defer alloc.free(ps);
-                            memory.recordAt(io, .llm_proposal, tick, ps, null, weakestDim(&agent), 0) catch {};
+                            memory.recordAt(io, .llm_proposal, agent.tick, ps, null, weakestDim(&agent), 0) catch {};
                         }
                     }
                 }
@@ -1164,8 +1230,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
     }
 
-    std.debug.print("[daemon] 退出 — 总 tick={d} 最终 E={d:.3} 自演化触发 {d} 次\n", .{
-        tick,
+    std.debug.print("[daemon] 退出 — loop_tick={d} agent_tick={d} 最终 E={d:.3} 自演化触发 {d} 次\n", .{
+        loop_tick,
+        agent.tick,
         agent.ed.e(),
         self_evolve_count,
     });
@@ -1173,7 +1240,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // ===== Loop Engine 退出摘要 (Boris 6.6 评估机制) =====
     if (loop_engine_opt) |*le| {
         std.debug.print("\n========== Loop Engine 摘要 (Boris) ==========\n", .{});
-        std.debug.print("LoopEngine: tick={d} plan={d} do={d} check={d} act={d}\n", .{
+        std.debug.print("LoopEngine: loop_tick={d} plan={d} do={d} check={d} act={d}\n", .{
             le.kpi.loop_tick,
             le.kpi.plan_count,
             le.kpi.do_count,

@@ -92,7 +92,130 @@ function ghwApp() {
           { label: '价值趋势', value: (hs.value_trend ?? 0).toFixed(4), hint: this.valueTrendHint(hs.value_trend), color: this.valueTrendColor(hs.value_trend) },
         );
       }
+      const vit = s.provenance?.vitality;
+      if (vit) {
+        rows.push(
+          { label: '代谢', value: vit.metabolism ?? '—', hint: vit.cycle_busy ? 'cycle 忙·快照可能旧' : `距上次 cycle ${vit.secs_since_cycle ?? '?'}s`, color: vit.metabolism === 'active' ? 'text-emerald-300' : 'text-amber-300' },
+          { label: '同伴', value: String(vit.live_peers ?? 0), hint: '排除 self 的 live peers', color: 'text-sky-300' },
+          { label: '任务', value: `${vit.completed_tasks ?? 0}/${(vit.pending_tasks ?? 0) + (vit.completed_tasks ?? 0)}`, hint: `pending=${vit.pending_tasks ?? 0}`, color: 'text-violet-300' },
+          { label: 'ΔE往事', value: String(vit.episodes_nonzero_de ?? 0), hint: `episodes=${vit.episodes ?? 0}`, color: 'text-ghw-warm' },
+        );
+      }
+      const surv = s.provenance?.survival;
+      if (surv) {
+        rows.push(
+          { label: '外网记忆', value: String(surv.world_fetch_count ?? 0), hint: 'AutoCLI → Memory.world_fetch', color: 'text-teal-300' },
+          { label: '任务动作', value: surv.last_task_action ?? 'none', hint: surv.last_task_acted ? '有界真执行已落地' : '合成/跳过', color: surv.last_task_acted ? 'text-emerald-300' : 'text-slate-400' },
+          { label: '补救入队', value: String(surv.remedy_submitted_total ?? 0), hint: '诊断后 survival_remedy', color: 'text-rose-300' },
+          { label: '求存信念', value: String(surv.survival_beliefs_total ?? 0), hint: '诊断→material beliefs', color: 'text-orange-300' },
+        );
+      }
       return rows;
+    },
+
+    // SVG 折线图预计算 (避免 SVG 内 <template x-for> 触发 importNode 错误)
+    get trendSeries() {
+      const colors = { l1: '#06b6d4', l2: '#8b5cf6', l3: '#10b981', l4: '#f59e0b', l5: '#ef4444' };
+      const max = Math.max(1, this.maxTrendValue);
+      const out = [];
+      for (const name of ['l1', 'l2', 'l3', 'l4', 'l5']) {
+        const series = this.trendData?.[name] || [];
+        if (series.length === 0) continue;
+        const points = series.map((p, i) => {
+          const x = 40 + (i * (750 / (series.length - 1 || 1)));
+          const y = 180 - (p.count / max * 160);
+          return `${x},${y}`;
+        }).join(' ');
+        out.push({ name, points, stroke: colors[name] || '#94a3b8' });
+      }
+      return out;
+    },
+    get proposeEPoints() {
+      const hist = this.proposeHistory?.history || [];
+      if (hist.length === 0) return '';
+      return hist.map((p, i) => {
+        const x = 40 + (i * (750 / Math.max(1, hist.length - 1)));
+        const y = 200 - (p.e_after * 180);
+        return `${x},${y}`;
+      }).join(' ');
+    },
+    get proposeCoefLines() {
+      const hist = this.proposeHistory?.history || [];
+      if (hist.length === 0) return [];
+      const defs = [
+        { key: 'mu', color: '#ef4444' },
+        { key: 'nu', color: '#f97316' },
+        { key: 'sigma', color: '#06b6d4' },
+        { key: 'lambda', color: '#facc15' },
+      ];
+      return defs.map((coef) => ({
+        key: coef.key,
+        color: coef.color,
+        points: hist.map((p, i) => {
+          const x = 40 + (i * (750 / Math.max(1, hist.length - 1)));
+          const val = (p.coefs && p.coefs[coef.key] != null) ? p.coefs[coef.key] : 0;
+          const y = 200 - (val / 0.8 * 180);
+          return `${x},${y}`;
+        }).join(' '),
+      }));
+    },
+    get proposeHistoryDots() {
+      const hist = this.proposeHistory?.history || [];
+      return hist.map((p, i) => ({
+        key: `p-${p.tick}-${i}`,
+        cx: 40 + (i * (750 / Math.max(1, hist.length - 1))),
+        cy: 200 - (p.e_after * 180),
+        fill: p.e_delta > 0 ? '#10b981' : (p.e_delta < 0 ? '#f43f5e' : '#a855f7'),
+      }));
+    },
+    // Alpine 无法在 SVG 内安全 x-for — 整图序列化为 HTML 字符串
+    get trendChartHtml() {
+      const grid = '<g stroke="#1e293b" stroke-width="0.5">'
+        + '<line x1="40" y1="20" x2="790" y2="20"/>'
+        + '<line x1="40" y1="60" x2="790" y2="60"/>'
+        + '<line x1="40" y1="100" x2="790" y2="100"/>'
+        + '<line x1="40" y1="140" x2="790" y2="140"/>'
+        + '<line x1="40" y1="180" x2="790" y2="180"/>'
+        + '</g>';
+      const lines = this.trendSeries.map((line) =>
+        `<polyline points="${line.points}" fill="none" stroke="${line.stroke}" stroke-width="2" stroke-linecap="round"/>`
+      ).join('');
+      const axis = '<g font-size="9" fill="#64748b" font-family="monospace">'
+        + '<text x="40" y="198" text-anchor="middle">0</text>'
+        + '<text x="227" y="198" text-anchor="middle">1k</text>'
+        + '<text x="415" y="198" text-anchor="middle">2k</text>'
+        + '<text x="602" y="198" text-anchor="middle">3k</text>'
+        + '<text x="790" y="198" text-anchor="middle">4k</text>'
+        + '</g>';
+      return `<svg viewBox="0 0 800 200" preserveAspectRatio="none" class="w-full h-full">${grid}${lines}${axis}</svg>`;
+    },
+    get proposeChartHtml() {
+      const grid = '<g stroke="#1e293b" stroke-width="0.5">'
+        + '<line x1="40" y1="20" x2="790" y2="20"/>'
+        + '<line x1="40" y1="65" x2="790" y2="65"/>'
+        + '<line x1="40" y1="110" x2="790" y2="110"/>'
+        + '<line x1="40" y1="155" x2="790" y2="155"/>'
+        + '<line x1="40" y1="200" x2="790" y2="200"/>'
+        + '</g>';
+      const yAxis = '<g font-size="9" fill="#64748b" font-family="monospace">'
+        + '<text x="35" y="22" text-anchor="end">1.0</text>'
+        + '<text x="35" y="67" text-anchor="end">0.75</text>'
+        + '<text x="35" y="112" text-anchor="end">0.5</text>'
+        + '<text x="35" y="157" text-anchor="end">0.25</text>'
+        + '<text x="35" y="202" text-anchor="end">0</text>'
+        + '</g>';
+      let body = grid + yAxis;
+      const ePoints = this.proposeEPoints;
+      if (ePoints) {
+        body += `<polyline points="${ePoints}" fill="none" stroke="#a855f7" stroke-width="2.5" stroke-linecap="round"/>`;
+      }
+      for (const coef of this.proposeCoefLines) {
+        body += `<polyline points="${coef.points}" fill="none" stroke="${coef.color}" stroke-width="1.5" stroke-dasharray="3,3" stroke-linecap="round" opacity="0.7"/>`;
+      }
+      for (const dot of this.proposeHistoryDots) {
+        body += `<circle cx="${dot.cx}" cy="${dot.cy}" r="3" fill="${dot.fill}" stroke="#0f172a" stroke-width="1"/>`;
+      }
+      return `<svg viewBox="0 0 800 220" preserveAspectRatio="none" class="w-full h-full">${body}</svg>`;
     },
 
     // ===== 颜色 / 文本辅助 =====
@@ -172,6 +295,8 @@ function ghwApp() {
         llm_proposer: 'llm',
         balance: 'balance',
         human: 'human',
+        world_sensor: 'world',
+        survival_remedy: 'remedy',
         unknown: '—',
       };
       return m[source] || source || '—';
@@ -182,6 +307,8 @@ function ghwApp() {
       if (source === 'llm_proposer') return 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/30';
       if (source === 'balance') return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
       if (source === 'human') return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
+      if (source === 'world_sensor') return 'bg-orange-500/20 text-orange-300 border-orange-500/30';
+      if (source === 'survival_remedy') return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
       return 'bg-slate-700 text-ghw-dim border-slate-600';
     },
     taskSourceFilters() {
@@ -192,6 +319,8 @@ function ghwApp() {
         { id: 'human', label: 'human' },
         { id: 'llm_proposer', label: 'llm' },
         { id: 'balance', label: 'balance' },
+        { id: 'world_sensor', label: 'world' },
+        { id: 'survival_remedy', label: 'remedy' },
         { id: 'unknown', label: '—' },
       ];
     },
@@ -367,6 +496,9 @@ function ghwApp() {
           if (arr && arr.length > 0 && arr[arr.length-1].count > m) m = arr[arr.length-1].count;
         }
         this.maxTrendValue = m;
+      } catch (e) {
+        // 静默
+      }
     },
     async refreshProposeHistory() {
       try {
@@ -386,6 +518,7 @@ function ghwApp() {
         // 静默
       }
     },
+    async refreshEvolved() {
       try {
         const r = await fetch('/api/evolved');
         if (!r.ok) return;
@@ -459,7 +592,7 @@ function ghwApp() {
         if (this.tab === 'evolved') await this.refreshEvolved();
         // status tab 显示同伴 — 每次轮询都更新 (轻量)
         await this.refreshPeers();
-      }, 1000);
+      }, 3000);
       // 跨 tab 事件: 聊天发送后立即刷新 E (HTMX after-request 触发)
       window.addEventListener('ghw:refresh-state', () => this.refreshState());
     },
@@ -488,7 +621,7 @@ function ghwApp() {
   };
 }
 
-// Alpine 启动后会调 ghwApp(), 但因为 script defer, 这里也直接注册到 window 即可
+// 供 x-data="ghwApp()" 与 index.html alpine:init 双路径使用
 window.ghwApp = ghwApp;
 
 /// phaseProgress() — 9 阶段进度条数据 + milestones 列表
@@ -526,7 +659,7 @@ function phaseProgress() {
     },
     // 每次 capabilities 变化时同步 milestones
     syncFromCapabilities() {
-      const pms = window.ghwApp?.capabilities?.phase?.milestones;
+      const pms = this.$root?.capabilities?.phase?.milestones;
       if (!pms) return;
       for (const m of this.milestones) {
         m.reached = pms[m.key] === true;
@@ -537,7 +670,7 @@ function phaseProgress() {
       this.syncFromCapabilities();
       this.refreshRelations();
       // 监听 capabilities 变化
-      this.$watch?.(() => JSON.stringify(window.ghwApp?.capabilities?.phase), () => {
+      this.$watch?.(() => JSON.stringify(this.$root?.capabilities?.phase), () => {
         this.syncFromCapabilities();
       });
       // 每 10s refresh relations (8 关系变化慢)

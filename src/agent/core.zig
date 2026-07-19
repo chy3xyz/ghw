@@ -822,12 +822,28 @@ pub const GHWAgent = struct {
 
     /// 跑一个任务: 跑 cycles_allocated 个 cycle, 聚合 E 变化, 返回结果
     pub fn runTask(self: *GHWAgent, task: *HumanTask) !HumanTaskResult {
+        return self.runTaskPrepared(task, null, null);
+    }
+
+    /// P2: 可选真实 Information 流 + 动作报告前缀 (task_executor 产出)
+    /// infos=null → 合成特征 (旧行为); action_report 写入 output + episode detail
+    pub fn runTaskPrepared(
+        self: *GHWAgent,
+        task: *HumanTask,
+        infos: ?[]const Information,
+        action_report: ?[]const u8,
+    ) !HumanTaskResult {
         const e_before = self.ed.e();
         var cycles_used: u32 = 0;
         var last_outcome: ?ActionOutcome = null;
         for (0..task.cycles_allocated) |i| {
-            const info = taskToInformation(task, @intCast(i));
-            const report = self.runCycle(&[_]Information{info}) catch |err| {
+            const report = blk: {
+                if (infos) |stream| {
+                    if (stream.len > 0) break :blk self.runCycle(stream);
+                }
+                const info = taskToInformation(task, @intCast(i));
+                break :blk self.runCycle(&[_]Information{info});
+            } catch |err| {
                 return HumanTaskResult{
                     .output = try std.fmt.allocPrint(self.allocator,
                         "[runTask] cycle failed: {t}", .{err}),
@@ -842,7 +858,7 @@ pub const GHWAgent = struct {
         const e_after = self.ed.e();
         const actual_de = e_after - e_before;
 
-        const outcome_str = if (last_outcome) |o|
+        const outcome_core = if (last_outcome) |o|
             try std.fmt.allocPrint(self.allocator,
                 \\[runTask] {s} 完成
                 \\  cycles={d}
@@ -862,6 +878,12 @@ pub const GHWAgent = struct {
                 .{ task.title, actual_de },
             );
 
+        const outcome_str = if (action_report) |ar| blk: {
+            if (ar.len == 0) break :blk outcome_core;
+            defer self.allocator.free(outcome_core);
+            break :blk try std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ ar, outcome_core });
+        } else outcome_core;
+
         if (self.memory) |memory_ref| {
             if (self.memory_io) |io| {
                 const summary = std.fmt.allocPrint(self.allocator, "task completed: {s} ΔE={d:.3}", .{
@@ -869,7 +891,8 @@ pub const GHWAgent = struct {
                 }) catch null;
                 if (summary) |s| {
                     defer self.allocator.free(s);
-                    memory_ref.recordAt(io, .task_completed, self.tick, s, null, taskDimU8(task.required_dimension), actual_de) catch {};
+                    const detail: ?[]const u8 = if (action_report) |ar| (if (ar.len > 0) ar else null) else null;
+                    memory_ref.recordAt(io, .task_completed, self.tick, s, detail, taskDimU8(task.required_dimension), actual_de) catch {};
                 }
             }
         }

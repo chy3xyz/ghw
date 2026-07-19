@@ -468,9 +468,9 @@ pub const HarnessLoopEngine = struct {
             self.kpi.consecutive_miss = 0;
             return .retire;
         }
-        // 提升条件: hit_count >= 5 且 miss_count == 0
+        // 提升条件: hit_count >= 5 且 miss_count == 0 (E 饱和时不 promote, 避免无意义刷屏)
         if (self.findActive()) |h| {
-            if (h.hit_count >= 5 and h.miss_count == 0 and h.status == .active) {
+            if (h.hit_count >= 5 and h.miss_count == 0 and h.status == .active and !self.kpi.e_saturated) {
                 h.status = .promoted;
                 self.kpi.last_act = .promote;
                 self.kpi.act_count += 1;

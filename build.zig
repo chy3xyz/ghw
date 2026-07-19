@@ -55,6 +55,7 @@ pub fn build(b: *std.Build) void {
         "src/harness/config_loader.zig",
         "src/harness/product_instance.zig",
         "src/harness/co_evolution.zig",
+        "src/harness/agent_tick_guard.zig",
         "src/util/math.zig",
         "src/sandbox/sqlite_db.zig",
     };

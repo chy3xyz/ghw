@@ -48,6 +48,8 @@ pub const Task = struct {
         llm_proposer,
         balance,
         human,
+        world_sensor,
+        survival_remedy,
     };
 
     pub fn sourceLabel(s: Source) []const u8 {
@@ -58,6 +60,8 @@ pub const Task = struct {
             .llm_proposer => "llm",
             .balance => "balance",
             .human => "human",
+            .world_sensor => "world",
+            .survival_remedy => "remedy",
         };
     }
 

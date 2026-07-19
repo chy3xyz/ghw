@@ -5,11 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GHW 数字生命</title>
 
-  <!-- HTMX: 局部更新 (聊天发送) -->
-  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-  <!-- Alpine.js: 响应式状态 (状态轮询, 标签切换) -->
-  <script defer src="https://unpkg.com/alpinejs@3.13.5/dist/cdn.min.js"></script>
-  <!-- Tailwind CSS (CDN, 不编译) -->
+  <!-- HTMX: 本地 vendor (Alpine 在 body 末尾、app.js 之后加载) -->
+  <script src="/vendor/htmx.min.js"></script>
+  <!-- Tailwind CSS (CDN 可选; 失败时仍可用内联样式) -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -39,6 +37,8 @@
     .scrollbar::-webkit-scrollbar-thumb { background: #2a3045; border-radius: 3px; }
     .scrollbar::-webkit-scrollbar-thumb:hover { background: #3a4060; }
     [x-cloak] { display: none !important; }
+    /* Tailwind CDN 不可用时的兜底布局 */
+    .ghw-fallback { background:#0a0e1a; color:#e8eaf2; min-height:100vh; }
     .pulse-dot { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     .gauge-fill { transition: width 0.6s ease, background 0.6s ease; }
@@ -173,24 +173,59 @@
       </template>
     </div>
 
+    <!-- 生命代谢看板 (pending/peers/ΔE往事, 不只看 E≈1) -->
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state?.provenance?.vitality">
+      <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">生命代谢 (Vitality)</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
+        <div>
+          <div class="text-xs text-ghw-dim">metabolism</div>
+          <div class="text-2xl font-mono font-bold" :class="(state?.provenance?.vitality?.metabolism === 'active') ? 'text-emerald-300' : 'text-amber-300'"
+               x-text="state?.provenance?.vitality?.metabolism ?? '—'"></div>
+          <div class="text-xs text-ghw-dim mt-1 font-mono">
+            auto-tick=<span x-text="state?.provenance?.vitality?.auto_tick_ms ?? 0"></span>ms
+            · busy=<span x-text="state?.provenance?.vitality?.cycle_busy ? 'yes' : 'no'"></span>
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">live peers</div>
+          <div class="text-2xl font-mono font-bold text-sky-300" x-text="state?.provenance?.vitality?.live_peers ?? 0"></div>
+          <div class="text-xs text-ghw-dim mt-1">phase_honest=<span x-text="state?.provenance?.vitality?.phase_honest ?? 0"></span></div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">tasks done / pending</div>
+          <div class="text-2xl font-mono font-bold text-violet-300">
+            <span x-text="state?.provenance?.vitality?.completed_tasks ?? 0"></span>
+            / <span x-text="state?.provenance?.vitality?.pending_tasks ?? 0"></span>
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">ΔE≠0 episodes</div>
+          <div class="text-2xl font-mono font-bold text-ghw-warm" x-text="state?.provenance?.vitality?.episodes_nonzero_de ?? 0"></div>
+          <div class="text-xs text-ghw-dim mt-1">total=<span x-text="state?.provenance?.vitality?.episodes ?? 0"></span>
+            · E饱和=<span x-text="state?.provenance?.vitality?.e_saturated ? 'yes' : 'no'"></span></div>
+        </div>
+      </div>
+      <div class="text-xs text-ghw-dim mt-2">人类侧请用 <code>@task</code> 投递 + 任务评分, 推动 value_trend / GSP trust。</div>
+    </div>
+
     <!-- P12: 人类共生 ValueMetric 仪表盘 -->
-    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state && state.provenance && state.provenance.human_symbiosis">
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state?.provenance?.human_symbiosis">
       <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">人类共生 (ValueMetric)</h2>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div>
           <div class="text-xs text-ghw-dim">value_score</div>
-          <div class="text-2xl font-mono font-bold text-cyan-300" x-text="(state.provenance.human_symbiosis.value_score ?? 0).toFixed(3)"></div>
+          <div class="text-2xl font-mono font-bold text-cyan-300" x-text="(state?.provenance?.human_symbiosis?.value_score ?? 0).toFixed(3)"></div>
           <div class="h-2 bg-slate-800 rounded-full mt-2 overflow-hidden">
-            <div class="h-full bg-cyan-500 gauge-fill" :style="`width: ${((state.provenance.human_symbiosis.value_score ?? 0) * 100).toFixed(0)}%`"></div>
+            <div class="h-full bg-cyan-500 gauge-fill" :style="`width: ${((state?.provenance?.human_symbiosis?.value_score ?? 0) * 100).toFixed(0)}%`"></div>
           </div>
         </div>
         <div>
           <div class="text-xs text-ghw-dim">value_trend</div>
-          <div class="text-2xl font-mono font-bold" :class="valueTrendColor(state.provenance.human_symbiosis.value_trend)"
-               x-text="(state.provenance.human_symbiosis.value_trend ?? 0).toFixed(4)"></div>
-          <div class="text-xs text-ghw-dim mt-2" x-text="valueTrendHint(state.provenance.human_symbiosis.value_trend)"></div>
-          <div x-show="(state.provenance.human_symbiosis.samples || []).length" class="mt-3 flex items-end gap-0.5 h-10">
-            <template x-for="(v, i) in (state.provenance.human_symbiosis.samples || [])" :key="i">
+          <div class="text-2xl font-mono font-bold" :class="valueTrendColor(state?.provenance?.human_symbiosis?.value_trend)"
+               x-text="(state?.provenance?.human_symbiosis?.value_trend ?? 0).toFixed(4)"></div>
+          <div class="text-xs text-ghw-dim mt-2" x-text="valueTrendHint(state?.provenance?.human_symbiosis?.value_trend)"></div>
+          <div x-show="(state?.provenance?.human_symbiosis?.samples || []).length" class="mt-3 flex items-end gap-0.5 h-10">
+            <template x-for="(v, i) in (state?.provenance?.human_symbiosis?.samples || [])" :key="i">
               <div class="flex-1 bg-cyan-500/50 rounded-t min-h-[2px]"
                    :style="`height: ${Math.max(8, (v * 100)).toFixed(0)}%`"
                    :title="Number(v).toFixed(3)"></div>
@@ -199,24 +234,24 @@
         </div>
         <div>
           <div class="text-xs text-ghw-dim">反馈数</div>
-          <div class="text-2xl font-mono font-bold" x-text="state.provenance.human_symbiosis.feedback_count ?? 0"></div>
-          <div class="text-xs text-ghw-dim mt-2">human ΔE=<span x-text="(state.provenance.human_symbiosis.human_e_uplift ?? 0).toFixed(3)"></span></div>
+          <div class="text-2xl font-mono font-bold" x-text="state?.provenance?.human_symbiosis?.feedback_count ?? 0"></div>
+          <div class="text-xs text-ghw-dim mt-2">human ΔE=<span x-text="(state?.provenance?.human_symbiosis?.human_e_uplift ?? 0).toFixed(3)"></span></div>
         </div>
         <div>
           <div class="text-xs text-ghw-dim">投递任务</div>
           <div class="text-xs text-ghw-dim mt-2 font-mono">chat: <code>@task 描述</code> 强制入队</div>
           <div class="text-xs text-ghw-dim mt-1">或关键词: 帮我 / 任务 / 麻烦…</div>
-          <div x-show="state.provenance.rule_propose" class="text-xs text-ghw-dim mt-2 font-mono">
-            规则提议: <span x-text="state.provenance.rule_propose.enabled ? 'on' : 'off'"></span>
-            · total=<span x-text="state.provenance.rule_propose.total ?? 0"></span>
-            · rules=<span x-text="state.provenance.rule_propose.adopted_rules ?? 0"></span>
+          <div x-show="state?.provenance?.rule_propose" class="text-xs text-ghw-dim mt-2 font-mono">
+            规则提议: <span x-text="state?.provenance?.rule_propose?.enabled ? 'on' : 'off'"></span>
+            · total=<span x-text="state?.provenance?.rule_propose?.total ?? 0"></span>
+            · rules=<span x-text="state?.provenance?.rule_propose?.adopted_rules ?? 0"></span>
           </div>
         </div>
       </div>
-      <div x-show="(state.provenance.human_symbiosis.peers || []).length">
+      <div x-show="(state?.provenance?.human_symbiosis?.peers || []).length">
         <div class="text-xs text-ghw-dim uppercase tracking-wider mb-2">GSP Peers (trust)</div>
         <div class="flex flex-wrap gap-2">
-          <template x-for="p in (state.provenance.human_symbiosis.peers || [])" :key="p.id">
+          <template x-for="p in (state?.provenance?.human_symbiosis?.peers || [])" :key="p.id">
             <span class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs font-mono">
               <span x-text="p.id"></span>
               <span class="mx-1 text-ghw-dim">·</span>
@@ -935,33 +970,7 @@
             <span class="text-xs text-ghw-dim">每 64 cycle 一个 bucket · 实时刷新</span>
           </div>
           <div class="relative" style="height: 220px;">
-            <svg viewBox="0 0 800 200" preserveAspectRatio="none" class="w-full h-full">
-              <!-- 网格线 -->
-              <g stroke="#1e293b" stroke-width="0.5">
-                <line x1="40" y1="20" x2="790" y2="20"/>
-                <line x1="40" y1="60" x2="790" y2="60"/>
-                <line x1="40" y1="100" x2="790" y2="100"/>
-                <line x1="40" y1="140" x2="790" y2="140"/>
-                <line x1="40" y1="180" x2="790" y2="180"/>
-              </g>
-              <!-- 5 条折线: L1 L2 L3 L4 L5 -->
-              <template x-for="(series, name) in trendData" :key="name">
-                <polyline
-                  :points="series.map((p, i) => `${40 + (i * (750 / (series.length - 1 || 1)))},${180 - (p.count / Math.max(1, maxTrendValue) * 160)}`).join(' ')"
-                  fill="none"
-                  :stroke="{'l1': '#06b6d4', 'l2': '#8b5cf6', 'l3': '#10b981', 'l4': '#f59e0b', 'l5': '#ef4444'}[name] || '#94a3b8'"
-                  stroke-width="2"
-                  stroke-linecap="round"/>
-              </template>
-              <!-- X 轴 (tick 标签) -->
-              <g font-size="9" fill="#64748b" font-family="monospace">
-                <text x="40" y="198" text-anchor="middle">0</text>
-                <text x="227" y="198" text-anchor="middle">1k</text>
-                <text x="415" y="198" text-anchor="middle">2k</text>
-                <text x="602" y="198" text-anchor="middle">3k</text>
-                <text x="790" y="198" text-anchor="middle">4k</text>
-              </g>
-            </svg>
+            <div class="w-full h-full" x-html="trendChartHtml"></div>
             <!-- 图例 -->
             <div class="absolute top-2 right-2 flex gap-3 text-[10px]">
               <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-cyan-500"></span>L1</span>
@@ -982,71 +991,7 @@
                   x-text="`avg_delta = ${(proposeHistory.avg_delta >= 0 ? '+' : '')}${proposeHistory.avg_delta.toFixed(4)} · 反馈信号`"></span>
           </div>
           <div class="relative" style="height: 240px;">
-            <svg viewBox="0 0 800 220" preserveAspectRatio="none" class="w-full h-full">
-              <!-- 网格线 -->
-              <g stroke="#1e293b" stroke-width="0.5">
-                <line x1="40" y1="20" x2="790" y2="20"/>
-                <line x1="40" y1="65" x2="790" y2="65"/>
-                <line x1="40" y1="110" x2="790" y2="110"/>
-                <line x1="40" y1="155" x2="790" y2="155"/>
-                <line x1="40" y1="200" x2="790" y2="200"/>
-              </g>
-              <!-- Y 轴刻度 (E 0-1) -->
-              <g font-size="9" fill="#64748b" font-family="monospace">
-                <text x="35" y="22" text-anchor="end">1.0</text>
-                <text x="35" y="67" text-anchor="end">0.75</text>
-                <text x="35" y="112" text-anchor="end">0.5</text>
-                <text x="35" y="157" text-anchor="end">0.25</text>
-                <text x="35" y="202" text-anchor="end">0</text>
-              </g>
-              <!-- E line: 紫色实线 (新格式 e_after, 旧格式连 0) -->
-              <template x-if="proposeHistory.history && proposeHistory.history.length > 0">
-                <polyline
-                  :points="(proposeHistory.history || []).map((p, i) => {
-                    const n = proposeHistory.history.length;
-                    const x = 40 + (i * (750 / Math.max(1, n - 1)));
-                    const y = 200 - (p.e_after * 180);
-                    return `${x},${y}`;
-                  }).join(' ')"
-                  fill="none"
-                  stroke="#a855f7"
-                  stroke-width="2.5"
-                  stroke-linecap="round"/>
-              </template>
-              <!-- 4 系数 sub-plot: μ (红), ν (橙), σ (青), λ (黄) — 缩放到 200-180 范围 (0-0.5 系数) -->
-              <template x-for="(coef, idx) in [
-                { key: 'mu', color: '#ef4444' },
-                { key: 'nu', color: '#f97316' },
-                { key: 'sigma', color: '#06b6d4' },
-                { key: 'lambda', color: '#facc15' },
-              ]" :key="coef.key">
-                <polyline
-                  x-show="proposeHistory.history && proposeHistory.history.length > 0"
-                  :points="(proposeHistory.history || []).map((p, i) => {
-                    const n = proposeHistory.history.length;
-                    const x = 40 + (i * (750 / Math.max(1, n - 1)));
-                    // 系数 0-0.8 → 200-20 (顶部)
-                    const y = 200 - (p.coefs[coef.key] / 0.8 * 180);
-                    return `${x},${y}`;
-                  }).join(' ')"
-                  fill="none"
-                  :stroke="coef.color"
-                  stroke-width="1.5"
-                  stroke-dasharray="3,3"
-                  stroke-linecap="round"
-                  opacity="0.7"/>
-              </template>
-              <!-- tick 点 -->
-              <template x-for="(p, i) in proposeHistory.history || []" :key="`p-${p.tick}`">
-                <circle
-                  :cx="40 + (i * (750 / Math.max(1, (proposeHistory.history || []).length - 1)))"
-                  :cy="200 - (p.e_after * 180)"
-                  r="3"
-                  :fill="p.e_delta > 0 ? '#10b981' : (p.e_delta < 0 ? '#f43f5e' : '#a855f7')"
-                  stroke="#0f172a"
-                  stroke-width="1"/>
-              </template>
-            </svg>
+            <div class="w-full h-full" x-html="proposeChartHtml"></div>
             <!-- 图例 -->
             <div class="absolute top-2 right-2 flex flex-col gap-1 text-[10px]">
               <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-purple-500"></span>E (紫实线)</span>
@@ -1532,11 +1477,11 @@
         <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">与 GHW 对话</h2>
         <p class="text-xs text-ghw-dim mt-1">每条消息会触发 1 个 cycle, GHW 用自己的 E 状态回应</p>
         <div x-show="state?.provenance?.chat" class="text-xs text-ghw-dim mt-2 font-mono flex flex-wrap gap-x-3 gap-y-1">
-          <span>最近回复 memory=<span :class="state.provenance.chat.last_memory_injected ? 'text-emerald-300' : 'text-ghw-dim'"
-                x-text="state.provenance.chat.last_memory_injected ? 'on' : 'off'"></span></span>
-          <span>往事=<span x-text="state.provenance.chat.episode_count ?? 0"></span></span>
-          <span>信念=<span x-text="state.provenance.chat.belief_count ?? 0"></span></span>
-          <span>累计 memory 回复=<span x-text="state.provenance.chat.replies_with_memory ?? 0"></span></span>
+          <span>最近回复 memory=<span :class="state?.provenance?.chat?.last_memory_injected ? 'text-emerald-300' : 'text-ghw-dim'"
+                x-text="state?.provenance?.chat?.last_memory_injected ? 'on' : 'off'"></span></span>
+          <span>往事=<span x-text="state?.provenance?.chat?.episode_count ?? 0"></span></span>
+          <span>信念=<span x-text="state?.provenance?.chat?.belief_count ?? 0"></span></span>
+          <span>累计 memory 回复=<span x-text="state?.provenance?.chat?.replies_with_memory ?? 0"></span></span>
         </div>
       </div>
 
@@ -1581,5 +1526,27 @@
 </footer>
 
 <script src="/app.js"></script>
+<script>
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('ghwApp', ghwApp);
+    Alpine.data('phaseProgress', phaseProgress);
+  });
+</script>
+<script src="/vendor/alpine.min.js"></script>
+<script>
+  // Alpine 未加载时避免 x-cloak 永久隐藏整页
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      if (typeof window.Alpine === 'undefined') {
+        document.querySelectorAll('[x-cloak]').forEach(function (el) { el.removeAttribute('x-cloak'); });
+        var banner = document.createElement('div');
+        banner.className = 'ghw-fallback';
+        banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:12px;background:#7f1d1d;color:#fecaca;text-align:center;font-size:14px;';
+        banner.textContent = 'Alpine.js 未加载 — 请确认 ui_server 在运行且 /vendor/alpine.min.js 可访问';
+        document.body.prepend(banner);
+      }
+    }, 2500);
+  });
+</script>
 </body>
 </html>

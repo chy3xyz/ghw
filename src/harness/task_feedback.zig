@@ -11,6 +11,7 @@ const HumanGSP = @import("human_symbiosis/human_gsp.zig").HumanGSP;
 const HumanSignal = @import("human_symbiosis/human_signal.zig").HumanSignal;
 const HumanFeedback = @import("human_symbiosis/human_signal.zig").HumanFeedback;
 const task_runner = @import("task_runner.zig");
+const task_executor = @import("task_executor.zig");
 
 pub const Context = struct {
     queue: *TaskQueue,
@@ -69,7 +70,18 @@ pub fn runNextPendingWithFeedback(
     alloc: std.mem.Allocator,
     timestamp: u64,
 ) !?task_runner.RunResult {
-    const ran = try task_runner.runNextPending(agent, ctx.queue, alloc);
+    return runNextPendingWithFeedbackEnv(agent, ctx, alloc, timestamp, null);
+}
+
+/// P2: 带 ExecEnv 的有界真执行 + 启发式反馈
+pub fn runNextPendingWithFeedbackEnv(
+    agent: *GHWAgent,
+    ctx: *const Context,
+    alloc: std.mem.Allocator,
+    timestamp: u64,
+    env: ?task_executor.Env,
+) !?task_runner.RunResult {
+    const ran = try task_runner.runNextPendingWithEnv(agent, ctx.queue, alloc, env);
     if (ran) |r| {
         _ = try applyHeuristicIfMissing(ctx, r.task_id, r.actual_delta_e, timestamp);
     }

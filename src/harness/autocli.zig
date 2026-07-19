@@ -1,4 +1,4 @@
-//! AutoCLI — 数字生命 5min 周期拉外网世界, 写进 memory
+//! AutoCLI — 数字生命周期拉外网世界, 写进 Memory + sqlite
 //!
 //! 4 接口 (Phase 6 "六气" 之 跟自然):
 //! 1. Wikipedia random (单条 + abstract)
@@ -7,7 +7,7 @@
 //! 4. RSS BBC Tech (最新 1 条 title + summary)
 //!
 //! 用 std.process.spawn + curl 子进程, 零依赖
-//! 拉到的内容写 sqlite episodes 表 (kind="autocli_*"), 不阻塞 main runCycle
+//! 拉到的内容写 Memory.world_fetch + sqlite episodes (kind="autocli_*"), 不阻塞 main runCycle
 
 const std = @import("std");
 

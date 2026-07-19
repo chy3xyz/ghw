@@ -4,7 +4,8 @@
 // 架构: 单进程, 同时跑 GHW agent + HTTP server
 //   - GET  /                      → ui/index.html
 //   - GET  /app.js                → ui/app.js
-//   - GET  /api/state             → JSON 状态 {agent_id, tick, E, M, R, N, alpha, beta, gamma, self_evolved_total, top_goal}
+//   - GET  /api/state             → JSON 状态快照 (只读, 不跑 cycle)
+//   - POST /api/tick              → 推进 1 cycle, 返回 JSON 状态
 //   - GET  /api/log               → JSON 成长日志 (最近 100 周期)
 //   - GET  /api/chat/history      → HTML 片段 (HTMX swap)
 //   - POST /api/chat              → 接收消息, 跑 1 cycle, append HTML 片段
@@ -15,8 +16,8 @@
 //   # 后台长跑模式 (持续 tick)
 //   ./zig-out/bin/ui_server --port 8080 --auto-tick-ms 100
 //
-// 设计: 单线程, blocking accept loop. 每个 HTTP 请求触发 1 cycle (--auto-tick 模式跳过).
-//       client 端每秒 GET /api/state, 消息端用 POST /api/chat 触发 cycle.
+// 设计: blocking accept loop. GET /api/state 只读; --auto-tick-ms 或 POST /api/tick 推进生命.
+//       client 轮询 GET /api/state; chat 经 worker 跑 cycle (cycle_mutex 互斥).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -101,16 +102,11 @@ const ChatWorkerCtx = struct {
             std.debug.print("[chat-worker] 人类任务 #{d} 入队 pending={d}\n", .{ task_id, app.task_queue.pending_count });
         }
 
-        // 2. 跑 1 cycle + P8 统一 post-cycle 管道 (提议/任务/自省跟 GET /api/state 一致)
-        const report = runCycle(app) catch |err| {
-            std.debug.print("[chat-worker] runCycle 失败: {t}\n", .{err});
+        // 2. 跑 1 cycle + 全套 post-cycle (跟 auto-tick / POST /api/tick 一致, cycle_mutex 互斥)
+        const report = runAgentCycleLocked(app, self.alloc) catch |err| {
+            std.debug.print("[chat-worker] advanceAgentCycle 失败: {t}\n", .{err});
             return;
         };
-        appendGrowth(app, report) catch {};
-        runPostCyclePipeline(app, report) catch |err| {
-            std.debug.print("[chat-worker] post-cycle 失败: {t}\n", .{err});
-        };
-        recomputePersonality(app);
         const chat_summary = if (self.user_text.len > 80) self.user_text[0..80] else self.user_text;
         app.memory.recordAt(app.io, .user_chat, report.tick, chat_summary, self.user_text, 0, report.e_after - report.e_before) catch |err| {
             std.debug.print("[chat-worker] recordAt user_chat 失败: {t}\n", .{err});
@@ -264,6 +260,13 @@ const App = struct {
     memory: Memory,
     /// P6: 人类/LLM 任务队列 — proposeAndAdopt + 周期 runTask
     task_queue: TaskQueue,
+    /// P2: 最近一次任务有界动作 (static tag, 不 alloc)
+    last_task_action: []const u8 = "none",
+    last_task_acted: bool = false,
+    /// P3: 补救任务累计入队数
+    remedy_submitted_total: u32 = 0,
+    /// P4: 求存信念累计
+    survival_beliefs_total: u32 = 0,
     /// P9: 人类反馈 + 信任 (L6 HumanSignal / HumanGSP)
     human_gsp: HumanGSP,
     human_signal: HumanSignal,
@@ -307,10 +310,21 @@ const App = struct {
     port: u16,
     /// Chat history 锁 (POST chat + background worker 共享; std.Io.Mutex 接受 io)
     chat_mutex: std.Io.Mutex = .init,
+    /// Agent cycle 锁: runCycle / post-cycle / auto-tick / chat worker 互斥
+    cycle_mutex: std.Io.Mutex = .init,
     /// 无 LLM 模板自省最近 tick (>= 32 触发)
     last_template_reflect_tick: u64 = 0,
     auto_tick_ms: u64 = 0,
     last_tick_ns: i128 = 0,
+    /// GET /api/state 发现 cycle 锁被占用时置 true (只读快照仍返回)
+    cycle_busy: bool = false,
+    /// 最近一次成功推进 cycle 的 wall-clock (秒)
+    last_cycle_unix_s: i64 = 0,
+    /// RuleProposer 本机压力摘要缓冲 (持久, 供 setSystemPressure 指针)
+    system_pressure_buf: [192]u8 = undefined,
+    system_pressure_len: usize = 0,
+    /// world_sensor 上次投递 tick (节流)
+    last_world_sensor_tick: u64 = 0,
     // 静态资源缓存
     index_html: []u8 = &[_]u8{},
     app_js: []u8 = &[_]u8{},
@@ -425,6 +439,7 @@ const App = struct {
     /// Peer health check background thread handle
     peer_health_thread: ?std.Thread = null,
     peer_health_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    auto_tick_thread: ?std.Thread = null,
     /// 缓存: peer E 平均值 (0 = 没同伴, 供 E 函数层 reflect 共生关系)
     peer_E_avg: F = 0.0,
     /// 缓存: peer 总数 (>=1 时 σ 通道打开)
@@ -1135,6 +1150,10 @@ const Args = struct {
     cross_link_secret: []const u8 = "",
     /// P27: Cross-host peers.txt (peer_id:host:port:secret)
     cross_link_peers_file: []const u8 = "",
+    /// 禁用 AutoCLI 外网拉取
+    no_autocli: bool = false,
+    /// AutoCLI 拉取间隔秒 (默认 300 = 5min)
+    autocli_interval_s: u64 = 300,
 };
 
 fn parseArgs(raw: []const []const u8) Args {
@@ -1202,6 +1221,11 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--cross-link-peers")) {
             i += 1;
             if (i < raw.len) a.cross_link_peers_file = raw[i];
+        } else if (std.mem.eql(u8, arg, "--no-autocli")) {
+            a.no_autocli = true;
+        } else if (std.mem.eql(u8, arg, "--autocli-interval-s")) {
+            i += 1;
+            if (i < raw.len) a.autocli_interval_s = std.fmt.parseInt(u64, raw[i], 10) catch 300;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -1223,6 +1247,8 @@ fn printHelp() void {
         \\  --state PATH          state.json path (default state.json)
         \\  --ui-dir PATH         UI static dir (default ui)
         \\  --auto-tick-ms N      auto-tick interval, 0=manual only (default 0)
+        \\  --no-autocli          disable AutoCLI world fetch thread
+        \\  --autocli-interval-s N  AutoCLI interval seconds (default 300)
         \\  --id STR              agent id (default ghw-ui)
         \\  --seed N              LCG seed (default 42)
         \\  --product-intent PATH Enable product-runtime mode with ProductIntent JSON
@@ -1294,27 +1320,87 @@ fn runCycle(app: *App) !CycleReport {
     return report;
 }
 
-/// P6/P9: 每 32 tick 跑 1 个 pending 任务 + 启发式人类反馈
+/// 有效同伴数 (排除 health=self 的本机占位)
+fn countLiveGhwPeers(app: *const App) u32 {
+    var n: u32 = 0;
+    for (app.peers.items) |p| {
+        if (std.mem.eql(u8, p.health, "self")) continue;
+        n += 1;
+    }
+    return n;
+}
+
+/// E 接近天花板: ΔE 难涨, 应改推任务/同伴/人类价值
+fn eSaturated(app: *const App) bool {
+    return app.agent.ed.e() >= 0.98;
+}
+
+/// P6/P9/P2: 跑 pending 任务 (有界真执行) + 启发式人类反馈
+/// E 饱和或有积压时加速 (4/8 tick), 否则 32 tick — 避免冬眠时任务永远卡着
 fn maybeRunPendingTask(app: *App) void {
-    if (app.agent.tick == 0 or app.agent.tick % 32 != 0) return;
     if (app.task_queue.pending_count == 0) return;
+    const interval: u64 = if (eSaturated(app)) 4 else if (app.task_queue.pending_count >= 2) 8 else 32;
+    if (app.agent.tick == 0 or app.agent.tick % interval != 0) return;
     const ts: u64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
     const ctx = ghw_harness.task_feedback.Context{
         .queue = &app.task_queue,
         .gsp = &app.human_gsp,
         .signal = &app.human_signal,
     };
-    const ran = ghw_harness.task_feedback.runNextPendingWithFeedback(&app.agent, &ctx, app.alloc, ts) catch |err| {
+
+    var peer_refs_buf: [16]ghw_harness.task_executor.PeerRef = undefined;
+    var peer_n: usize = 0;
+    for (app.peers.items) |p| {
+        if (peer_n >= peer_refs_buf.len) break;
+        peer_refs_buf[peer_n] = .{ .path = p.path, .peer_id = p.peer_id, .health = p.health };
+        peer_n += 1;
+    }
+
+    var proc_buf: [8]ghw_harness.task_executor.ProcBrief = undefined;
+    var proc_n: usize = 0;
+    if (app.world.last) |ws| {
+        const lim = @min(ws.top_procs.len, proc_buf.len);
+        while (proc_n < lim) : (proc_n += 1) {
+            const tp = ws.top_procs[proc_n];
+            proc_buf[proc_n] = .{ .comm = tp.comm, .cpu_pct = tp.cpu_pct, .mem_pct = tp.mem_pct };
+        }
+    }
+
+    const exec_env = ghw_harness.task_executor.Env{
+        .snap = app.sys_collector.last,
+        .top_procs = proc_buf[0..proc_n],
+        .link = if (app.link) |*l| l else null,
+        .peers = peer_refs_buf[0..peer_n],
+    };
+
+    const ran = ghw_harness.task_feedback.runNextPendingWithFeedbackEnv(&app.agent, &ctx, app.alloc, ts, exec_env) catch |err| {
         std.debug.print("[ui] runNextPending 失败: {t}\n", .{err});
         return;
     };
     if (ran) |r| {
-        std.debug.print("[ui] tick={d} 任务 #{d} 「{s}」完成 ΔE={d:.3} ({d} cycles)\n", .{
-            app.agent.tick, r.task_id, r.title, r.actual_delta_e, r.cycles_used,
+        app.last_task_action = r.action_kind;
+        app.last_task_acted = r.acted;
+        if (r.remedy_submitted > 0) {
+            app.remedy_submitted_total += r.remedy_submitted;
+            std.debug.print("[ui] tick={d} survival_remedy 入队 {d} (total={d})\n", .{
+                app.agent.tick, r.remedy_submitted, app.remedy_submitted_total,
+            });
+        }
+        if (r.beliefs_added > 0) {
+            app.survival_beliefs_total += r.beliefs_added;
+            std.debug.print("[ui] tick={d} survival_learn +{d} beliefs (total={d}) crisis={}\n", .{
+                app.agent.tick, r.beliefs_added, app.survival_beliefs_total, r.host_crisis,
+            });
+        }
+        if (app.rule_proposer) |*p| {
+            p.setHostCrisis(r.host_crisis);
+        }
+        std.debug.print("[ui] tick={d} 任务 #{d} 「{s}」完成 ΔE={d:.3} ({d} cycles) action={s} acted={}\n", .{
+            app.agent.tick, r.task_id, r.title, r.actual_delta_e, r.cycles_used, r.action_kind, r.acted,
         });
         if (app.sqlite) |*db| {
-            const ep = std.fmt.allocPrint(app.alloc, "task_id={d} title={s} dE={d:.3}", .{
-                r.task_id, r.title, r.actual_delta_e,
+            const ep = std.fmt.allocPrint(app.alloc, "task_id={d} title={s} dE={d:.3} action={s}", .{
+                r.task_id, r.title, r.actual_delta_e, r.action_kind,
             }) catch null;
             if (ep) |e| {
                 defer app.alloc.free(e);
@@ -1427,7 +1513,26 @@ fn maybeAutoProposeRules(app: *App) void {
                 );
                 p.setKpiTrend(app.agent.ed.kpiTrend());
                 p.setValueTrend(app.value_tracker.trend());
-                if (p.shouldPropose(0.50)) {
+                if (app.sys_collector.last) |snap| {
+                    if (ghw_harness.world_sensor.formatPressureLine(app.alloc, snap)) |line| {
+                        defer app.alloc.free(line);
+                        const n = @min(line.len, app.system_pressure_buf.len);
+                        @memcpy(app.system_pressure_buf[0..n], line[0..n]);
+                        app.system_pressure_len = n;
+                        p.setSystemPressure(app.system_pressure_buf[0..app.system_pressure_len]);
+                    } else |_| {}
+                    // P4: 每 cycle 同步主机危机 (健康时清零, 避免永久触发)
+                    p.setHostCrisis(ghw_harness.survival_learn.isCrisisSnap(snap));
+                }
+                // E 饱和 alone 时限频 (每 16 tick), 避免每 cycle LLM 风暴
+                const due = p.shouldPropose(0.50);
+                const host_crisis = p.last_host_crisis;
+                const only_sat = eSaturated(app) and
+                    !host_crisis and
+                    app.agent.ed.e() >= 0.50 and
+                    app.value_tracker.trend() >= -ghw_harness.human_symbiosis.ValueTrendTracker.DECLINE_EPS and
+                    app.agent.ed.kpiTrend() >= -ghw_harness.rule_proposer.RuleProposer.KPI_DECLINE_EPS;
+                if (due and (!only_sat or app.agent.tick % 16 == 0)) {
                     var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
                         std.debug.print("[ui] rule proposeAndAdopt 失败: {t}\n", .{err});
                         return;
@@ -1448,7 +1553,10 @@ fn maybeAutoProposeGoals(app: *App) !void {
     if (app.goal_proposer) |*gp| {
         const since_last: u64 = app.agent.tick -% gp.last_propose_at_tick;
         const value_declining = app.value_tracker.trend() < -ghw_harness.human_symbiosis.ValueTrendTracker.DECLINE_EPS;
-        if (since_last >= gp.auto_every or gp.last_propose_at_tick == 0 or value_declining) {
+        // E 饱和时缩短提议间隔: 改推同伴/自省类目标, 而非空转高 E
+        const sat_due = eSaturated(app) and since_last >= @max(gp.auto_every / 4, @as(u64, 8));
+        const lonely = countLiveGhwPeers(app) == 0 and since_last >= @max(gp.auto_every / 2, @as(u64, 16));
+        if (since_last >= gp.auto_every or gp.last_propose_at_tick == 0 or value_declining or sat_due or lonely) {
             if (app.world.last) |prev_snap| {
                 var world_snap = app.world.dupSnapshot(prev_snap) catch |err| {
                     std.debug.print("[ui] dupSnapshot failed: {t}\n", .{err});
@@ -1534,6 +1642,25 @@ fn maybeAutoReflect(app: *App) void {
     }
 }
 
+/// P1: 本机压力 → world_sensor 任务 (无 LLM 也能求存)
+fn maybeWorldSensorTasks(app: *App) void {
+    // 每 8 tick 最多扫一次 (压力持续时靠 hasPendingTitlePrefix 去重)
+    if (app.agent.tick == 0) return;
+    if (app.agent.tick == app.last_world_sensor_tick) return;
+    if (app.agent.tick % 8 != 0) return;
+    const snap = app.sys_collector.last orelse return;
+    app.last_world_sensor_tick = app.agent.tick;
+    const r = ghw_harness.world_sensor.maybeSubmitFromSnapshot(&app.task_queue, snap, app.alloc) catch |err| {
+        std.debug.print("[ui] world_sensor 失败: {t}\n", .{err});
+        return;
+    };
+    if (r.submitted > 0) {
+        std.debug.print("[ui] tick={d} world_sensor 入队 {d} 个生存任务 (pending={d})\n", .{
+            app.agent.tick, r.submitted, app.task_queue.pending_count,
+        });
+    }
+}
+
 /// P8: GET /api/state 与 POST /api/chat 共用的 post-cycle 管道
 fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
     if (app.sqlite) |*db| {
@@ -1547,6 +1674,7 @@ fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
         };
         app.sqlite_episodes_written += 1;
     }
+    maybeWorldSensorTasks(app);
     maybeAutoReflect(app);
     try maybeAutoProposeGoals(app);
     maybeAutoProposeRules(app);
@@ -1574,7 +1702,7 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     } else {
         try body.appendSlice(alloc, "null");
     }
-    try body.appendSlice(alloc, "}},\"task_queue\":{");
+    try body.appendSlice(alloc, "},\"task_queue\":{");
     try body.print(alloc, "\"pending\":{d},\"total\":{d},\"completed\":{d}", .{
         app.task_queue.pending_count,
         app.task_queue.tasks.items.len,
@@ -1584,7 +1712,8 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     vm.pullFromSignal(&app.human_signal);
     vm.pullFromQueue(&app.task_queue);
     vm.pullFromGSP(&app.human_gsp);
-    try body.print(alloc, "}},\"human_symbiosis\":{{\"value_score\":{d:.3},\"value_trend\":{d:.4},", .{
+    try body.appendSlice(alloc, "},\"human_symbiosis\":{");
+    try body.print(alloc, "\"value_score\":{d:.3},\"value_trend\":{d:.4},", .{
         vm.valueScore(), app.value_tracker.trend(),
     });
     try app.value_tracker.appendRecentSamplesJson(alloc, body);
@@ -1610,13 +1739,63 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     });
     try body.appendSlice(alloc, "},\"chat\":{");
     const cr = app.last_chat_reply;
-    try body.print(alloc, "\"last_memory_injected\":{s},\"last_tick\":{d},\"replies_with_memory\":{d},\"episode_count\":{d},\"belief_count\":{d}}}}}", .{
+    try body.print(alloc, "\"last_memory_injected\":{s},\"last_tick\":{d},\"replies_with_memory\":{d},\"episode_count\":{d},\"belief_count\":{d}", .{
         if (cr.memory_injected) "true" else "false",
         if (app.chat_history.items.len > 0) app.chat_history.items[app.chat_history.items.len - 1].tick else 0,
         app.chat_replies_with_memory,
         cr.episode_count,
         cr.belief_count,
     });
+    try body.appendSlice(alloc, "},\"peer_influence\":{\"peer_count\":");
+    try body.print(alloc, "{d},\"peer_E_avg\":{d:.3},\"sigma\":{d:.3}", .{
+        app.peer_count_cached, app.peer_E_avg, app.agent.ed.sigma,
+    });
+    // 生命代谢看板 (P0/P1): 别只看 E≈1
+    var nonzero_de: u32 = 0;
+    for (app.memory.episodes.items) |ep| {
+        if (ep.delta_e > 0.001 or ep.delta_e < -0.001) nonzero_de += 1;
+    }
+    const live_peers = countLiveGhwPeers(app);
+    const now_s = std.Io.Clock.real.now(app.io).toSeconds();
+    const secs_since_cycle: i64 = if (app.last_cycle_unix_s > 0) now_s - app.last_cycle_unix_s else -1;
+    const value_flat = @abs(app.value_tracker.trend()) < 0.0001 and app.value_tracker.count >= 8;
+    const metabolism: []const u8 = blk: {
+        if (app.auto_tick_ms == 0 and secs_since_cycle > 120) break :blk "stalled";
+        if (app.cycle_busy) break :blk "busy";
+        if (app.auto_tick_ms > 0 and secs_since_cycle >= 0 and secs_since_cycle < @as(i64, @intCast(app.auto_tick_ms / 1000 * 3 + 60))) break :blk "active";
+        if (secs_since_cycle >= 0 and secs_since_cycle < 90) break :blk "active";
+        break :blk "idle";
+    };
+    try body.appendSlice(alloc, "},\"vitality\":{");
+    try body.print(alloc,
+        \\"e_saturated":{s},"auto_tick_ms":{d},"cycle_busy":{s},"live_peers":{d},"pending_tasks":{d},"completed_tasks":{d},"episodes":{d},"episodes_nonzero_de":{d},"value_flat":{s},"secs_since_cycle":{d},"metabolism":"{s}","phase_honest":{d}
+    , .{
+        if (eSaturated(app)) "true" else "false",
+        app.auto_tick_ms,
+        if (app.cycle_busy) "true" else "false",
+        live_peers,
+        app.task_queue.pending_count,
+        app.task_queue.completed_count,
+        app.memory.episodes.items.len,
+        nonzero_de,
+        if (value_flat) "true" else "false",
+        secs_since_cycle,
+        metabolism,
+        app.phase_progress,
+    });
+    var world_fetch_count: u32 = 0;
+    for (app.memory.episodes.items) |ep| {
+        if (ep.kind == .world_fetch) world_fetch_count += 1;
+    }
+    try body.appendSlice(alloc, "},\"survival\":{");
+    try body.print(alloc, "\"world_fetch_count\":{d},\"last_task_action\":\"{s}\",\"last_task_acted\":{s},\"remedy_submitted_total\":{d},\"survival_beliefs_total\":{d}", .{
+        world_fetch_count,
+        app.last_task_action,
+        if (app.last_task_acted) "true" else "false",
+        app.remedy_submitted_total,
+        app.survival_beliefs_total,
+    });
+    try body.appendSlice(alloc, "}}");
 }
 
 /// LLM 不可用时的回退模板 (4 套根据 E)
@@ -2126,18 +2305,83 @@ fn handleGetAppJs(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
     try writeResponse(conn, io, resp);
 }
 
-fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
-    // 跑 1 cycle 让 E 推进
-    const report = runCycle(app) catch |err| {
-        std.debug.print("[ui] cycle 失败: {t}\n", .{err});
-        const err_body = try alloc.dupe(u8, "{\"error\":\"cycle failed\"}");
-        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+/// 提供 ui/vendor/* 静态文件 (Alpine/HTMX 本地化, 不依赖外网 CDN)
+fn handleGetVendorStatic(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, path: []const u8) !void {
+    if (!std.mem.startsWith(u8, path, "/vendor/")) {
+        const resp = try makeHttpResponse(alloc, 403, "Forbidden", "text/plain", "forbidden");
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+    const rel = path["/vendor/".len..];
+    if (rel.len == 0 or std.mem.indexOf(u8, rel, "..") != null) {
+        const resp = try makeHttpResponse(alloc, 403, "Forbidden", "text/plain", "forbidden");
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.process.currentPath(app.io, &cwd_buf);
+    const cwd = cwd_buf[0..cwd_len];
+    const file_path = if (std.fs.path.isAbsolute(app.ui_dir))
+        try std.fs.path.join(alloc, &[_][]const u8{ app.ui_dir, "vendor", rel })
+    else
+        try std.fs.path.join(alloc, &[_][]const u8{ cwd, app.ui_dir, "vendor", rel });
+    defer alloc.free(file_path);
+    const body = readFile(alloc, app.io, file_path) catch {
+        const resp = try makeHttpResponse(alloc, 404, "Not Found", "text/plain", "not found");
         defer alloc.free(resp);
         try writeResponse(conn, io, resp);
         return;
     };
+    defer alloc.free(body);
+    const ct = if (std.mem.endsWith(u8, rel, ".js"))
+        "application/javascript; charset=utf-8"
+    else
+        "application/octet-stream";
+    const resp = try makeHttpResponse(alloc, 200, "OK", ct, body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+fn runAgentCycleLocked(app: *App, alloc: Allocator) !CycleReport {
+    app.cycle_mutex.lockUncancelable(app.io);
+    defer app.cycle_mutex.unlock(app.io);
+    return advanceAgentCycle(app, alloc);
+}
+
+fn autoTickThreadFn(app: *App) void {
+    while (!should_stop_ui.load(.acquire)) {
+        const ms = app.auto_tick_ms;
+        if (ms == 0) return;
+        app.io.sleep(.{ .nanoseconds = @intCast(ms * std.time.ns_per_ms) }, std.Io.Clock.real) catch {};
+        if (should_stop_ui.load(.acquire)) return;
+        _ = runAgentCycleLocked(app, app.alloc) catch |err| {
+            std.debug.print("[auto-tick] cycle 失败: {t}\n", .{err});
+        };
+    }
+}
+
+/// 跑 1 cycle + post-cycle + action/L1-L5/phase 维护 (原 GET /api/state 副作用)
+fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
+    const report = try runCycle(app);
     try appendGrowth(app, report);
     try saveState(app);
+
+    // 每 tick 写自传体 episode (带 ΔE) — 避免「高 E、零往事」的假连续
+    {
+        const de = report.e_after - report.e_before;
+        const goal = if (report.top_goal) |g| @tagName(g.kind) else "observe";
+        const weak = Memory.weakestDim(app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature);
+        const summary = std.fmt.allocPrint(alloc, "cycle goal={s} E={d:.3} dE={d:.4}", .{ goal, report.e_after, de }) catch null;
+        if (summary) |s| {
+            defer alloc.free(s);
+            app.memory.recordAt(app.io, .system_event, report.tick, s, null, weak, de) catch |err| {
+                std.debug.print("[ui] recordAt cycle 失败: {t}\n", .{err});
+            };
+        }
+        app.last_cycle_unix_s = std.Io.Clock.real.now(app.io).toSeconds();
+    }
 
     // P8: 自省 + LLM 提议入队 + 跑 pending 任务 (与 POST /api/chat 共用)
     try runPostCyclePipeline(app, report);
@@ -2338,9 +2582,10 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
     // 1: 基础自我 | 2: 多体 | 3: LLM 提议 | 4: 自演化 | 5: 自我完善
     // 6: 六气 (6 接口) | 7: 七步反思 | 8: 八种关系 | 9: 九宫 (E 方差 < 0.01)
     {
-        // 状态检测 (按 phase 倒序 check, 用 @max 保证只升不降)
+        // 状态检测: 每 cycle 重算 (可降级), 同伴排除 self 占位
         var new_phase: u8 = 1;
-        if (app.peers.items.len > 0) new_phase = @max(new_phase, 2);
+        const live_peers = countLiveGhwPeers(app);
+        if (live_peers > 0) new_phase = @max(new_phase, 2);
         if (app.llm_chat != null and app.reflection != null) new_phase = @max(new_phase, 3);
         if (app.self_evolve_l3_approved > 0) new_phase = @max(new_phase, 4);
         if (app.enhance_results.items.len > 0) new_phase = @max(new_phase, 5);
@@ -2348,10 +2593,14 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         if (app.six_interfaces_done >= 6) new_phase = @max(new_phase, 6);
         if (app.seven_reflection_done >= 7) new_phase = @max(new_phase, 7);
         if (app.eight_relations_seen > 0) new_phase = @max(new_phase, 8);
-        if (app.nine_palaces_e_var_seen > 0) new_phase = @max(new_phase, 9);
-        // Phase 9 deep: M/R/N 平衡 跟 E 平衡是并列成就 (需要更严格的"三源合恰"状态)
-        if (app.nine_palaces_mrn_seen > 0) new_phase = @max(new_phase, 9);
-        if (app.nine_palaces_mrn_strong_seen > 0) new_phase = @max(new_phase, 9);
+        // 九宫: 有 E/MRN 稳态里程碑; 无 live peer 时封顶 8 (不把孤独稳态叫满宫)
+        if (app.nine_palaces_e_var_seen > 0 or app.nine_palaces_mrn_seen > 0 or app.nine_palaces_mrn_strong_seen > 0) {
+            if (live_peers > 0) {
+                new_phase = @max(new_phase, 9);
+            } else {
+                new_phase = @max(new_phase, 8);
+            }
+        }
         // Phase 8 状态检测: GoalGraph 看到 ≥3 种不同关系 (8 关系 schema 触发)
         const distinct_relations = app.agent.goal_graph.countDistinctRelations();
         if (distinct_relations >= 3 and app.eight_relations_seen == 0) {
@@ -2385,8 +2634,12 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
             }
         }
 
-        if (new_phase > app.phase) {
-            std.debug.print("[phase] 阶段晋升: {d} → {d} (tick={d})\n", .{ app.phase, new_phase, app.agent.tick });
+        if (new_phase != app.phase) {
+            if (new_phase > app.phase) {
+                std.debug.print("[phase] 阶段晋升: {d} → {d} (tick={d} live_peers={d})\n", .{ app.phase, new_phase, app.agent.tick, live_peers });
+            } else {
+                std.debug.print("[phase] 诚实回退: {d} → {d} (tick={d} live_peers={d})\n", .{ app.phase, new_phase, app.agent.tick, live_peers });
+            }
             app.phase = new_phase;
         }
         app.phase_progress = new_phase;
@@ -2561,7 +2814,7 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
 
     // === Phase 8.7 L4 闭环扩展: LLM 提议 4 系数新值 (每 128 cycle 跑 1 次) ===
     // 数字生命自己用 LLM 提议 μ/ν/σ/λ 4 系数, range 限定 (不变性), apply
-    if (app.llm_chat != null and app.agent.tick > 0 and app.agent.tick % 8 == 0) {
+    if (app.llm_chat != null and app.agent.tick > 0 and app.agent.tick % 128 == 0) {
         // Phase 9 宫 deep: 算 9 宫 deep 数据 → 注入 LLM 提示让提议更精准
         const mrn_var_now = app.agent.ed.v.variance();
         const mrn_min_now = app.agent.ed.v.min();
@@ -2639,12 +2892,11 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
             };
             // Phase 8.7 LLM 提议 4 系数: if (complete) parse, else skip
             if (app.llm_chat) |chat| {
-                var resp = chat.complete(req, alloc) catch {
-                    std.debug.print("[phase-8.7] tick={d} LLM 失败, 跳提议\n", .{app.agent.tick});
-                    return;
-                };
-                defer resp.deinit();
-                if (resp.content) |content| {
+                const maybe_resp = chat.complete(req, alloc) catch null;
+                if (maybe_resp) |resp_val| {
+                    var resp = resp_val;
+                    defer resp.deinit();
+                    if (resp.content) |content| {
                     // 解析 JSON: 提取 mu/nu/sigma/lambda 4 数字
                     var mu_val: f32 = 0;
                     var nu_val: f32 = 0;
@@ -2716,13 +2968,31 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
                         }
                     }
                 }
-            } else {
-                std.debug.print("[phase-8.7] tick={d} LLM 失败, 跳提议\n", .{app.agent.tick});
             }
         }
     }
+    }
 
-    const goal_str = if (report.top_goal) |g| @tagName(g.kind) else "—";
+    saveState(app) catch |err| std.debug.print("[ui] advanceAgentCycle saveState 失败: {t}\n", .{err});
+    return report;
+}
+
+fn buildStateJson(alloc: Allocator, app: *App, report_opt: ?CycleReport) ![]u8 {
+    const tick: u64 = if (report_opt) |report| report.tick else app.agent.tick;
+    const e_after: F = if (report_opt) |report| report.e_after else app.agent.ed.e();
+    const self_evolved: bool = if (report_opt) |report| report.self_evolved else blk: {
+        if (app.growth_log.items.len == 0) break :blk false;
+        break :blk app.growth_log.items[app.growth_log.items.len - 1].self_evolved;
+    };
+    const goal_str: []const u8 = if (report_opt) |report| blk: {
+        if (report.top_goal) |g| break :blk @tagName(g.kind);
+        break :blk "—";
+    } else blk: {
+        if (app.growth_log.items.len == 0) break :blk "—";
+        const last = app.growth_log.items[app.growth_log.items.len - 1];
+        if (last.goal) |g| break :blk g;
+        break :blk "—";
+    };
     const sys_snap = app.sys_collector.last orelse SystemSnapshot{
         .cpu_user_pct = 0, .cpu_sys_pct = 0, .cpu_idle_pct = 0,
         .mem_used_gb = 0, .mem_total_gb = 0, .mem_pct = 0,
@@ -2755,9 +3025,8 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
     try proposed_json.append(alloc, ']');
 
     var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(alloc);
-    const self_evolved_int: u8 = if (report.self_evolved) 1 else 0;
-    const report_self_evolved = self_evolved_int;
+    errdefer body.deinit(alloc);
+    const self_evolved_int: u8 = if (self_evolved) 1 else 0;
     try body.print(alloc,
         \\{{"agent_id":"{s}","tick":{d},"E":{d:.6},"M":{d:.6},"R":{d:.6},"N":{d:.6},"alpha":{d:.6},"beta":{d:.6},"gamma":{d:.6},"self_evolved":{d},"self_evolved_total":{d},"top_goal":"{s}","propose_total":{d},"last_propose_tick":{d},
         \\"system":{{"cpu_pct":{d:.2},"mem_pct":{d:.2},"mem_used_gb":{d:.2},"mem_total_gb":{d:.2},"load_1m":{d:.2},"disk_pct":{d:.2},"procs":{d},"net_in_mbps":{d:.4},"net_out_mbps":{d:.4},"disk_read_mbps":{d:.4},"disk_write_mbps":{d:.4},"hour":{d},"weekday":{d}}},
@@ -2767,15 +3036,15 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         \\"action_count":{d}
     , .{
         app.agent.self_id,
-        report.tick,
-        report.e_after,
+        tick,
+        e_after,
         app.agent.ed.v.material,
         app.agent.ed.v.representation,
         app.agent.ed.v.nature,
         app.agent.ed.weights.alpha,
         app.agent.ed.weights.beta,
         app.agent.ed.weights.gamma,
-        report_self_evolved,
+        self_evolved_int,
         app.self_evolve_total,
         goal_str,
         app.propose_total,
@@ -2798,15 +3067,57 @@ fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         proposed_json.items,
         app.action_count,
     });
-    // 单独追加 provenance + task_queue + peer_influence + 关闭外层对象
+    // provenance + task_queue + peer_influence + 关闭外层对象
     try appendProvenanceJson(alloc, &body, app);
-    try body.print(alloc, ",\"peer_influence\":{{\"peer_count\":{d},\"peer_E_avg\":{d:.3},\"sigma\":{d:.3}}}}}", .{ app.peer_count_cached, app.peer_E_avg, app.agent.ed.sigma });
+    try body.append(alloc, '}'); // close root state object
+    return try body.toOwnedSlice(alloc);
+}
 
-    // 二次 saveState: 上面 reflection/propose/action 块可能更新了 self_narrative,
-    // 第一次 saveState (line 762) 写的是 update 前的旧 narrative. 这次再写一次保证 state.json 同步.
-    saveState(app) catch |err| std.debug.print("[ui] 二 saveState 失败: {t}\n", .{err});
+/// GET /api/state — 只读快照, 不跑 cycle (生命推进靠 auto-tick / POST /api/tick / chat)
+fn handleGetState(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    // 不阻塞轮询: cycle 忙时返回可能略旧的快照, 避免 UI 整页超时像「挂了」
+    const locked = app.cycle_mutex.tryLock();
+    app.cycle_busy = !locked;
+    defer {
+        if (locked) app.cycle_mutex.unlock(app.io);
+        app.cycle_busy = false;
+    }
+    const json = buildStateJson(alloc, app, null) catch |err| {
+        std.debug.print("[ui] buildStateJson 失败: {t}\n", .{err});
+        const err_body = try alloc.dupe(u8, "{\"error\":\"state build failed\"}");
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    defer alloc.free(json);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", json);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
 
-    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+/// POST /api/tick — 手动推进 1 cycle + 全套维护, 返回最新 state JSON
+fn handlePostTick(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    app.cycle_mutex.lockUncancelable(app.io);
+    defer app.cycle_mutex.unlock(app.io);
+    const report = advanceAgentCycle(app, alloc) catch |err| {
+        std.debug.print("[ui] tick cycle 失败: {t}\n", .{err});
+        const err_body = try alloc.dupe(u8, "{\"error\":\"cycle failed\"}");
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    const json = buildStateJson(alloc, app, report) catch |err| {
+        std.debug.print("[ui] tick buildStateJson 失败: {t}\n", .{err});
+        const err_body = try alloc.dupe(u8, "{\"error\":\"state build failed\"}");
+        const resp = try makeHttpResponse(alloc, 500, "Internal Server Error", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    defer alloc.free(json);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", json);
     defer alloc.free(resp);
     try writeResponse(conn, io, resp);
 }
@@ -3370,7 +3681,7 @@ fn handleGetCapabilities(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io,
         app.phase,
         phase_names[phase_idx],
         app.phase_progress,
-        if (app.peers.items.len > 0) "true" else "false",
+        if (countLiveGhwPeers(app) > 0) "true" else "false",
         if (app.llm_chat != null) "true" else "false",
         if (app.self_evolve_l3_approved > 0) "true" else "false",
         if (app.enhance_results.items.len > 0) "true" else "false",
@@ -4673,8 +4984,8 @@ fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !Ht
 }
 
 // ===== HTTP server 主循环 =====
-/// AutoCLI background thread: 5min 1 次拉 4 接口外网数据
-/// 写 sqlite episodes (kind="autocli_*"), 触发 phase 6 "自然" 接口
+/// AutoCLI background thread: 周期拉 4 接口外网数据
+/// 写 sqlite + Memory.recordAt(.world_fetch), 触发 phase 6 "自然" 接口
 fn autocliThreadFn(app: *App) void {
     const alloc = app.alloc;
     while (!app.autocli_stop.load(.seq_cst)) {
@@ -4688,17 +4999,17 @@ fn autocliThreadFn(app: *App) void {
                 }
                 ac.fetchAll(&items) catch {};
 
-                // 写 sqlite
-                if (app.sqlite) |*db| {
-                    for (items.items) |it| {
-                        const kind_str = switch (it.source) {
-                            .wikipedia => "autocli_wiki",
-                            .hackernews => "autocli_hn",
-                            .arxiv => "autocli_arxiv",
-                            .rss => "autocli_rss",
-                        };
-                        const body = std.fmt.allocPrint(alloc, "{s}\n{s}\nURL: {s}", .{ it.title, it.snippet, it.url }) catch continue;
-                        defer alloc.free(body);
+                // 写 sqlite + Memory (外网进入自传体, Goal/Rule/chat 可检索)
+                for (items.items) |it| {
+                    const kind_str = switch (it.source) {
+                        .wikipedia => "autocli_wiki",
+                        .hackernews => "autocli_hn",
+                        .arxiv => "autocli_arxiv",
+                        .rss => "autocli_rss",
+                    };
+                    const body = std.fmt.allocPrint(alloc, "{s}\n{s}\nURL: {s}", .{ it.title, it.snippet, it.url }) catch continue;
+                    defer alloc.free(body);
+                    if (app.sqlite) |*db| {
                         _ = db.insertEpisode(
                             @intCast(app.agent.tick),
                             kind_str,
@@ -4707,14 +5018,22 @@ fn autocliThreadFn(app: *App) void {
                             "autocli",
                         ) catch {};
                     }
+                    const summary = std.fmt.allocPrint(alloc, "[{s}] {s}", .{ kind_str, it.title }) catch continue;
+                    defer alloc.free(summary);
+                    // 外网知识优先 representation (R), 探索/求知
+                    app.memory.recordAt(app.io, .world_fetch, app.agent.tick, summary, body, 2, 0) catch |err| {
+                        std.debug.print("[autocli] Memory.recordAt 失败: {t}\n", .{err});
+                    };
                 }
 
                 // 触发 phase 6 (六气 "自然" 接口)
                 if (items.items.len > 0 and !app.autocli_done) {
                     app.autocli_done = true;
-                    std.debug.print("[autocli] ✓ 首次拉取 {d} 条 (触发 phase 6)\n", .{items.items.len});
+                    std.debug.print("[autocli] ✓ 首次拉取 {d} 条 → Memory+sqlite (触发 phase 6)\n", .{items.items.len});
                 } else {
-                    std.debug.print("[autocli] 拉取 {d} 条 (累计 {d} 条, 错误 {d})\n", .{ items.items.len, ac.total_fetched, ac.error_count });
+                    std.debug.print("[autocli] 拉取 {d} 条 (累计 {d}, 错误 {d}, episodes={d})\n", .{
+                        items.items.len, ac.total_fetched, ac.error_count, app.memory.episodes.items.len,
+                    });
                 }
                 ac.markFetched(now_ns);
             }
@@ -4723,6 +5042,71 @@ fn autocliThreadFn(app: *App) void {
         app.io.sleep(.{ .nanoseconds = @intCast(30 * std.time.ns_per_s) }, std.Io.Clock.real) catch {};
     }
     std.debug.print("[autocli] 退出\n", .{});
+}
+
+/// GET /api/world — 本机快照 + AutoCLI 状态 + 最近 world_fetch episodes
+fn handleGetWorld(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, "{\"system\":");
+    if (app.sys_collector.last) |s| {
+        try body.print(alloc,
+            \\{{"cpu_pct":{d:.2},"mem_pct":{d:.2},"mem_used_gb":{d:.2},"mem_total_gb":{d:.2},"disk_pct":{d:.2},"load_1m":{d:.2},"procs":{d},"net_in_mbps":{d:.4},"net_out_mbps":{d:.4},"hour":{d},"weekday":{d},"timestamp":{d}}}
+        , .{
+            s.cpu_user_pct + s.cpu_sys_pct,
+            s.mem_pct,
+            s.mem_used_gb,
+            s.mem_total_gb,
+            s.disk_used_pct,
+            s.load_1m,
+            s.proc_count,
+            s.net_in_mbps,
+            s.net_out_mbps,
+            s.hour,
+            s.weekday,
+            s.timestamp,
+        });
+    } else {
+        try body.appendSlice(alloc, "null");
+    }
+    try body.appendSlice(alloc, ",\"autocli\":{");
+    if (app.autocli) |*ac| {
+        try body.print(alloc, "\"enabled\":true,\"total_fetched\":{d},\"error_count\":{d},\"has_fetched\":{s},\"interval_s\":{d}", .{
+            ac.total_fetched,
+            ac.error_count,
+            if (ac.has_fetched) "true" else "false",
+            @as(u64, @intCast(@divTrunc(ac.interval_ns, std.time.ns_per_s))),
+        });
+    } else {
+        try body.appendSlice(alloc, "\"enabled\":false,\"total_fetched\":0,\"error_count\":0,\"has_fetched\":false,\"interval_s\":0");
+    }
+    try body.appendSlice(alloc, "},\"recent_fetches\":[");
+    var first = true;
+    var count: u32 = 0;
+    var i: usize = app.memory.episodes.items.len;
+    while (i > 0 and count < 8) {
+        i -= 1;
+        const ep = app.memory.episodes.items[i];
+        if (ep.kind != .world_fetch) continue;
+        if (!first) try body.append(alloc, ',');
+        first = false;
+        try body.print(alloc, "{{\"tick\":{d},\"summary\":\"", .{ep.tick});
+        // escape summary briefly
+        for (ep.summary) |c| {
+            if (c == '"' or c == '\\') try body.append(alloc, '\\');
+            if (c == '\n') {
+                try body.appendSlice(alloc, "\\n");
+                continue;
+            }
+            try body.append(alloc, c);
+        }
+        try body.appendSlice(alloc, "\"}");
+        count += 1;
+    }
+    try body.appendSlice(alloc, "]}");
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
 }
 
 fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u16) !void {
@@ -4750,6 +5134,8 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetRoot(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/app.js")) {
                 try handleGetAppJs(alloc, &stream, io, app);
+            } else if (std.mem.startsWith(u8, req.path, "/vendor/")) {
+                try handleGetVendorStatic(alloc, &stream, io, app, req.path);
             } else if (std.mem.eql(u8, req.path, "/api/state")) {
                 try handleGetState(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/log")) {
@@ -4794,6 +5180,8 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetActionList(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/peers")) {
                 try handleGetPeers(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/world")) {
+                try handleGetWorld(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/metrics")) {
                 try handleGetMetrics(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/goals/relations")) {
@@ -4807,6 +5195,8 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
         } else if (std.mem.eql(u8, req.method, "POST")) {
             if (std.mem.eql(u8, req.path, "/api/chat")) {
                 try handlePostChat(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/tick")) {
+                try handlePostTick(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/task/feedback")) {
                 try handlePostTaskFeedback(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/tasks")) {
@@ -4947,6 +5337,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .ui_dir = args.ui_dir,
         .port = args.port,
         .admin_token = admin_token_value,
+        .auto_tick_ms = args.auto_tick_ms,
     };
     app.agent = try GHWAgent.init(alloc, args.agent_id, 4, .{ 3, 3, 3 }, args.seed);
     app.agent.bindTaskQueue(&app.task_queue);
@@ -5534,21 +5925,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try loadStaticAssets(&app);
     std.debug.print("[ui] 静态资源加载: index.html={d}B, app.js={d}B\n", .{ app.index_html.len, app.app_js.len });
 
-    // === AutoCLI: 启动 background thread, 5min 1 次拉外网 ===
-    // 4 接口 (Wikipedia/HN/ArXiv/RSS), 写 memory
-    app.autocli = ghw.harness.autocli.AutoCLI.init(alloc, io);
-    if (std.Thread.spawn(.{}, autocliThreadFn, .{&app})) |t| {
-        app.autocli_thread = t;
-    } else |err| {
-        std.debug.print("[ui] AutoCLI 启动失败: {t}, 跳过\n", .{err});
+    // === AutoCLI: 外网拉取 → Memory + sqlite (可 --no-autocli / --autocli-interval-s) ===
+    if (!args.no_autocli) {
+        var ac = ghw.harness.autocli.AutoCLI.init(alloc, io);
+        const interval_s = if (args.autocli_interval_s == 0) 300 else args.autocli_interval_s;
+        ac.interval_ns = @as(i128, @intCast(interval_s)) * std.time.ns_per_s;
+        app.autocli = ac;
+        if (std.Thread.spawn(.{}, autocliThreadFn, .{&app})) |t| {
+            app.autocli_thread = t;
+            std.debug.print("[ui] AutoCLI 启用: 每 {d}s 拉 4 接口 → Memory.world_fetch (Wiki/HN/ArXiv/RSS)\n", .{interval_s});
+        } else |err| {
+            std.debug.print("[ui] AutoCLI 启动失败: {t}, 跳过\n", .{err});
+        }
+    } else {
+        std.debug.print("[ui] AutoCLI 已禁用 (--no-autocli)\n", .{});
     }
-    std.debug.print("[ui] AutoCLI 启用: 5min 1 次拉 4 接口 (Wikipedia/HN/ArXiv/RSS)\n", .{});
+    if (app.auto_tick_ms > 0) {
+        if (std.Thread.spawn(.{}, autoTickThreadFn, .{&app})) |t| {
+            app.auto_tick_thread = t;
+            std.debug.print("[ui] Auto-tick 启用: 每 {d}ms 推进 1 cycle (GET /api/state 只读)\n", .{app.auto_tick_ms});
+        } else |err| {
+            std.debug.print("[ui] Auto-tick 启动失败: {t}\n", .{err});
+        }
+    }
 
     try runServer(alloc, io, &app, args.host, args.port);
 
     // 停止 AutoCLI thread
     app.autocli_stop.store(true, .seq_cst);
     if (app.autocli_thread) |t| t.join();
+    if (app.auto_tick_thread) |t| t.join();
 
     std.debug.print("[ui] 收到停止信号, 退出\n", .{});
 }

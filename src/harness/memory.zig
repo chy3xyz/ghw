@@ -32,6 +32,7 @@ pub const EpisodeKind = enum {
     task_completed, // TaskQueue 任务完成
     reflection, // 自省周期触发
     peer_discovered, // 发现其他 GHW
+    world_fetch, // AutoCLI 外网拉取 (Wiki/HN/ArXiv/RSS)
 };
 
 pub const Episode = struct {
