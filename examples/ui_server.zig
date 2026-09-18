@@ -267,6 +267,42 @@ const App = struct {
     remedy_submitted_total: u32 = 0,
     /// P4: 求存信念累计
     survival_beliefs_total: u32 = 0,
+    /// P5a: 人类介入任务累计 + AutoCLI 节流
+    act_human_total: u32 = 0,
+    autocli_base_interval_s: u64 = 300,
+    autocli_interval_override_s: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    /// P5b: 上次代谢注入 tick
+    last_metabolism_tick: u64 = 0,
+    metabolism_submitted_total: u32 = 0,
+    /// P6: 外网桥接入队累计 + digest 缓冲 (RuleProposer)
+    world_bridge_total: u32 = 0,
+    world_digest_buf: [160]u8 = undefined,
+    world_digest_len: usize = 0,
+    /// P2c: peer inbox → RuleProposer world digest 后缀
+    peer_digest_buf: [128]u8 = undefined,
+    peer_digest_len: usize = 0,
+    /// world + peer 合并摘要 (setWorldDigest 指针必须持久)
+    combined_digest_buf: [288]u8 = undefined,
+    combined_digest_len: usize = 0,
+    /// P7: 同伴共生写回次数
+    peer_symbiosis_total: u32 = 0,
+    /// P8b: 求存规则效果反馈
+    survival_feedback: ghw_harness.survival_feedback.Tracker = .{},
+    survival_feedback_evals: u32 = 0,
+    survival_feedback_improved: u32 = 0,
+    /// P0 lifecycle: 觉醒 + 宿主短板 + 存在相
+    awaken: ghw_harness.awaken.State = .{},
+    last_shortfall: ghw_harness.host_shortfall.Report = .{},
+    existence_phase: ghw_harness.existence_phase.Phase = .awakening,
+    /// P2: 宿主画像 (desktop 采样 / mobile 推送)
+    host_profile: ghw_harness.host_profile.Profile = .{},
+    /// P2: 同伴短板收件箱
+    peer_inbox: ghw_harness.peer_inbox.Inbox = .{},
+    peer_shortfall_ingest_total: u32 = 0,
+    /// P1: state.json 写锁契约 (防 ui/daemon 双写)
+    state_meta: ghw_harness.state_contract.Meta = .{ .writer = .ui_server },
+    state_save_blocked: bool = false,
+    state_conflict: ghw_harness.state_contract.Conflict = .none,
     /// P9: 人类反馈 + 信任 (L6 HumanSignal / HumanGSP)
     human_gsp: HumanGSP,
     human_signal: HumanSignal,
@@ -1105,6 +1141,41 @@ fn linkHandler(method: []const u8, params: []const u8, ctx: *anyopaque, alloc: A
         return .{ .ok = false, .payload = try alloc.dupe(u8, "\"co_evolution disabled\"") };
     }
 
+    // P2: 求存向短板查询 / 投递 (与产品 co_evolution 分轨)
+    if (std.mem.eql(u8, method, "query_shortfall")) {
+        var body: std.ArrayList(u8) = .empty;
+        errdefer body.deinit(alloc);
+        try body.print(alloc, "{{\"peer_id\":\"", .{});
+        try appendJsonString(alloc, &body, app.agent.self_id);
+        try body.print(alloc, "\",\"tick\":{d},\"host_kind\":\"{s}\",\"report\":", .{
+            app.agent.tick, app.host_profile.kind.label(),
+        });
+        try ghw_harness.host_shortfall.appendJson(alloc, &body, app.last_shortfall);
+        try body.append(alloc, '}');
+        return .{ .ok = true, .payload = try body.toOwnedSlice(alloc) };
+    }
+
+    if (std.mem.eql(u8, method, "share_shortfall")) {
+        const peer_id = extractJsonStringField(params, "peer_id") orelse "unknown";
+        const report = ghw_harness.host_shortfall.parseJson(params) orelse {
+            return .{ .ok = false, .payload = try alloc.dupe(u8, "\"invalid shortfall\"") };
+        };
+        const now_u: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+        app.peer_inbox.push(peer_id, report, app.agent.tick, now_u);
+        app.peer_shortfall_ingest_total += 1;
+        const learned = ghw_harness.peer_symbiosis.learnFromShortfall(
+            &app.memory,
+            &app.task_queue,
+            peer_id,
+            report,
+            app.agent.tick,
+        ) catch ghw_harness.peer_symbiosis.ShortfallLearn{};
+        return .{ .ok = true, .payload = try std.fmt.allocPrint(alloc,
+            "{{\"accepted\":true,\"beliefs_added\":{d},\"followups\":{d},\"inbox_count\":{d}}}", .{
+            learned.beliefs_added, learned.followups, app.peer_inbox.count(),
+        }) };
+    }
+
     return .{ .ok = false, .payload = try alloc.dupe(u8, "\"unknown method\"") };
 }
 
@@ -1176,7 +1247,7 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--auto-tick-ms")) {
             i += 1;
             if (i < raw.len) a.auto_tick_ms = std.fmt.parseInt(u64, raw[i], 10) catch 0;
-        } else if (std.mem.eql(u8, arg, "--id")) {
+        } else if (std.mem.eql(u8, arg, "--id") or std.mem.eql(u8, arg, "--agent-id")) {
             i += 1;
             if (i < raw.len) a.agent_id = raw[i];
         } else if (std.mem.eql(u8, arg, "--seed")) {
@@ -1249,7 +1320,7 @@ fn printHelp() void {
         \\  --auto-tick-ms N      auto-tick interval, 0=manual only (default 0)
         \\  --no-autocli          disable AutoCLI world fetch thread
         \\  --autocli-interval-s N  AutoCLI interval seconds (default 300)
-        \\  --id STR              agent id (default ghw-ui)
+        \\  --id STR              agent id (default ghw-ui; alias --agent-id)
         \\  --seed N              LCG seed (default 42)
         \\  --product-intent PATH Enable product-runtime mode with ProductIntent JSON
         \\  --product-config PATH Enable file ProductAdapter output for approved changes
@@ -1392,6 +1463,27 @@ fn maybeRunPendingTask(app: *App) void {
                 app.agent.tick, r.beliefs_added, app.survival_beliefs_total, r.host_crisis,
             });
         }
+        if (r.act_human_tasks > 0) {
+            app.act_human_total += r.act_human_tasks;
+            std.debug.print("[ui] tick={d} survival_act human_handoff +{d} (total={d})\n", .{
+                app.agent.tick, r.act_human_tasks, app.act_human_total,
+            });
+        }
+        if (r.throttle_autocli_s) |secs| {
+            app.autocli_interval_override_s.store(secs, .seq_cst);
+            if (secs > 0) {
+                std.debug.print("[ui] tick={d} AutoCLI throttle → {d}s (crisis)\n", .{ app.agent.tick, secs });
+            } else {
+                std.debug.print("[ui] tick={d} AutoCLI throttle cleared\n", .{app.agent.tick});
+            }
+        }
+        if (r.peer_e_seen > 0.01) {
+            updatePeerECache(app, r.peer_e_seen);
+            app.peer_symbiosis_total += 1;
+            std.debug.print("[ui] tick={d} peer_symbiosis E={d:.3} → avg={d:.3} followups=+{d}\n", .{
+                app.agent.tick, r.peer_e_seen, app.peer_E_avg, r.peer_followups,
+            });
+        }
         if (app.rule_proposer) |*p| {
             p.setHostCrisis(r.host_crisis);
         }
@@ -1513,6 +1605,8 @@ fn maybeAutoProposeRules(app: *App) void {
                 );
                 p.setKpiTrend(app.agent.ed.kpiTrend());
                 p.setValueTrend(app.value_tracker.trend());
+                // digest 已在 refreshLifecycle 合并 peer inbox; 再刷确保指针指向持久缓冲
+                applyDigestToProposer(app, p);
                 if (app.sys_collector.last) |snap| {
                     if (ghw_harness.world_sensor.formatPressureLine(app.alloc, snap)) |line| {
                         defer app.alloc.free(line);
@@ -1521,15 +1615,15 @@ fn maybeAutoProposeRules(app: *App) void {
                         app.system_pressure_len = n;
                         p.setSystemPressure(app.system_pressure_buf[0..app.system_pressure_len]);
                     } else |_| {}
-                    // P4: 每 cycle 同步主机危机 (健康时清零, 避免永久触发)
-                    p.setHostCrisis(ghw_harness.survival_learn.isCrisisSnap(snap));
                 }
+                // 用 shortfall 总危机 (含手机电量), 不用纯 snap 覆盖
+                p.setHostCrisis(app.last_shortfall.host_crisis);
                 // E 饱和 alone 时限频 (每 16 tick), 避免每 cycle LLM 风暴
-                const due = p.shouldPropose(0.50);
+                const due = p.shouldPropose(ghw_harness.primordial_laws.ProposeTriggers.E_THRESHOLD);
                 const host_crisis = p.last_host_crisis;
                 const only_sat = eSaturated(app) and
                     !host_crisis and
-                    app.agent.ed.e() >= 0.50 and
+                    app.agent.ed.e() >= ghw_harness.primordial_laws.ProposeTriggers.E_THRESHOLD and
                     app.value_tracker.trend() >= -ghw_harness.human_symbiosis.ValueTrendTracker.DECLINE_EPS and
                     app.agent.ed.kpiTrend() >= -ghw_harness.rule_proposer.RuleProposer.KPI_DECLINE_EPS;
                 if (due and (!only_sat or app.agent.tick % 16 == 0)) {
@@ -1539,6 +1633,12 @@ fn maybeAutoProposeRules(app: *App) void {
                     };
                     defer prop_result.deinit();
                     app.rule_propose_total += 1;
+                    // P8b: 危机下采纳 → 稍后对照压力是否真降
+                    if (prop_result.accepted > 0) {
+                        if (app.sys_collector.last) |s| {
+                            app.survival_feedback.markAfterCrisisRules(s, app.agent.tick, prop_result.accepted);
+                        }
+                    }
                     std.debug.print("[ui] tick={d} 规则提议 accepted={d} rejected={d} (total={d})\n", .{
                         app.agent.tick, prop_result.accepted, prop_result.rejected, app.rule_propose_total,
                     });
@@ -1642,6 +1742,32 @@ fn maybeAutoReflect(app: *App) void {
     }
 }
 
+/// P5b: E 饱和时注入多样性代谢任务 (每 64 tick)
+fn maybeMetabolismInject(app: *App) void {
+    if (!eSaturated(app)) return;
+    if (app.agent.tick == 0) return;
+    if (app.agent.tick == app.last_metabolism_tick) return;
+    if (app.agent.tick % 64 != 0) return;
+    app.last_metabolism_tick = app.agent.tick;
+    const value_flat = @abs(app.value_tracker.trend()) < 0.0001 and app.value_tracker.count >= 8;
+    const r = ghw_harness.metabolism.maybeInject(
+        &app.task_queue,
+        app.agent.ed.e(),
+        countLiveGhwPeers(app) > 0,
+        value_flat,
+        app.alloc,
+    ) catch |err| {
+        std.debug.print("[ui] metabolism 失败: {t}\n", .{err});
+        return;
+    };
+    if (r.submitted > 0) {
+        app.metabolism_submitted_total += r.submitted;
+        std.debug.print("[ui] tick={d} metabolism 入队 {d} (total={d} pending={d})\n", .{
+            app.agent.tick, r.submitted, app.metabolism_submitted_total, app.task_queue.pending_count,
+        });
+    }
+}
+
 /// P1: 本机压力 → world_sensor 任务 (无 LLM 也能求存)
 fn maybeWorldSensorTasks(app: *App) void {
     // 每 8 tick 最多扫一次 (压力持续时靠 hasPendingTitlePrefix 去重)
@@ -1650,6 +1776,25 @@ fn maybeWorldSensorTasks(app: *App) void {
     if (app.agent.tick % 8 != 0) return;
     const snap = app.sys_collector.last orelse return;
     app.last_world_sensor_tick = app.agent.tick;
+    // P5a: 健康时清 AutoCLI 节流
+    if (!ghw_harness.survival_learn.isCrisisSnap(snap)) {
+        if (app.autocli_interval_override_s.load(.seq_cst) > 0) {
+            app.autocli_interval_override_s.store(0, .seq_cst);
+            std.debug.print("[ui] tick={d} host healthy → AutoCLI throttle cleared\n", .{app.agent.tick});
+        }
+    }
+    // P8b: 危机规则采纳后对照压力
+    if (app.survival_feedback.maybeEvaluate(snap, app.agent.tick, &app.memory, app.io)) |maybe_ev| {
+        if (maybe_ev) |ev| {
+            app.survival_feedback_evals += 1;
+            if (ev.improved) app.survival_feedback_improved += 1;
+            std.debug.print("[ui] tick={d} survival_feedback improved={} diskΔ={d:.1} memΔ={d:.1} loadΔ={d:.2} boost={d}\n", .{
+                app.agent.tick, ev.improved, ev.disk_delta, ev.mem_delta, ev.load_delta, ev.beliefs_boosted,
+            });
+        }
+    } else |err| {
+        std.debug.print("[ui] survival_feedback 失败: {t}\n", .{err});
+    }
     const r = ghw_harness.world_sensor.maybeSubmitFromSnapshot(&app.task_queue, snap, app.alloc) catch |err| {
         std.debug.print("[ui] world_sensor 失败: {t}\n", .{err});
         return;
@@ -1661,8 +1806,149 @@ fn maybeWorldSensorTasks(app: *App) void {
     }
 }
 
+/// P8a: 生存类 pending/in_progress 时 ActionRunner 让路给 TaskExecutor
+fn hasPendingSurvivalWork(app: *const App) bool {
+    for (app.task_queue.tasks.items) |t| {
+        if (t.status != .pending and t.status != .in_progress) continue;
+        switch (t.source) {
+            .world_sensor, .survival_remedy, .survival_act, .peer_symbiosis, .world_fetch => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// P8a: ActionRunner query_peer 与 TaskExecutor 共用同伴写回
+fn ingestPeerActionResult(app: *App, raw_log: []const u8) void {
+    const own_e = app.agent.ed.e();
+    const report = std.fmt.allocPrint(app.alloc, "query_peer response: {s}", .{raw_log}) catch {
+        const peer_E = extractEFromResp(raw_log);
+        if (peer_E > 0.01) updatePeerECache(app, peer_E);
+        return;
+    };
+    defer app.alloc.free(report);
+    const ins = ghw_harness.peer_symbiosis.learnFromReport(
+        &app.memory,
+        app.io,
+        app.agent.tick,
+        report,
+        own_e,
+        &app.task_queue,
+    ) catch |err| {
+        std.debug.print("[ui] ActionRunner peer_symbiosis 失败: {t}\n", .{err});
+        const peer_E = extractEFromResp(raw_log);
+        if (peer_E > 0.01) updatePeerECache(app, peer_E);
+        return;
+    };
+    if (ins.parsed and ins.peer_e > 0.01) {
+        updatePeerECache(app, ins.peer_e);
+        app.peer_symbiosis_total += 1;
+        std.debug.print("[ui] tick={d} ActionRunner→peer_symbiosis E={d:.3} beliefs=+{d} followups=+{d}\n", .{
+            app.agent.tick, ins.peer_e, ins.beliefs_added, ins.followups,
+        });
+    }
+}
+
+/// 合并 world_digest + peer_digest 到持久缓冲, 供 RuleProposer.setWorldDigest
+fn refreshCombinedDigest(app: *App) void {
+    app.peer_digest_len = app.peer_inbox.formatDigest(&app.peer_digest_buf);
+    var clen: usize = 0;
+    if (app.world_digest_len > 0) {
+        const n = @min(app.world_digest_len, app.combined_digest_buf.len);
+        @memcpy(app.combined_digest_buf[0..n], app.world_digest_buf[0..n]);
+        clen = n;
+        if (app.peer_inbox.count() > 0 and clen + 3 < app.combined_digest_buf.len) {
+            app.combined_digest_buf[clen] = ' ';
+            app.combined_digest_buf[clen + 1] = '|';
+            app.combined_digest_buf[clen + 2] = ' ';
+            clen += 3;
+        }
+    }
+    if (app.peer_inbox.count() > 0 and app.peer_digest_len > 0) {
+        const take = @min(app.peer_digest_len, app.combined_digest_buf.len - clen);
+        @memcpy(app.combined_digest_buf[clen..][0..take], app.peer_digest_buf[0..take]);
+        clen += take;
+    }
+    app.combined_digest_len = clen;
+}
+
+fn applyDigestToProposer(app: *App, p: anytype) void {
+    refreshCombinedDigest(app);
+    if (app.combined_digest_len > 0) {
+        p.setWorldDigest(app.combined_digest_buf[0..app.combined_digest_len]);
+    }
+}
+
+/// P0: 刷新觉醒 / 宿主短板 / 存在相 (求存外环 ↔ 进化内环)
+fn refreshLifecycle(app: *App) void {
+    // 采样指纹 (未觉醒时每次尝试)
+    if (app.sys_collector.last) |snap| {
+        if (!app.awaken.awakened) {
+            app.awaken.setFingerprintFromSnap(snap);
+        }
+        const now = std.Io.Clock.real.now(app.io).toSeconds();
+        if (app.host_profile.kind == .desktop) {
+            app.host_profile = ghw_harness.host_profile.Profile.fromDesktop(snap, now);
+        } else {
+            // mobile: 保留电量/热/后台, 同步桌面镜像字段
+            app.host_profile.mem_pct = snap.mem_pct;
+            app.host_profile.disk_used_pct = snap.disk_used_pct;
+            app.host_profile.load_1m = snap.load_1m;
+            app.host_profile.updated_at_unix = now;
+        }
+    }
+    var world_fetch_count: u32 = 0;
+    for (app.memory.episodes.items) |ep| {
+        if (ep.kind == .world_fetch) world_fetch_count += 1;
+    }
+    const live_peers = countLiveGhwPeers(app);
+    app.last_shortfall = ghw_harness.host_shortfall.assessWithProfile(
+        app.sys_collector.last,
+        app.agent.ed.e(),
+        world_fetch_count,
+        live_peers,
+        app.value_tracker.trend(),
+        app.host_profile,
+    );
+    if (app.rule_proposer) |*p| {
+        p.setHostCrisis(app.last_shortfall.host_crisis);
+        applyDigestToProposer(app, p);
+    } else {
+        refreshCombinedDigest(app);
+    }
+    const balanced = ghw_harness.existence_phase.mrnBalanced(
+        app.agent.ed.v.material,
+        app.agent.ed.v.representation,
+        app.agent.ed.v.nature,
+    );
+    app.existence_phase = ghw_harness.existence_phase.compute(
+        app.awaken.awakened,
+        app.last_shortfall.host_crisis,
+        app.agent.ed.e(),
+        balanced,
+        ghw_harness.existence_phase.valueOk(app.value_tracker.trend()),
+    );
+}
+
+/// P0: 自动/手动觉醒入口
+fn maybeAwaken(app: *App) void {
+    if (app.awaken.awakened) return;
+    if (app.sys_collector.last == null) return;
+    const now = std.Io.Clock.real.now(app.io).toSeconds();
+    const done = app.awaken.tryComplete(&app.memory, app.io, app.agent.tick, now, app.sys_collector.last) catch |err| {
+        std.debug.print("[ui] awaken 失败: {t}\n", .{err});
+        return;
+    };
+    if (done) {
+        std.debug.print("[ui] ★ 觉醒完成 host={s} tick={d}\n", .{ app.awaken.fingerprintSlice(), app.agent.tick });
+        saveState(app) catch {};
+    }
+}
+
 /// P8: GET /api/state 与 POST /api/chat 共用的 post-cycle 管道
 fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
+    maybeAwaken(app);
+    refreshLifecycle(app);
     if (app.sqlite) |*db| {
         const cycle_data = try std.fmt.allocPrint(app.alloc, "tick={d} E={d:.3} M={d:.3} R={d:.3} N={d:.3}", .{
             report.tick, report.e_after,
@@ -1675,6 +1961,7 @@ fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
         app.sqlite_episodes_written += 1;
     }
     maybeWorldSensorTasks(app);
+    maybeMetabolismInject(app);
     maybeAutoReflect(app);
     try maybeAutoProposeGoals(app);
     maybeAutoProposeRules(app);
@@ -1788,14 +2075,76 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
         if (ep.kind == .world_fetch) world_fetch_count += 1;
     }
     try body.appendSlice(alloc, "},\"survival\":{");
-    try body.print(alloc, "\"world_fetch_count\":{d},\"last_task_action\":\"{s}\",\"last_task_acted\":{s},\"remedy_submitted_total\":{d},\"survival_beliefs_total\":{d}", .{
+    try body.print(alloc, "\"world_fetch_count\":{d},\"last_task_action\":\"{s}\",\"last_task_acted\":{s},\"remedy_submitted_total\":{d},\"survival_beliefs_total\":{d},\"act_human_total\":{d},\"autocli_throttle_s\":{d},\"metabolism_submitted_total\":{d},\"world_bridge_total\":{d},\"peer_symbiosis_total\":{d},\"peer_E_avg\":{d:.3},\"feedback_evals\":{d},\"feedback_improved\":{d},\"laws_version\":\"{s}\",\"laws_count\":{d},\"existence_phase\":\"{s}\",\"awakened\":{s},\"host_fingerprint\":\"{s}\"", .{
         world_fetch_count,
         app.last_task_action,
         if (app.last_task_acted) "true" else "false",
         app.remedy_submitted_total,
         app.survival_beliefs_total,
+        app.act_human_total,
+        app.autocli_interval_override_s.load(.seq_cst),
+        app.metabolism_submitted_total,
+        app.world_bridge_total,
+        app.peer_symbiosis_total,
+        app.peer_E_avg,
+        app.survival_feedback_evals,
+        app.survival_feedback_improved,
+        ghw_harness.primordial_laws.VERSION,
+        ghw_harness.primordial_laws.LAW_COUNT,
+        app.existence_phase.label(),
+        if (app.awaken.awakened) "true" else "false",
+        app.awaken.fingerprintSlice(),
     });
-    try body.appendSlice(alloc, "}}");
+    try body.appendSlice(alloc, ",\"shortfall\":");
+    try ghw_harness.host_shortfall.appendJson(alloc, body, app.last_shortfall);
+    try body.appendSlice(alloc, ",\"host_profile\":");
+    try app.host_profile.appendJson(alloc, body);
+    try body.append(alloc, ',');
+    try app.peer_inbox.appendSummaryJson(alloc, body);
+    try body.print(alloc, ",\"peer_shortfall_ingest_total\":{d}", .{app.peer_shortfall_ingest_total});
+    try body.append(alloc, '}'); // close survival
+    const crisis = app.last_shortfall.host_crisis or (app.existence_phase == .crisis);
+    const accept_snap = ghw_harness.evolution_acceptance.Snapshot{
+        .l1_count = app.self_evolve_l1_count,
+        .l2_count = app.self_evolve_l2_count,
+        .l3_count = app.self_evolve_l3_count,
+        .l3_approved = app.self_evolve_l3_approved,
+        .l4_count = app.self_evolve_l4_count,
+        .l4_approved = app.self_evolve_l4_approved,
+        .l5_count = app.self_evolve_l5_count,
+        .self_evolve_total = app.self_evolve_total,
+        .rule_propose_total = app.rule_propose_total,
+        .adopted_rules = app.agent.last_rule_bias.rule_count,
+        .crisis_lock = crisis,
+        .awakened = app.awaken.awakened,
+        .phase_label = app.existence_phase.label(),
+        .iv1 = ghw_harness.existence_phase.evolveInterval(1, crisis),
+        .iv3 = ghw_harness.existence_phase.evolveInterval(3, crisis),
+        .iv4 = ghw_harness.existence_phase.evolveInterval(4, crisis),
+        .iv5 = ghw_harness.existence_phase.evolveInterval(5, crisis),
+        .feedback_pending = app.survival_feedback.pending,
+        .feedback_evals = app.survival_feedback_evals,
+        .feedback_improved = app.survival_feedback_improved,
+        .rules_at_mark = app.survival_feedback.rules_at_mark,
+        .steady = ghw_harness.existence_phase.steadyGates(
+            app.agent.ed.v.material,
+            app.agent.ed.v.representation,
+            app.agent.ed.v.nature,
+            app.agent.ed.e(),
+            app.value_tracker.trend(),
+        ),
+    };
+    try body.appendSlice(alloc, ",");
+    try ghw_harness.evolution_acceptance.appendJson(alloc, body, accept_snap);
+    try body.appendSlice(alloc, ",\"state_contract\":{");
+    try body.print(alloc, "\"writer\":\"{s}\",\"epoch\":{d},\"tick\":{d},\"save_blocked\":{s},\"conflict\":\"{s}\"", .{
+        app.state_meta.writer.label(),
+        app.state_meta.epoch,
+        app.state_meta.tick,
+        if (app.state_save_blocked) "true" else "false",
+        app.state_conflict.label(),
+    });
+    try body.appendSlice(alloc, "}}"); // state_contract + provenance (root 由 buildStateJson 关)
 }
 
 /// LLM 不可用时的回退模板 (4 套根据 E)
@@ -1925,8 +2274,26 @@ fn saveState(app: *App) !void {
         break :blk try std.fs.path.join(app.alloc, &[_][]const u8{ cwd, app.state_path });
     };
     defer app.alloc.free(abs);
-    const file = try std.Io.Dir.createFileAbsolute(app.io, abs, .{});
-    defer file.close(app.io);
+
+    // P1: 读盘 meta, 检测 ui/daemon 双写冲突
+    var disk_meta: ghw_harness.state_contract.Meta = .{};
+    if (readFile(app.alloc, app.io, abs)) |existing| {
+        defer app.alloc.free(existing);
+        if (try ghw_harness.state_contract.Meta.parseFromJson(existing, app.alloc)) |dm| {
+            disk_meta = dm;
+        }
+    } else |_| {}
+    const conflict = ghw_harness.state_contract.detectConflict(app.state_meta, disk_meta, .ui_server);
+    app.state_conflict = conflict;
+    if (conflict == .foreign_newer) {
+        app.state_save_blocked = true;
+        std.debug.print("[ui] state 保存跳过: 磁盘 epoch={d} writer={s} 比本地新 (foreign_newer)\n", .{
+            disk_meta.epoch, disk_meta.writer.label(),
+        });
+        return;
+    }
+    app.state_save_blocked = false;
+
     const goal_str = if (app.growth_log.items.len > 0)
         if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "—"
     else "—";
@@ -2002,16 +2369,42 @@ fn saveState(app: *App) !void {
         try buf.appendSlice(app.alloc, ",\"co_evolution\":");
         try buf.appendSlice(app.alloc, p);
     }
+    const awaken_json = try app.awaken.toJson(app.alloc);
+    defer app.alloc.free(awaken_json);
+    try buf.appendSlice(app.alloc, ",\"awaken\":");
+    try buf.appendSlice(app.alloc, awaken_json);
+
+    const hp_json = try app.host_profile.toJson(app.alloc);
+    defer app.alloc.free(hp_json);
+    try buf.appendSlice(app.alloc, ",\"host_profile\":");
+    try buf.appendSlice(app.alloc, hp_json);
+
+    const inbox_json = try app.peer_inbox.toJson(app.alloc);
+    defer app.alloc.free(inbox_json);
+    try buf.appendSlice(app.alloc, ",\"peer_inbox\":");
+    try buf.appendSlice(app.alloc, inbox_json);
+
+    const now_unix: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    app.state_meta.writer = .ui_server;
+    app.state_meta.epoch = ghw_harness.state_contract.nextEpoch(app.state_meta, disk_meta);
+    app.state_meta.tick = app.agent.tick;
+    app.state_meta.updated_at_unix = now_unix;
+    const meta_json = try app.state_meta.toJson(app.alloc);
+    defer app.alloc.free(meta_json);
+    try buf.appendSlice(app.alloc, ",\"state_meta\":");
+    try buf.appendSlice(app.alloc, meta_json);
+
     try buf.append(app.alloc, '}');
     const json = try buf.toOwnedSlice(app.alloc);
     defer app.alloc.free(json);
-    try std.Io.File.writeStreamingAll(file, app.io, json);
+    try ghw_harness.state_contract.writeAtomic(app.io, app.alloc, abs, json);
 }
 
 // ===== HTTP 响应 =====
 fn writeResponse(stream: *std.Io.net.Stream, io: std.Io, response: []const u8) !void {
     defer stream.close(io);
-    var buf: [16]u8 = undefined;
+    // 小缓冲会频繁 flush; state JSON 可达数 KB+, 用 4KiB 降低 syscall
+    var buf: [4096]u8 = undefined;
     var w = stream.writer(io, &buf);
     try w.interface.writeAll(response);
     try w.interface.flush();
@@ -2112,6 +2505,21 @@ fn ingestPeerEvolutionResponse(app: *App, peer_id: []const u8, response: []const
             search_from = tpos + 8;
         }
     }
+}
+
+/// P2: 从 peer query_shortfall 响应写入 inbox + 有界协助
+fn ingestPeerShortfallResponse(app: *App, peer_id: []const u8, response: []const u8) void {
+    const report = ghw_harness.host_shortfall.parseJson(response) orelse return;
+    const now_u: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    app.peer_inbox.push(peer_id, report, app.agent.tick, now_u);
+    app.peer_shortfall_ingest_total += 1;
+    _ = ghw_harness.peer_symbiosis.learnFromShortfall(
+        &app.memory,
+        &app.task_queue,
+        peer_id,
+        report,
+        app.agent.tick,
+    ) catch {};
 }
 
 /// Phase 1 production: 从 peers_file 加载 peer 列表
@@ -2277,6 +2685,12 @@ fn peerHealthLoop(app: *App) void {
                     defer app.alloc.free(evo_resp);
                     ingestPeerEvolutionResponse(app, p.peer_id, evo_resp);
                 }
+
+                // P2: 拉取同伴短板 → inbox + 有界协助任务
+                if (l.query(p.path, "query_shortfall", "{}")) |sf_resp| {
+                    defer app.alloc.free(sf_resp);
+                    ingestPeerShortfallResponse(app, p.peer_id, sf_resp);
+                } else |_| {}
             }
         }
 
@@ -2388,9 +2802,10 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
 
     // === 自动执行: 每 N cycle 跑 1 个 top unadopted goal ===
     // 这是"具备行动的能力"的核心: 反思 → 提议 → **执行** → 状态变化
+    // P8a: 生存任务 pending 时让路 TaskExecutor (避免双轨抢 query_peer)
     if (app.action_runner) |*ar| {
         const since_last_action: u64 = app.agent.tick -% ar.last_action_at_tick;
-        if (since_last_action >= app.action_every or ar.last_action_at_tick == 0) {
+        if (!hasPendingSurvivalWork(app) and (since_last_action >= app.action_every or ar.last_action_at_tick == 0)) {
             var did_action = false;
             if (ar.runTopGoal(@intCast(app.agent.tick))) |maybe_result| {
                 if (maybe_result) |result| {
@@ -2400,14 +2815,9 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
                     ar.last_action_at_tick = app.agent.tick;
                     did_action = true;
                     std.debug.print("[ui] auto action done: {s} (action_count={d})\n", .{ result.goal_title, app.action_count });
-                    // Phase 1.8: peer action 拿到了对方的 response — 抽 E 更新 cache
+                    // P8a: query_peer → 与 TaskExecutor 同款 peer_symbiosis 写回
                     if (std.mem.eql(u8, result.action_kind, "query_peer")) {
-                        // log 字段 = 对方返回的 raw response (含 "E":0.xxx)
-                        const peer_E = extractEFromResp(result.log);
-                        if (peer_E > 0.01) {
-                            updatePeerECache(app, peer_E);
-                            std.debug.print("[link] auto peer query: E={d:.3} → peer_E_avg={d:.3}\n", .{ peer_E, app.peer_E_avg });
-                        }
+                        ingestPeerActionResult(app, result.log);
                     }
                 }
             } else |err| {
@@ -2450,26 +2860,26 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
     }
 
     // === L1-L5 自动自演化 (直接调 callback, 不依赖 LLM 提议的 goal) ===
-    // LLM 提议自然语言 goal 命中 self-evolve 关键词概率低, 我们直接按 tick 调度:
-    //   L1+L2 (高频, 轻量): 每 32 cycle 一次 (L1 调参 + L2 ε 优化, 一起跑)
-    //   L3 习得方法: 每 64 cycle
-    //   L4 优化算法 (CompileVerifier 真编译): 每 96 cycle
-    //   L5 自编码 (SelfEncoder 真规则合成): 每 192 cycle
-    // 跑 sqlite + 调 onSelfEvolveCallback, 写 episode
+    // 危机锁: host_crisis 时暂停 L4/L5, L3 降频 (existence_phase)
+    // 未觉醒时不跑重进化 (仍允许 L1+L2 轻量调参)
     {
         const tick = app.agent.tick;
-        const l1l2_due = (tick > 0 and tick % 32 == 0 and tick != app.last_auto_l1l2_tick);
-        const l3_due = (tick > 0 and tick % 64 == 0 and tick != app.last_auto_l3_tick);
-        const l4_due = (tick > 0 and tick % 96 == 0 and tick != app.last_auto_l4_tick);
-        const l5_due = (tick > 0 and tick % 192 == 0 and tick != app.last_auto_l5_tick);
+        const crisis = app.last_shortfall.host_crisis or (app.existence_phase == .crisis);
+        const iv1 = ghw_harness.existence_phase.evolveInterval(1, crisis);
+        const iv3 = ghw_harness.existence_phase.evolveInterval(3, crisis);
+        const iv4 = ghw_harness.existence_phase.evolveInterval(4, crisis);
+        const iv5 = ghw_harness.existence_phase.evolveInterval(5, crisis);
+        const l1l2_due = ghw_harness.existence_phase.isDue(tick, app.last_auto_l1l2_tick, iv1);
+        const l3_due = ghw_harness.existence_phase.isDue(tick, app.last_auto_l3_tick, iv3);
+        const l4_due = app.awaken.awakened and ghw_harness.existence_phase.isDue(tick, app.last_auto_l4_tick, iv4);
+        const l5_due = app.awaken.awakened and ghw_harness.existence_phase.isDue(tick, app.last_auto_l5_tick, iv5);
 
-        // 一个 tick 最多触发 1 个 level (避免短时间多次同步, SQLite 写竞争)
-        // 优先级: L5 > L4 > L3 > L1+L2 (重的不被轻的屏蔽)
+        // 一个 tick 最多触发 1 个 level; 危机时 L4/L5 不会 due
         var level: u8 = 0;
-        if (l5_due) {
+        if (l5_due and ghw_harness.existence_phase.heavyEvolveAllowed(crisis, 5)) {
             level = 5;
             app.last_auto_l5_tick = tick;
-        } else if (l4_due) {
+        } else if (l4_due and ghw_harness.existence_phase.heavyEvolveAllowed(crisis, 4)) {
             level = 4;
             app.last_auto_l4_tick = tick;
         } else if (l3_due) {
@@ -2480,11 +2890,11 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
             app.last_auto_l1l2_tick = tick;
         }
         if (level > 0) {
-            // 决定要跑的 levels: L1 (1) 还是 L3 (3) 还是 L4 (4) 还是 L5 (5)
-            //   L1 + L2 一起跑 (同 tick, 互补, 不冲突)
-            //   其他 level 单独跑
+            if (crisis and level >= 4) {
+                std.debug.print("[auto-self-evolve] crisis lock skip L{d}\n", .{level});
+            } else {
             const levels_to_run: []const u8 = switch (level) {
-                1 => &.{ 1, 2 }, // L1 槽位: 一起跑 L1 + L2
+                1 => &.{ 1, 2 },
                 else => &.{level},
             };
             for (levels_to_run) |lv| {
@@ -2493,9 +2903,10 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
                     break :brk try app.alloc.dupe(u8, "auto_self_evolve_failed");
                 };
                 defer app.alloc.free(log_str);
-                // auto L1-L5 也算 self_evolved (L1+L2 槽位时, 两次都++)
                 app.self_evolve_total += 1;
-                std.debug.print("[auto-self-evolve] ✓ L{d} ({s}) self_evolve_total++ → {d}\n", .{ lv, log_str, app.self_evolve_total });
+                std.debug.print("[auto-self-evolve] ✓ L{d} ({s}) self_evolve_total++ → {d} phase={s} crisis={}\n", .{
+                    lv, log_str, app.self_evolve_total, app.existence_phase.label(), crisis,
+                });
                 const kind = try std.fmt.allocPrint(app.alloc, "self_evolve_l{d}_auto", .{lv});
                 defer app.alloc.free(kind);
                 if (app.sqlite) |*db| {
@@ -2514,13 +2925,9 @@ fn advanceAgentCycle(app: *App, alloc: Allocator) !CycleReport {
                     _ = db.insertEpisode(@intCast(tick), "self_evolve", ep_text, 0.9, "self") catch {};
                 }
             }
-            // 注: onSelfEvolveCallback 内部 L1/L2/L3/L4/L5 已 +1 (self_evolve_lN_count)
-            // self_evolved_total 由 action_runner 路径 (从 self_evolve_counter 引用) 维护
-
-            // === Auto enhance: 每 64 cycle 选 1 个最新 L1-L5 模板让 LLM 完善 ===
-            // 跟 L3 同一节奏, 不跟 L1+L2 抢 (避免 LLM 风暴)
-            // 同步调用 (5-15s) — 临时方案, 后续改 background thread 避免阻塞
-            const enhance_due = (tick > 0 and tick % 64 == 0 and tick != app.last_enhance_tick);
+            } // end crisis skip else
+            // === Auto enhance: 每 64 cycle (非危机) ===
+            const enhance_due = (!crisis and tick > 0 and tick % 64 == 0 and tick != app.last_enhance_tick);
             if (enhance_due and app.template_enhancer != null) {
                 app.last_enhance_tick = tick;
                 const top_goal_eh = if (app.growth_log.items.len > 0)
@@ -4256,13 +4663,14 @@ fn handlePostPeerQuery(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, a
                 .last_seen_tick = @intCast(app.agent.tick),
             });
         }
-        // Phase 1.8: 提取对方的 E, 更新 peer_E_avg 缓存, 让 E 函数层 reflect 共生关系
+        // P8a: query_state → 与 TaskExecutor/ActionRunner 同款 peer_symbiosis 写回
         if (std.mem.eql(u8, method_arg, "query_state")) {
-            const peer_E = extractEFromResp(resp_raw);
-            if (peer_E > 0.01) {
-                updatePeerECache(app, peer_E);
-                std.debug.print("[link] peer={s} E={d:.3} → peer_E_avg={d:.3}\n", .{ peer_id, peer_E, app.peer_E_avg });
-            }
+            ingestPeerActionResult(app, resp_raw);
+        }
+        // P2c: 手动 query_shortfall 也入 inbox + 有界协助 (与 peer health 同款)
+        if (std.mem.eql(u8, method_arg, "query_shortfall")) {
+            ingestPeerShortfallResponse(app, peer_id, resp_raw);
+            refreshLifecycle(app);
         }
         const out = try std.fmt.allocPrint(alloc, "{{\"peer\":\"{s}\",\"method\":\"{s}\",\"response\":{s}}}", .{ peer_id, method_arg, resp_raw });
         defer alloc.free(out);
@@ -4408,10 +4816,11 @@ fn formValue(alloc: Allocator, body_text: []const u8, key: []const u8) !?[]u8 {
     return null;
 }
 
-/// GET /api/tasks — TaskQueue 快照 (P9: UI 评分 + 审计)
+/// GET /api/tasks — TaskQueue 快照 (P9: UI 评分 + 审计; P1: 维度台账)
 fn handleGetTasks(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(alloc);
+    const ledger = app.task_queue.dimensionLedger();
     try body.appendSlice(alloc, "{\"tasks\":[");
     for (app.task_queue.tasks.items, 0..) |t, i| {
         if (i > 0) try body.append(alloc, ',');
@@ -4421,6 +4830,13 @@ fn handleGetTasks(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         try appendJsonString(alloc, &body, t.from_human);
         try body.append(alloc, '"');
         try body.print(alloc, ",\"priority\":{d},\"required_dimension\":\"{s}\",\"source\":\"{s}\"", .{ t.priority, @tagName(t.required_dimension), @tagName(t.source) });
+        const survival_driven = ghw_harness.human_symbiosis.task_queue.isSurvivalSource(t.source);
+        try body.print(alloc, ",\"survival_driven\":{s}", .{if (survival_driven) "true" else "false"});
+        var evolution_linked = false;
+        if (survival_driven and t.status == .completed) {
+            if (t.result) |r| evolution_linked = r.actual_delta_e > 0.01;
+        }
+        try body.print(alloc, ",\"evolution_linked\":{s}", .{if (evolution_linked) "true" else "false"});
         if (t.result) |r| {
             try body.print(alloc, ",\"actual_delta_e\":{d:.6}", .{r.actual_delta_e});
         }
@@ -4430,7 +4846,9 @@ fn handleGetTasks(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
         try body.append(alloc, '}');
     }
     try body.appendSlice(alloc, "],\"pending\":");
-    try body.print(alloc, "{d},\"completed\":{d}}}", .{ app.task_queue.pending_count, app.task_queue.completed_count });
+    try body.print(alloc, "{d},\"completed\":{d},", .{ app.task_queue.pending_count, app.task_queue.completed_count });
+    try app.task_queue.appendDimensionLedgerJson(alloc, &body, ledger);
+    try body.append(alloc, '}');
     const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body.items);
     defer alloc.free(resp);
     try writeResponse(conn, io, resp);
@@ -4990,6 +5408,11 @@ fn autocliThreadFn(app: *App) void {
     const alloc = app.alloc;
     while (!app.autocli_stop.load(.seq_cst)) {
         if (app.autocli) |*ac| {
+            // P5a: 危机时拉长间隔 (主线程写入 override)
+            const override_s = app.autocli_interval_override_s.load(.seq_cst);
+            const interval_s: u64 = if (override_s > 0) override_s else app.autocli_base_interval_s;
+            ac.interval_ns = @as(i128, @intCast(interval_s)) * std.time.ns_per_s;
+
             const now_ns = std.Io.Clock.real.now(app.io).nanoseconds;
             if (ac.shouldFetch(now_ns)) {
                 var items: std.ArrayList(ghw.harness.autocli.FetchedItem) = .empty;
@@ -5024,6 +5447,33 @@ fn autocliThreadFn(app: *App) void {
                     app.memory.recordAt(app.io, .world_fetch, app.agent.tick, summary, body, 2, 0) catch |err| {
                         std.debug.print("[autocli] Memory.recordAt 失败: {t}\n", .{err});
                     };
+                    // P6: 外网 → 可行动任务 (有界启发式)
+                    const br = ghw_harness.world_bridge.maybeAdoptFromFetch(&app.task_queue, it.title, it.snippet, alloc) catch null;
+                    if (br) |b| {
+                        if (b.submitted > 0) {
+                            app.world_bridge_total += b.submitted;
+                            std.debug.print("[world_bridge] 入队 {d} from 「{s}」(total={d})\n", .{
+                                b.submitted, it.title, app.world_bridge_total,
+                            });
+                        }
+                    }
+                }
+
+                // P6: 最近一条作 RuleProposer digest
+                if (items.items.len > 0) {
+                    const last = items.items[items.items.len - 1];
+                    const tag = switch (last.source) {
+                        .wikipedia => "wiki",
+                        .hackernews => "hn",
+                        .arxiv => "arxiv",
+                        .rss => "rss",
+                    };
+                    if (ghw_harness.world_bridge.formatDigestLine(alloc, last.title, tag)) |line| {
+                        defer alloc.free(line);
+                        const n = @min(line.len, app.world_digest_buf.len);
+                        @memcpy(app.world_digest_buf[0..n], line[0..n]);
+                        app.world_digest_len = n;
+                    } else |_| {}
                 }
 
                 // 触发 phase 6 (六气 "自然" 接口)
@@ -5042,6 +5492,116 @@ fn autocliThreadFn(app: *App) void {
         app.io.sleep(.{ .nanoseconds = @intCast(30 * std.time.ns_per_s) }, std.Io.Clock.real) catch {};
     }
     std.debug.print("[autocli] 退出\n", .{});
+}
+
+/// GET /api/laws — 第一性原理 / 生命规律 / 评估契约完整清单 (只读)
+fn handleGetLaws(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    _ = app;
+    const body = try ghw_harness.primordial_laws.toJson(alloc);
+    defer alloc.free(body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/awaken — 幂等完成觉醒仪式
+fn handlePostAwaken(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    // 强制采一次样
+    _ = app.sys_collector.collectCached(0) catch {};
+    maybeAwaken(app);
+    refreshLifecycle(app);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    const aj = try app.awaken.toJson(alloc);
+    defer alloc.free(aj);
+    try body.print(alloc, "{{\"ok\":{s},\"existence_phase\":\"{s}\",\"awaken\":{s}}}", .{
+        if (app.awaken.awakened) "true" else "false",
+        app.existence_phase.label(),
+        aj,
+    });
+    const code: u16 = if (app.awaken.awakened) 200 else 503;
+    const status = if (app.awaken.awakened) "OK" else "Service Unavailable";
+    const resp = try makeHttpResponse(alloc, code, status, "application/json", body.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/host-profile — 手机宿主推送电量/热/后台受限 (P2)
+fn handlePostHostProfile(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body: []const u8) !void {
+    const battery = extractJsonFloatField(body, "battery_pct") orelse extractFormFloat(body, "battery_pct");
+    const thermal = std.mem.indexOf(u8, body, "\"thermal_hot\":true") != null or
+        std.mem.indexOf(u8, body, "thermal_hot=true") != null or
+        std.mem.indexOf(u8, body, "thermal_hot=1") != null;
+    const bg = std.mem.indexOf(u8, body, "\"bg_restricted\":true") != null or
+        std.mem.indexOf(u8, body, "bg_restricted=true") != null or
+        std.mem.indexOf(u8, body, "bg_restricted=1") != null;
+    const now_u: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    app.host_profile.pushMobile(battery, thermal, bg, now_u);
+    refreshLifecycle(app);
+    saveState(app) catch {};
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.appendSlice(alloc, "{\"ok\":true,\"host_profile\":");
+    try app.host_profile.appendJson(alloc, &out);
+    try out.appendSlice(alloc, ",\"shortfall\":");
+    try ghw_harness.host_shortfall.appendJson(alloc, &out, app.last_shortfall);
+    try out.append(alloc, '}');
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", out.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+fn extractFormFloat(body: []const u8, key: []const u8) ?f32 {
+    var needle_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "{s}=", .{key}) catch return null;
+    const pos = std.mem.indexOf(u8, body, needle) orelse return null;
+    var i = pos + needle.len;
+    const start = i;
+    while (i < body.len and body[i] != '&' and body[i] != ' ' and body[i] != '\n' and body[i] != '\r') : (i += 1) {}
+    if (i == start) return null;
+    return std.fmt.parseFloat(f32, body[start..i]) catch null;
+}
+
+/// GET /api/peer-inbox — 同伴短板收件箱快照 (P2)
+fn handleGetPeerInbox(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App) !void {
+    const body = try app.peer_inbox.toJson(alloc);
+    defer alloc.free(body);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", body);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
+/// POST /api/peer-inbox/share — 本地注入同伴 shortfall (模拟 Link share_shortfall / 联调)
+/// body: {"peer_id":"...", "host_crisis":true, "favored_dim":0, "material":0.4, ...}
+fn handlePostPeerInboxShare(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body: []const u8) !void {
+    const peer_id = extractJsonStringField(body, "peer_id") orelse "demo-peer";
+    const report = ghw_harness.host_shortfall.parseJson(body) orelse {
+        const err_body = "{\"error\":\"invalid shortfall json\"}";
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", err_body);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    const now_u: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+    app.peer_inbox.push(peer_id, report, app.agent.tick, now_u);
+    app.peer_shortfall_ingest_total += 1;
+    const learned = ghw_harness.peer_symbiosis.learnFromShortfall(
+        &app.memory,
+        &app.task_queue,
+        peer_id,
+        report,
+        app.agent.tick,
+    ) catch ghw_harness.peer_symbiosis.ShortfallLearn{};
+    refreshLifecycle(app);
+    saveState(app) catch {};
+    const out = try std.fmt.allocPrint(alloc,
+        "{{\"ok\":true,\"accepted\":true,\"peer_id\":\"{s}\",\"beliefs_added\":{d},\"followups\":{d},\"inbox_count\":{d},\"ingest_total\":{d}}}", .{
+        peer_id, learned.beliefs_added, learned.followups, app.peer_inbox.count(), app.peer_shortfall_ingest_total,
+    });
+    defer alloc.free(out);
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", out);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
 }
 
 /// GET /api/world — 本机快照 + AutoCLI 状态 + 最近 world_fetch episodes
@@ -5182,6 +5742,10 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handleGetPeers(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/world")) {
                 try handleGetWorld(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/laws")) {
+                try handleGetLaws(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/peer-inbox")) {
+                try handleGetPeerInbox(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/metrics")) {
                 try handleGetMetrics(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/goals/relations")) {
@@ -5195,6 +5759,12 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
         } else if (std.mem.eql(u8, req.method, "POST")) {
             if (std.mem.eql(u8, req.path, "/api/chat")) {
                 try handlePostChat(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/awaken")) {
+                try handlePostAwaken(alloc, &stream, io, app);
+            } else if (std.mem.eql(u8, req.path, "/api/host-profile")) {
+                try handlePostHostProfile(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/peer-inbox/share")) {
+                try handlePostPeerInboxShare(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/tick")) {
                 try handlePostTick(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/task/feedback")) {
@@ -5767,6 +6337,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     std.debug.print("[ui] co_evolution loadFromJson 失败: {t}\n", .{err});
                 }
             }
+            if (app.awaken.loadFromJson(json)) {
+                std.debug.print("[ui] awaken 恢复: awakened={} fp={s}\n", .{
+                    app.awaken.awakened, app.awaken.fingerprintSlice(),
+                });
+            }
+            if (try ghw_harness.state_contract.Meta.parseFromJson(json, alloc)) |sm| {
+                app.state_meta = sm;
+                app.state_meta.writer = .ui_server;
+                std.debug.print("[ui] state_meta 恢复: epoch={d} writer={s}\n", .{
+                    app.state_meta.epoch, app.state_meta.writer.label(),
+                });
+            }
+            if (try app.peer_inbox.loadFromJson(json)) {
+                std.debug.print("[ui] peer_inbox 恢复: count={d}\n", .{app.peer_inbox.count()});
+            }
+            // host_profile: 从块恢复 kind/battery (桌面字段下次 refresh 覆盖)
+            if (std.mem.indexOf(u8, json, "\"host_profile\":")) |_| {
+                if (std.mem.indexOf(u8, json, "\"kind\":\"mobile\"")) |_| {
+                    app.host_profile.kind = .mobile;
+                    if (extractJsonFloatField(json, "battery_pct")) |b| app.host_profile.battery_pct = b;
+                    app.host_profile.thermal_hot = std.mem.indexOf(u8, json, "\"thermal_hot\":true") != null;
+                    app.host_profile.bg_restricted = std.mem.indexOf(u8, json, "\"bg_restricted\":true") != null;
+                }
+            }
+            refreshLifecycle(&app);
         } else |_| {}
     } else |_| {}
 
@@ -5930,6 +6525,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         var ac = ghw.harness.autocli.AutoCLI.init(alloc, io);
         const interval_s = if (args.autocli_interval_s == 0) 300 else args.autocli_interval_s;
         ac.interval_ns = @as(i128, @intCast(interval_s)) * std.time.ns_per_s;
+        app.autocli_base_interval_s = interval_s;
         app.autocli = ac;
         if (std.Thread.spawn(.{}, autocliThreadFn, .{&app})) |t| {
             app.autocli_thread = t;

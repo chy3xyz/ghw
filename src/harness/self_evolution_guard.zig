@@ -18,6 +18,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const primordial_laws = @import("primordial_laws.zig");
 const config_loader = @import("config_loader.zig");
 const GuardConfig = config_loader.GuardConfig;
 const ConfigLoader = config_loader.ConfigLoader;
@@ -82,8 +83,8 @@ pub const CORE_SYMBOLS = [_][]const u8{
 };
 
 /// 绝对禁止的符号 (即使在白名单文件内也禁止)。
-/// 由三组合成,保证 Guard 与 SelfEncoder.verify 用同一份危险构造 + 伦理红线。
-pub const DEFAULT_FORBIDDEN_SYMBOLS = CORE_SYMBOLS ++ DANGEROUS_CONSTRUCTS ++ ETHICAL_REDLINES;
+/// 由核心符号 + 危险构造 + 伦理红线 + 第一性保护标记合成。
+pub const DEFAULT_FORBIDDEN_SYMBOLS = CORE_SYMBOLS ++ DANGEROUS_CONSTRUCTS ++ ETHICAL_REDLINES ++ primordial_laws.PROTECTED_MARKERS;
 
 /// 不变量 - 修改后这些模式必须仍然存在 (或被声明为可移除)
 pub const DEFAULT_INVARIANTS = [_][]const u8{
@@ -104,7 +105,7 @@ pub const SelfEvolutionGuard = struct {
     /// 必须保留的不变量
     invariants: []const []const u8 = &DEFAULT_INVARIANTS,
     /// 单次修改行数硬上限
-    max_diff_lines: usize = 50,
+    max_diff_lines: usize = primordial_laws.Axioms.MAX_DIFF_LINES,
     /// 严格不变量模式: true 时, 缺失任一不变量的代码被拒 (rejected_invariant_broken)。
     /// 默认 false (软模式), 因为新模块天然不需要全部不变量。
     strict_invariants: bool = false,
@@ -428,4 +429,21 @@ test "SelfEvolutionGuard: loadFromFile 真实读盘 + 应用配置" {
     // 不存在的文件 ⇒ false, 不报错
     const missing = try g.loadFromFile(io, "/tmp/ghw_guard_nonexistent_xyz.json");
     try std.testing.expect(!missing);
+}
+
+test "SelfEvolutionGuard: primordial PROTECTED_MARKERS in forbidden set" {
+    for (primordial_laws.PROTECTED_MARKERS) |m| {
+        var found = false;
+        for (DEFAULT_FORBIDDEN_SYMBOLS) |f| {
+            if (std.mem.eql(u8, f, m)) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+    var g = SelfEvolutionGuard.init(std.testing.allocator);
+    defer g.deinit();
+    const v = g.review("src/agent/params.zig", "pub const x = 1;\n// mutate_rho here\n");
+    try std.testing.expect(v == .rejected_blacklist_symbol);
 }

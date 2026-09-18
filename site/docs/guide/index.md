@@ -97,3 +97,9 @@ cc -O2 -I zig-out/include -L zig-out/lib \
 ```
 
 更多说明见 [C SDK](/api/sdk)。
+
+## 觉醒与求存
+
+安装之后「如何活成一个数字生命」的理想叙事、架构边界与实现缺口，见仓库：
+
+`docs/AWAKENING_LIFECYCLE.md`

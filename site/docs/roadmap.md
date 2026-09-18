@@ -99,3 +99,11 @@ rollback(change)
 - 跳过 Consent 的自动产品改动。
 - 把产品运行时绑定到单一 SaaS。
 - 在主 Zig 工程中引入 Node/VitePress 依赖。
+
+## 觉醒 / 求存生命周期（并行轨）
+
+产品 runtime 之外，机器宿主上的「安装 → 觉醒 → 求存 → 外界 → 社会 → 目标 → 进化 → 稳态」见仓库根目录：
+
+`docs/AWAKENING_LIFECYCLE.md`
+
+其中 P0 缺口摘要：Awaken 状态机、daemon 对齐 AutoCLI/world_bridge、HostShortfall 显式映射层、**危机锁与 L1–L5 调度融合**。

@@ -10,10 +10,11 @@ const F = @import("../util/math.zig").F;
 const SystemSnapshot = @import("system_collector.zig").SystemSnapshot;
 const TaskQueue = @import("human_symbiosis/task_queue.zig").TaskQueue;
 const Task = @import("human_symbiosis/task_queue.zig").Task;
+const primordial_laws = @import("primordial_laws.zig");
 
-pub const DISK_PCT_EPS: F = 90.0;
-pub const MEM_PCT_EPS: F = 92.0;
-pub const LOAD_EPS: F = 8.0;
+pub const DISK_PCT_EPS: F = primordial_laws.HostCrisis.DISK_PCT_EPS;
+pub const MEM_PCT_EPS: F = primordial_laws.HostCrisis.MEM_PCT_EPS;
+pub const LOAD_EPS: F = primordial_laws.HostCrisis.LOAD_EPS;
 
 pub const SubmitResult = struct {
     submitted: u32 = 0,
@@ -148,4 +149,10 @@ test "WorldSensor: healthy snapshot submits nothing" {
     const r = try maybeSubmitFromSnapshot(&q, snap, alloc);
     try testing.expectEqual(@as(u32, 0), r.submitted);
     try testing.expectEqual(@as(u32, 0), q.pending_count);
+}
+
+test "world_sensor: thresholds alias primordial_laws" {
+    try testing.expectEqual(primordial_laws.HostCrisis.DISK_PCT_EPS, DISK_PCT_EPS);
+    try testing.expectEqual(primordial_laws.HostCrisis.MEM_PCT_EPS, MEM_PCT_EPS);
+    try testing.expectEqual(primordial_laws.HostCrisis.LOAD_EPS, LOAD_EPS);
 }

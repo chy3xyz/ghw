@@ -17,6 +17,17 @@ function ghwApp() {
     memoryQuery: '',
     memoryResults: null,
 
+    // 第一性原理清单 (GET /api/laws)
+    laws: null,
+    lawsFilter: 'all', // all | hard_axiom | life_law | evaluation
+    lawsOpen: true,
+    // P2c: 宿主画像推送 / 同伴 inbox 详情
+    hostProfileForm: { battery_pct: 12, thermal_hot: true, bg_restricted: false },
+    peerShareForm: { peer_id: 'demo-peer', host_crisis: true, favored_dim: 1, material: 0.55 },
+    peerInbox: { total_received: 0, entries: [] },
+    hostProfileBusy: false,
+    peerShareBusy: false,
+
     // ===== Tab 配置 =====
     tabs: [
       { id: 'status',       label: '生命信息',   icon: '🜂' },
@@ -108,9 +119,139 @@ function ghwApp() {
           { label: '任务动作', value: surv.last_task_action ?? 'none', hint: surv.last_task_acted ? '有界真执行已落地' : '合成/跳过', color: surv.last_task_acted ? 'text-emerald-300' : 'text-slate-400' },
           { label: '补救入队', value: String(surv.remedy_submitted_total ?? 0), hint: '诊断后 survival_remedy', color: 'text-rose-300' },
           { label: '求存信念', value: String(surv.survival_beliefs_total ?? 0), hint: '诊断→material beliefs', color: 'text-orange-300' },
+          { label: '人类介入', value: String(surv.act_human_total ?? 0), hint: surv.autocli_throttle_s > 0 ? `AutoCLI ${surv.autocli_throttle_s}s` : '无节流', color: 'text-red-300' },
+          { label: '高E代谢', value: String(surv.metabolism_submitted_total ?? 0), hint: '饱和时多样性任务', color: 'text-lime-300' },
+          { label: '外网桥接', value: String(surv.world_bridge_total ?? 0), hint: 'fetch→任务', color: 'text-teal-300' },
+          { label: '同伴写回', value: String(surv.peer_symbiosis_total ?? 0), hint: `peer_E_avg=${(surv.peer_E_avg ?? 0).toFixed(3)}`, color: 'text-sky-300' },
+          { label: '规则效果', value: `${surv.feedback_improved ?? 0}/${surv.feedback_evals ?? 0}`, hint: '危机规则后压力↓', color: 'text-lime-300' },
+          { label: '第一性', value: `v${surv.laws_version ?? '?'}`, hint: `${surv.laws_count ?? 0} 条硬先验 · 点开下方清单`, color: 'text-amber-300' },
+          { label: '存在相', value: surv.existence_phase ?? '—', hint: surv.awakened ? (surv.host_fingerprint || '已觉醒') : '未觉醒', color: surv.existence_phase === 'crisis' ? 'text-rose-300' : 'text-emerald-300' },
+          { label: '宿主短板', value: surv.shortfall ? (surv.shortfall.favored_dim === 1 ? 'M' : surv.shortfall.favored_dim === 2 ? 'R' : surv.shortfall.favored_dim === 3 ? 'N' : '—') : '—', hint: surv.shortfall?.host_crisis ? '危机' : '常态', color: 'text-orange-300' },
+          { label: '宿主画像', value: surv.host_profile?.kind ?? '—', hint: surv.host_profile?.kind === 'mobile' ? `电量 ${surv.host_profile?.battery_pct ?? '?'}%` : 'SystemCollector', color: 'text-sky-300' },
+          { label: '同伴inbox', value: String(surv.peer_inbox?.count ?? 0), hint: `crisis=${surv.peer_inbox?.crisis_count ?? 0} · ingest=${surv.peer_shortfall_ingest_total ?? 0}`, color: 'text-violet-300' },
         );
       }
       return rows;
+    },
+
+    get filteredLaws() {
+      const all = this.laws?.laws || [];
+      if (this.lawsFilter === 'all') return all;
+      return all.filter(l => l.kind === this.lawsFilter);
+    },
+
+    lawKindLabel(kind) {
+      switch (kind) {
+        case 'hard_axiom': return '硬公理';
+        case 'life_law': return '生命规律';
+        case 'evaluation': return '评估契约';
+        default: return kind || '—';
+      }
+    },
+
+    lawKindClass(kind) {
+      switch (kind) {
+        case 'hard_axiom': return 'bg-rose-500/15 text-rose-300 border-rose-500/30';
+        case 'life_law': return 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+        case 'evaluation': return 'bg-lime-500/15 text-lime-300 border-lime-500/30';
+        default: return 'bg-slate-500/15 text-slate-300 border-slate-500/30';
+      }
+    },
+
+    async refreshLaws() {
+      try {
+        const r = await fetch('/api/laws');
+        if (!r.ok) return;
+        this.laws = await r.json();
+      } catch (e) {
+        // 静默
+      }
+    },
+
+    async doAwaken() {
+      this.awakenBusy = true;
+      try {
+        const r = await fetch('/api/awaken', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          this.error = d.error || '觉醒失败: 需要成功的本机采样';
+        }
+        await this.refreshState();
+        await this.refreshLaws();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.awakenBusy = false;
+      }
+    },
+
+    async refreshPeerInbox() {
+      try {
+        const r = await fetch('/api/peer-inbox');
+        if (!r.ok) return;
+        this.peerInbox = await r.json();
+      } catch (e) {
+        // 静默
+      }
+    },
+
+    async pushHostProfile() {
+      this.hostProfileBusy = true;
+      try {
+        const r = await fetch('/api/host-profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            battery_pct: Number(this.hostProfileForm.battery_pct),
+            thermal_hot: !!this.hostProfileForm.thermal_hot,
+            bg_restricted: !!this.hostProfileForm.bg_restricted,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.error = d.error || 'host-profile 推送失败';
+        await this.refreshState();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.hostProfileBusy = false;
+      }
+    },
+
+    async sharePeerShortfall() {
+      this.peerShareBusy = true;
+      try {
+        const r = await fetch('/api/peer-inbox/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            peer_id: this.peerShareForm.peer_id || 'demo-peer',
+            host_crisis: !!this.peerShareForm.host_crisis,
+            favored_dim: Number(this.peerShareForm.favored_dim) || 0,
+            material: Number(this.peerShareForm.material) || 0.5,
+            disk_hot: Number(this.peerShareForm.favored_dim) === 1,
+            mem_hot: Number(this.peerShareForm.favored_dim) === 2,
+            load_hot: false,
+            world_starve: Number(this.peerShareForm.favored_dim) === 2,
+            social_starve: Number(this.peerShareForm.favored_dim) === 3,
+          }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.error = d.error || 'peer-inbox share 失败';
+        await this.refreshPeerInbox();
+        await this.refreshState();
+        await this.refreshTasks();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.peerShareBusy = false;
+      }
+    },
+
+    dimLabel(d) {
+      if (d === 1 || d === '1') return 'M';
+      if (d === 2 || d === '2') return 'R';
+      if (d === 3 || d === '3') return 'N';
+      return '?';
     },
 
     // SVG 折线图预计算 (避免 SVG 内 <template x-for> 触发 importNode 错误)
@@ -297,6 +438,10 @@ function ghwApp() {
         human: 'human',
         world_sensor: 'world',
         survival_remedy: 'remedy',
+        survival_act: 'act',
+        metabolism: 'meta',
+        world_fetch: 'fetch',
+        peer_symbiosis: 'peer',
         unknown: '—',
       };
       return m[source] || source || '—';
@@ -309,6 +454,10 @@ function ghwApp() {
       if (source === 'human') return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
       if (source === 'world_sensor') return 'bg-orange-500/20 text-orange-300 border-orange-500/30';
       if (source === 'survival_remedy') return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
+      if (source === 'survival_act') return 'bg-red-500/20 text-red-300 border-red-500/30';
+      if (source === 'metabolism') return 'bg-lime-500/20 text-lime-300 border-lime-500/30';
+      if (source === 'world_fetch') return 'bg-teal-500/20 text-teal-300 border-teal-500/30';
+      if (source === 'peer_symbiosis') return 'bg-sky-500/20 text-sky-300 border-sky-500/30';
       return 'bg-slate-700 text-ghw-dim border-slate-600';
     },
     taskSourceFilters() {
@@ -321,6 +470,10 @@ function ghwApp() {
         { id: 'balance', label: 'balance' },
         { id: 'world_sensor', label: 'world' },
         { id: 'survival_remedy', label: 'remedy' },
+        { id: 'survival_act', label: 'act' },
+        { id: 'metabolism', label: 'meta' },
+        { id: 'world_fetch', label: 'fetch' },
+        { id: 'peer_symbiosis', label: 'peer' },
         { id: 'unknown', label: '—' },
       ];
     },
@@ -333,6 +486,44 @@ function ghwApp() {
       const list = this.tasks.tasks || [];
       if (sourceId === 'all') return list.length;
       return list.filter((t) => (t.source || 'unknown') === sourceId).length;
+    },
+    evolutionLevelRows() {
+      const ea = this.state?.provenance?.evolution_acceptance;
+      if (!ea) return [];
+      return [
+        { key: 'L1', count: ea.l1 ?? 0, approved: null },
+        { key: 'L2', count: ea.l2 ?? 0, approved: null },
+        { key: 'L3', count: ea.l3 ?? 0, approved: ea.l3_approved ?? 0 },
+        { key: 'L4', count: ea.l4 ?? 0, approved: ea.l4_approved ?? 0 },
+        { key: 'L5', count: ea.l5 ?? 0, approved: null },
+      ];
+    },
+    steadyGateRows() {
+      const st = this.state?.provenance?.evolution_acceptance?.steady;
+      if (!st) return [];
+      return [
+        { key: 'mrn', label: 'M/R/N 平衡', ok: !!st.mrn_balanced },
+        { key: 'value', label: '价值趋势', ok: !!st.value_ok },
+        { key: 'e', label: 'E≥0.55', ok: !!st.e_ok },
+      ];
+    },
+    taskDimensionRows() {
+      const bd = this.tasks?.by_dimension;
+      if (!bd) return [];
+      const mk = (key, color, b) => ({
+        key,
+        color,
+        pending: b?.pending ?? 0,
+        completed: b?.completed ?? 0,
+        survival: b?.survival ?? 0,
+        evolution_linked: b?.evolution_linked ?? 0,
+      });
+      return [
+        mk('M · material', 'text-blue-400', bd.material),
+        mk('R · representation', 'text-fuchsia-400', bd.representation),
+        mk('N · nature', 'text-amber-400', bd.nature),
+        mk('all', 'text-slate-300', bd.all),
+      ];
     },
     goalDimensionClass(dim) {
       if (dim === 'nature') return 'bg-amber-500/20 text-amber-300';
@@ -580,8 +771,10 @@ function ghwApp() {
       await this.refreshActions();
       await this.refreshTasks();
       await this.refreshPeers();
+      await this.refreshPeerInbox();
       await this.refreshCapabilities();
       await this.refreshEvolved();
+      await this.refreshLaws();
       // 轮询
       this._pollTimer = setInterval(async () => {
         await this.refreshState();
@@ -592,6 +785,7 @@ function ghwApp() {
         if (this.tab === 'evolved') await this.refreshEvolved();
         // status tab 显示同伴 — 每次轮询都更新 (轻量)
         await this.refreshPeers();
+        if (this.tab === 'status') await this.refreshPeerInbox();
       }, 3000);
       // 跨 tab 事件: 聊天发送后立即刷新 E (HTMX after-request 触发)
       window.addEventListener('ghw:refresh-state', () => this.refreshState());

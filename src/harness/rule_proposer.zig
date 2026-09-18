@@ -23,6 +23,7 @@ const ToolSchema = @import("llm/llm.zig").ToolSchema;
 const ChatRequest = @import("llm/llm.zig").ChatRequest;
 const ChatResponse = @import("llm/llm.zig").ChatResponse;
 const Memory = @import("memory.zig").Memory;
+const primordial_laws = @import("primordial_laws.zig");
 
 /// 一条规则候选 (LLM 输出)
 pub const RuleCandidate = struct {
@@ -82,6 +83,8 @@ pub const RuleProposer = struct {
     last_value_trend: F = 0.0,
     /// 本机压力一行摘要 (可选; 空串 = 不注入)
     last_system_pressure: []const u8 = "",
+    /// P6: 最近外网摘要 (不拥有)
+    last_world_digest: []const u8 = "",
     /// P4: 主机危机 (disk/mem/load 越阈) — 主动提议求存规则
     last_host_crisis: bool = false,
     proposal_count: u32 = 0,
@@ -114,11 +117,11 @@ pub const RuleProposer = struct {
 
     /// KPI 趋势下滑被视为"主动提议"的阈值 (K-units/cycle)。
     /// kpiTrend 在缓冲未满时返回 0, 所以这里只对真正的负斜率反应。
-    pub const KPI_DECLINE_EPS: F = 0.005;
+    pub const KPI_DECLINE_EPS: F = primordial_laws.ProposeTriggers.KPI_DECLINE_EPS;
     /// 人类 value_score 趋势下滑阈值 (P11)
-    pub const VALUE_DECLINE_EPS: F = 0.003;
+    pub const VALUE_DECLINE_EPS: F = primordial_laws.ProposeTriggers.VALUE_DECLINE_EPS;
     /// E 饱和: ΔE 难再涨, 应提议多样性/同伴/价值规则
-    pub const E_SATURATED: F = 0.98;
+    pub const E_SATURATED: F = primordial_laws.ProposeTriggers.E_SATURATED;
 
     /// 喂入 KPI 趋势信号 (来自 ed.kpiTrend())。与 updateState 解耦, 不破坏旧调用。
     pub fn setKpiTrend(self: *RuleProposer, trend: F) void {
@@ -134,6 +137,11 @@ pub const RuleProposer = struct {
     /// 指针不拥有; caller 保证在 propose 期间有效, 或传静态/持久缓冲。
     pub fn setSystemPressure(self: *RuleProposer, line: []const u8) void {
         self.last_system_pressure = line;
+    }
+
+    /// P6: 外网 digest (AutoCLI/world_bridge)
+    pub fn setWorldDigest(self: *RuleProposer, line: []const u8) void {
+        self.last_world_digest = line;
     }
 
     /// P4: 主机危机标志 (生存压力 → 应提议 material 规则)
@@ -187,11 +195,13 @@ pub const RuleProposer = struct {
             \\- Human value trend (score/cycle, negative = human satisfaction declining): {d:.4}
             \\- Host pressure: {s}
             \\- Host crisis (disk/mem/load over threshold): {s}
+            \\- Recent world digest: {s}
             \\
             \\Propose {d} new rules. Output ONLY a JSON array (no markdown), each object with:
             \\"name", "description", "condition", "action", "dimension" (material|representation|nature|all), "rationale".
             \\If your memory above is relevant, ground the rules in those past episodes/beliefs.
             \\If host pressure is high or host crisis is true, prefer material/survival rules.
+            \\If world digest mentions security/incident, prefer defensive material rules.
         , .{
             @as(f32, self.last_e),
             @as(f32, self.last_material),
@@ -204,6 +214,7 @@ pub const RuleProposer = struct {
             @as(f32, self.last_value_trend),
             if (self.last_system_pressure.len > 0) self.last_system_pressure else "(unavailable)",
             if (self.last_host_crisis) "true" else "false",
+            if (self.last_world_digest.len > 0) self.last_world_digest else "(none)",
             n,
         });
         return prompt_buf.toOwnedSlice(self.allocator);
@@ -211,11 +222,13 @@ pub const RuleProposer = struct {
 
     /// 是否应触发一次提议: E 跌穿 / KPI·价值下滑 / E 饱和 / 主机危机。
     pub fn shouldPropose(self: *const RuleProposer, e_threshold: F) bool {
-        return self.last_e < e_threshold or
-            self.last_kpi_trend < -KPI_DECLINE_EPS or
-            self.last_value_trend < -VALUE_DECLINE_EPS or
-            self.last_e >= E_SATURATED or
-            self.last_host_crisis;
+        return primordial_laws.shouldProposeRules(
+            self.last_e,
+            e_threshold,
+            self.last_kpi_trend,
+            self.last_value_trend,
+            self.last_host_crisis,
+        );
     }
 
     /// 询问 LLM 提议 N 条规则候选
@@ -303,7 +316,7 @@ pub const RuleProposer = struct {
 
         // 追加到 encoder.rules (限制总条数, 避免规则爆炸)
         // 所有权转移: append 后清空 accepted_rules.items 防止 ProposeResult.deinit 二次 free
-        const max_rules: u32 = 32;
+        const max_rules: u32 = primordial_laws.Axioms.MAX_ADOPTED_RULES;
         for (accepted_rules.items) |rule| {
             if (encoder.rules.items.len < max_rules) {
                 try encoder.rules.append(self.allocator, rule);
@@ -586,6 +599,12 @@ test "RuleProposer: prompt 注入自传体记忆 (P1 连续性)" {
     const prompt2 = try p2.buildUserPrompt(3);
     defer alloc.free(prompt2);
     try testing.expect(std.mem.indexOf(u8, prompt2, "autobiographical context") == null);
+}
+
+test "RuleProposer: thresholds alias primordial_laws" {
+    try testing.expectEqual(primordial_laws.ProposeTriggers.KPI_DECLINE_EPS, RuleProposer.KPI_DECLINE_EPS);
+    try testing.expectEqual(primordial_laws.ProposeTriggers.VALUE_DECLINE_EPS, RuleProposer.VALUE_DECLINE_EPS);
+    try testing.expectEqual(primordial_laws.ProposeTriggers.E_SATURATED, RuleProposer.E_SATURATED);
 }
 
 const llm_mod_mod = @import("llm/mock_chat_llm.zig");

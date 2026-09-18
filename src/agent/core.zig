@@ -48,6 +48,7 @@ const GSPNode = harness.GSPNode;
 const SelfEvolver = harness.SelfEvolver;
 const GenerationRequest = harness.GenerationRequest;
 const GenerationKind = harness.GenerationKind;
+const primordial_laws = @import("../harness/primordial_laws.zig");
 const StaticCodeGenerator = harness.StaticCodeGenerator;
 const ReviewVerdict = harness.ReviewVerdict;
 const SelfEncoder = harness.SelfEncoder;
@@ -114,7 +115,7 @@ pub const RuleBias = struct {
 
     /// 偏置能给"对齐目标"叠加的最大分值 (等价优先级点数)。
     /// 取 3.0: 强主导时可翻转 ≤3 的优先级差, 但压不过更大的差距。
-    pub const MAX_BONUS: F = 3.0;
+    pub const MAX_BONUS: F = primordial_laws.BiasLimits.RULE_MAX_BONUS;
 
     pub fn hasBias(self: RuleBias) bool {
         return self.rule_count > 0 and self.favored != null;
@@ -135,7 +136,7 @@ pub const TaskBias = struct {
     selection_changed: bool = false,
 
     /// 人类任务略强于规则偏置 (投递者明确意图)
-    pub const MAX_BONUS: F = 4.0;
+    pub const MAX_BONUS: F = primordial_laws.BiasLimits.TASK_MAX_BONUS;
 
     pub fn hasBias(self: TaskBias) bool {
         return self.pending_count > 0 and self.favored != null;
@@ -1108,4 +1109,9 @@ test "GHWAgent: 连续 16 个 cycle 不泄漏" {
         _ = try agent.runCycle(&info_stream);
     }
     try std.testing.expect(agent.e_history.items.len == 16);
+}
+
+test "BiasLimits alias primordial_laws" {
+    try std.testing.expectEqual(primordial_laws.BiasLimits.RULE_MAX_BONUS, RuleBias.MAX_BONUS);
+    try std.testing.expectEqual(primordial_laws.BiasLimits.TASK_MAX_BONUS, TaskBias.MAX_BONUS);
 }

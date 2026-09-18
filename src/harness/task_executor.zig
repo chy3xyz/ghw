@@ -21,6 +21,7 @@ pub const Kind = enum {
     diagnose_host,
     query_peer,
     scan_world,
+    human_handoff,
     synthetic,
 
     pub fn label(self: Kind) []const u8 {
@@ -28,6 +29,7 @@ pub const Kind = enum {
             .diagnose_host => "diagnose_host",
             .query_peer => "query_peer",
             .scan_world => "scan_world",
+            .human_handoff => "human_handoff",
             .synthetic => "synthetic",
         };
     }
@@ -71,8 +73,26 @@ pub const Prep = struct {
 /// 按 source + 标题启发式分类 (无 LLM)
 pub fn classify(task: *const Task) Kind {
     if (task.source == .world_sensor) return .diagnose_host;
+    // P6: 外网信号任务 (须在通用 [world] 前缀之前)
+    if (task.source == .world_fetch or
+        std.mem.startsWith(u8, task.title, "[world] security") or
+        std.mem.startsWith(u8, task.title, "[world] incident") or
+        std.mem.startsWith(u8, task.title, "[world] agent") or
+        std.mem.startsWith(u8, task.title, "[world] systems"))
+    {
+        return .scan_world;
+    }
     if (std.mem.startsWith(u8, task.title, "[world]")) return .diagnose_host;
-    // P3: 补救任务 — peer 协作走 query, 其余只读扫描
+    // P5: 人类介入清单 — 数字生命「动作」= 升级给人类 (不执行破坏)
+    if (task.source == .survival_act or std.mem.startsWith(u8, task.title, "[act]")) return .human_handoff;
+    // P7: 同伴共生任务 → 再 query
+    if (task.source == .peer_symbiosis or std.mem.startsWith(u8, task.title, "[peer]")) return .query_peer;
+    // P5b / P3: 代谢与补救
+    if (task.source == .metabolism or std.mem.startsWith(u8, task.title, "[meta]")) {
+        if (containsAny(task.title, &[_][]const u8{ "peer", "同伴", "共生" })) return .query_peer;
+        if (containsAny(task.title, &[_][]const u8{ "scan", "world", "novelty" })) return .scan_world;
+        return .synthetic;
+    }
     if (task.source == .survival_remedy or std.mem.startsWith(u8, task.title, "[remedy]")) {
         if (containsAny(task.title, &[_][]const u8{ "peer", "同伴", "共生" })) return .query_peer;
         return .scan_world;
@@ -105,12 +125,40 @@ pub fn prepare(alloc: Allocator, task: *const Task, env: Env) !Prep {
         .diagnose_host => try prepareDiagnose(alloc, task, env),
         .query_peer => try preparePeerQuery(alloc, task, env),
         .scan_world => try prepareWorldScan(alloc, task, env),
+        .human_handoff => try prepareHumanHandoff(alloc, task),
         .synthetic => .{
             .kind = .synthetic,
             .report = try alloc.dupe(u8, ""),
             .infos = try alloc.alloc(Information, 0),
             .acted = false,
         },
+    };
+}
+
+fn prepareHumanHandoff(alloc: Allocator, task: *const Task) !Prep {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    try buf.print(alloc, "[human_handoff] escalated: {s}\n", .{task.title});
+    try buf.print(alloc, "checklist:\n{s}\n", .{task.description});
+    try buf.appendSlice(alloc, "action: waited for human (no shell/kill). GHW acted by escalating.\n");
+    const report = try buf.toOwnedSlice(alloc);
+    errdefer alloc.free(report);
+
+    var infos = try alloc.alloc(Information, 1);
+    errdefer {
+        for (infos) |inf| alloc.free(inf.label);
+        alloc.free(infos);
+    }
+    infos[0] = .{
+        .id = task.id * 1000 + 17,
+        .label = try std.fmt.allocPrint(alloc, "handoff:{s}", .{truncate(task.title, 40)}),
+        .features = .{ 0.40, 0.55, 0.70, 0.20 },
+    };
+    return .{
+        .kind = .human_handoff,
+        .report = report,
+        .infos = infos,
+        .acted = true,
     };
 }
 

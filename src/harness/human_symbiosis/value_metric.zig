@@ -21,6 +21,7 @@ const HumanSignal = @import("human_signal.zig").HumanSignal;
 const HumanFeedback = @import("human_signal.zig").HumanFeedback;
 const HumanGSP = @import("human_gsp.zig").HumanGSP;
 const TaskQueue = @import("task_queue.zig").TaskQueue;
+const primordial_laws = @import("../primordial_laws.zig");
 
 pub const ValueMetric = struct {
     /// 任务完成数
@@ -138,8 +139,8 @@ pub const ValueTrendTracker = struct {
     count: u8 = 0,
     last_score: F = 0,
 
-    /// 人类价值明显下滑阈值 (value-units/cycle)
-    pub const DECLINE_EPS: F = 0.003;
+    /// 人类价值明显下滑阈值 (value-units/cycle) — primordial_laws L13
+    pub const DECLINE_EPS: F = primordial_laws.ProposeTriggers.VALUE_DECLINE_EPS;
 
     pub fn record(self: *ValueTrendTracker, score: F) void {
         const s = @max(0, @min(score, 1));

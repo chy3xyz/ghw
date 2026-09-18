@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const F = @import("../util/math.zig").F;
 const Memory = @import("memory.zig").Memory;
 const SystemSnapshot = @import("system_collector.zig").SystemSnapshot;
-const world_sensor = @import("world_sensor.zig");
+const primordial_laws = @import("primordial_laws.zig");
 
 pub const LearnResult = struct {
     beliefs_added: u32 = 0,
@@ -18,9 +18,7 @@ pub const LearnResult = struct {
 };
 
 pub fn isCrisisSnap(snap: SystemSnapshot) bool {
-    return snap.disk_used_pct >= world_sensor.DISK_PCT_EPS or
-        snap.mem_pct >= world_sensor.MEM_PCT_EPS or
-        snap.load_1m >= world_sensor.LOAD_EPS;
+    return primordial_laws.isHostCrisis(snap.disk_used_pct, snap.mem_pct, snap.load_1m);
 }
 
 pub fn isCrisisReport(report: []const u8) bool {

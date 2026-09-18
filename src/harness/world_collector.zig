@@ -1,4 +1,8 @@
-//! WorldCollector: 用 autocli / 其他 CLI 工具从外部世界获取数据
+//! WorldCollector: 用 autocli ask 子进程从外部世界获取数据 (遗留通道)
+//!
+//! **生产主路径 (P0/P6)**: `autocli.zig` 拉 Wiki/HN/ArXiv/RSS → Memory.world_fetch
+//! → `world_bridge.zig` 启发式入队。本模块保留给「自然语言 ask autocli」实验,
+//! 勿与 AutoCLI 周期拉取混用 (避免双通道噪声)。
 //!
 //! 数字生命的"世界知识"不能只来自它自己的 toy 模型 — 必须能从真实世界拉数据
 //! autocli 是"通用命令行 AI 助手" — 可以:

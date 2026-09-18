@@ -118,6 +118,10 @@ const Config = struct {
     cross_host_peers_file: ?[]const u8 = null,
     /// agent.tick 持久化 sanity 上限 (默认 10^9; 超过或像 Unix 时间戳则启动时重置)
     max_agent_tick: u64 = harness.agent_tick_guard.DEFAULT_MAX_AGENT_TICK,
+    /// 禁用 AutoCLI 外网主路径 (默认启用, 与 ui_server 对齐)
+    no_autocli: bool = false,
+    /// AutoCLI 间隔秒 (默认 300)
+    autocli_interval_s: u64 = 300,
 };
 
 fn sanitizeLoadedAgentTick(stored: u64, now_unix: u64, max_tick: u64) u64 {
@@ -172,6 +176,12 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArg;
             cfg.max_agent_tick = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, a, "--no-autocli")) {
+            cfg.no_autocli = true;
+        } else if (std.mem.eql(u8, a, "--autocli-interval-s")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArg;
+            cfg.autocli_interval_s = try std.fmt.parseInt(u64, args[i], 10);
         } else if (std.mem.eql(u8, a, "--verbose") or std.mem.eql(u8, a, "-v")) {
             cfg.verbose = true;
         } else if (std.mem.eql(u8, a, "--id")) {
@@ -278,6 +288,8 @@ fn printHelp() void {
         \\  --log-every N           进度日志间隔 (默认 256, 0=静默)
         \\  --tick-interval-ms N    每 cycle sleep 多少 ms (默认 100, 0=不 sleep)
         \\  --max-agent-tick N      agent.tick 上限; 超限或像 Unix 时间戳则启动重置 (默认 10^9)
+        \\  --no-autocli            禁用 AutoCLI 外网拉取 (默认启用)
+        \\  --autocli-interval-s N  AutoCLI 间隔秒 (默认 300)
         \\  --id <string>           数字生命 id (默认 daemon-001)
         \\  --seed <N>              LCG 随机种子 (默认 42)
         \\  --llm <provider>        LLM: anthropic | openai | none (默认 none)
@@ -536,6 +548,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var sys_collector = harness.system_collector.SystemCollector.init(alloc, io, cfg.seed);
     defer sys_collector.deinit();
     var last_world_sensor_tick: u64 = 0;
+    var survival_feedback: harness.survival_feedback.Tracker = .{};
+    var survival_feedback_evals: u32 = 0;
+    var survival_feedback_improved: u32 = 0;
+    var awaken_state: harness.awaken.State = .{};
+    var state_meta: harness.state_contract.Meta = .{ .writer = .daemon };
+    var host_profile: harness.host_profile.Profile = .{};
+    var peer_inbox: harness.peer_inbox.Inbox = .{};
+    var last_shortfall: harness.host_shortfall.Report = .{};
+    var existence_phase: harness.existence_phase.Phase = .awakening;
+    var autocli = harness.autocli.AutoCLI.init(alloc, io);
+    autocli.interval_ns = @as(i128, @intCast(cfg.autocli_interval_s)) * std.time.ns_per_s;
+    var world_bridge_total: u32 = 0;
+    var world_digest_buf: [160]u8 = undefined;
+    var world_digest_len: usize = 0;
 
     // ===== L3 真应用: state_in → 实际恢复 agent 状态 =====
     var snapshot_tick: u64 = 0;
@@ -573,6 +599,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 }
             } else |err| {
                 std.debug.print("[daemon] memory loadFromJson 失败: {t}\n", .{err});
+            }
+            if (awaken_state.loadFromJson(json)) {
+                std.debug.print("[daemon] awaken 恢复: awakened={} fp={s}\n", .{
+                    awaken_state.awakened, awaken_state.fingerprintSlice(),
+                });
+            }
+            if (try harness.state_contract.Meta.parseFromJson(json, alloc)) |sm| {
+                state_meta = sm;
+                state_meta.writer = .daemon;
+                std.debug.print("[daemon] state_meta 恢复: epoch={d} writer={s}\n", .{
+                    state_meta.epoch, state_meta.writer.label(),
+                });
+            }
+            if (try peer_inbox.loadFromJson(json)) {
+                std.debug.print("[daemon] peer_inbox 恢复: count={d}\n", .{peer_inbox.count()});
+            }
+            if (std.mem.indexOf(u8, json, "\"host_profile\":")) |_| {
+                if (std.mem.indexOf(u8, json, "\"kind\":\"mobile\"")) |_| {
+                    host_profile.kind = .mobile;
+                    if (extractJsonFloatField(json, "battery_pct")) |b| host_profile.battery_pct = b;
+                    host_profile.thermal_hot = std.mem.indexOf(u8, json, "\"thermal_hot\":true") != null;
+                    host_profile.bg_restricted = std.mem.indexOf(u8, json, "\"bg_restricted\":true") != null;
+                }
             }
             if (task_queue.loadFromJson(json)) |loaded| {
                 if (loaded) {
@@ -705,6 +754,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // ===== Cross-host Link (TCP + HMAC, 跨 host 通信) =====
     var cross_link_opt: ?harness.ghw_link_tcp.CrossLink = null;
     var cross_link_stop = std.atomic.Value(bool).init(false);
+    var link_ctx = DaemonLinkCtx{
+        .agent = &agent,
+        .host_profile = &host_profile,
+        .last_shortfall = &last_shortfall,
+        .peer_inbox = &peer_inbox,
+        .memory = &memory,
+        .task_queue = &task_queue,
+        .io = io,
+    };
     if (cfg.cross_host_port > 0) {
         const ch_id = try alloc.dupe(u8, cfg.id);
         const ch_host = try alloc.dupe(u8, "0.0.0.0"); // listen on all
@@ -716,11 +774,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.debug.print("[daemon] cross-host peers load 失败: {t}\n", .{err});
             };
         }
-        // 启 listener thread (复用 serverHandler mock for now, 真正 Phase 10+ 接 L4/L5)
-        const cross_thread = try std.Thread.spawn(.{}, crossHostListener, .{ &cl, &cross_link_stop });
+        const cross_thread = try std.Thread.spawn(.{}, crossHostListener, .{ &cl, &link_ctx, &cross_link_stop });
         cross_thread.detach();
         cross_link_opt = cl;
-        std.debug.print("[daemon] cross-host listener 启 on port {d} (id={s}, peers={d})\n", .{ cfg.cross_host_port, ch_id, cl.peers.items.len });
+        std.debug.print("[daemon] cross-host listener 启 on port {d} (id={s}, peers={d}, shortfall enabled)\n", .{ cfg.cross_host_port, ch_id, cl.peers.items.len });
     } else {
         std.debug.print("[daemon] cross-host disabled (--cross-host-port 0)\n", .{});
     }
@@ -826,6 +883,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (agent.tick > 0 and agent.tick % 8 == 0 and agent.tick != last_world_sensor_tick) {
             last_world_sensor_tick = agent.tick;
             if (sys_collector.last) |s| {
+                // P8b: 危机规则采纳后对照压力
+                if (survival_feedback.maybeEvaluate(s, agent.tick, &memory, io)) |maybe_ev| {
+                    if (maybe_ev) |ev| {
+                        survival_feedback_evals += 1;
+                        if (ev.improved) survival_feedback_improved += 1;
+                        std.debug.print("[daemon] survival_feedback improved={} evals={d}/{d} diskΔ={d:.1}\n", .{
+                            ev.improved, survival_feedback_improved, survival_feedback_evals, ev.disk_delta,
+                        });
+                    }
+                } else |_| {}
                 const wr = harness.world_sensor.maybeSubmitFromSnapshot(&task_queue, s, alloc) catch null;
                 if (wr) |r| {
                     if (r.submitted > 0) {
@@ -834,6 +901,130 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         });
                     }
                 }
+            }
+        }
+
+        // P0: 觉醒仪式 (有采样即可)
+        if (!awaken_state.awakened) {
+            if (sys_collector.last) |s| {
+                const now_u = std.Io.Clock.real.now(io).toSeconds();
+                const done = awaken_state.tryComplete(&memory, io, agent.tick, now_u, s) catch false;
+                if (done) {
+                    std.debug.print("[daemon] ★ 觉醒完成 host={s} tick={d}\n", .{ awaken_state.fingerprintSlice(), agent.tick });
+                }
+            }
+        }
+
+        // P2: 刷新 HostProfile + 宿主短板 + 存在相
+        {
+            const now_u = std.Io.Clock.real.now(io).toSeconds();
+            if (sys_collector.last) |s| {
+                if (host_profile.kind == .desktop) {
+                    host_profile = harness.host_profile.Profile.fromDesktop(s, now_u);
+                } else {
+                    host_profile.mem_pct = s.mem_pct;
+                    host_profile.disk_used_pct = s.disk_used_pct;
+                    host_profile.load_1m = s.load_1m;
+                    host_profile.updated_at_unix = now_u;
+                }
+            }
+            var world_fetch_count: u32 = 0;
+            for (memory.episodes.items) |ep| {
+                if (ep.kind == .world_fetch) world_fetch_count += 1;
+            }
+            last_shortfall = harness.host_shortfall.assessWithProfile(
+                sys_collector.last,
+                agent.ed.e(),
+                world_fetch_count,
+                0, // live_peers: CrossLink peers 另计, 先 0 保守
+                value_tracker.trend(),
+                host_profile,
+            );
+            if (proposer_opt) |*p| p.setHostCrisis(last_shortfall.host_crisis);
+            const balanced = harness.existence_phase.mrnBalanced(
+                agent.ed.v.material,
+                agent.ed.v.representation,
+                agent.ed.v.nature,
+            );
+            existence_phase = harness.existence_phase.compute(
+                awaken_state.awakened,
+                last_shortfall.host_crisis,
+                agent.ed.e(),
+                balanced,
+                harness.existence_phase.valueOk(value_tracker.trend()),
+            );
+        }
+
+        // P2: 周期拉同伴 shortfall (每 64 tick)
+        if (cross_link_opt) |*cl| {
+            if (agent.tick > 0 and agent.tick % 64 == 0) {
+                for (cl.peers.items) |*peer| {
+                    const sf = cl.query(peer.peer_id, "query_shortfall", "{}") catch continue;
+                    defer alloc.free(sf);
+                    if (harness.host_shortfall.parseJson(sf)) |sf_report| {
+                        const now_u2: i64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
+                        peer_inbox.push(peer.peer_id, sf_report, agent.tick, now_u2);
+                        _ = harness.peer_symbiosis.learnFromShortfall(
+                            &memory,
+                            &task_queue,
+                            peer.peer_id,
+                            sf_report,
+                            agent.tick,
+                        ) catch {};
+                    }
+                }
+            }
+        }
+
+        // P0: AutoCLI → Memory → world_bridge (与 ui_server 外网主路径对齐)
+        if (!cfg.no_autocli) {
+            const now_ns = std.Io.Clock.real.now(io).nanoseconds;
+            if (autocli.shouldFetch(now_ns)) {
+                var items: std.ArrayList(harness.autocli.FetchedItem) = .empty;
+                defer {
+                    for (items.items) |*it| it.deinit();
+                    items.deinit(alloc);
+                }
+                autocli.fetchAll(&items) catch {};
+                for (items.items) |it| {
+                    const kind_str = switch (it.source) {
+                        .wikipedia => "autocli_wiki",
+                        .hackernews => "autocli_hn",
+                        .arxiv => "autocli_arxiv",
+                        .rss => "autocli_rss",
+                    };
+                    const summary = std.fmt.allocPrint(alloc, "[{s}] {s}", .{ kind_str, it.title }) catch continue;
+                    defer alloc.free(summary);
+                    const body = std.fmt.allocPrint(alloc, "{s}\n{s}\nURL: {s}", .{ it.title, it.snippet, it.url }) catch continue;
+                    defer alloc.free(body);
+                    memory.recordAt(io, .world_fetch, agent.tick, summary, body, 2, 0) catch {};
+                    const br = harness.world_bridge.maybeAdoptFromFetch(&task_queue, it.title, it.snippet, alloc) catch null;
+                    if (br) |b| {
+                        if (b.submitted > 0) {
+                            world_bridge_total += b.submitted;
+                            std.debug.print("[daemon] world_bridge 入队 {d} from 「{s}」(total={d})\n", .{
+                                b.submitted, it.title, world_bridge_total,
+                            });
+                        }
+                    }
+                }
+                if (items.items.len > 0) {
+                    const last = items.items[items.items.len - 1];
+                    const tag = switch (last.source) {
+                        .wikipedia => "wiki",
+                        .hackernews => "hn",
+                        .arxiv => "arxiv",
+                        .rss => "rss",
+                    };
+                    if (harness.world_bridge.formatDigestLine(alloc, last.title, tag)) |line| {
+                        defer alloc.free(line);
+                        const n = @min(line.len, world_digest_buf.len);
+                        @memcpy(world_digest_buf[0..n], line[0..n]);
+                        world_digest_len = n;
+                    } else |_| {}
+                    std.debug.print("[daemon] autocli 拉取 {d} 条 (累计 {d})\n", .{ items.items.len, autocli.total_fetched });
+                }
+                autocli.markFetched(now_ns);
             }
         }
 
@@ -940,15 +1131,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
             if (harness.task_feedback.runNextPendingWithFeedbackEnv(&agent, &fb_ctx, alloc, ts, exec_env)) |ran| {
                 if (ran) |r| {
-                    std.debug.print("[daemon] task #{d} 「{s}」完成 ΔE={d:.3} action={s} acted={} remedy=+{d} beliefs=+{d} crisis={}\n", .{
-                        r.task_id, r.title, r.actual_delta_e, r.action_kind, r.acted, r.remedy_submitted, r.beliefs_added, r.host_crisis,
+                    std.debug.print("[daemon] task #{d} 「{s}」完成 ΔE={d:.3} action={s} acted={} remedy=+{d} beliefs=+{d} crisis={} act_human=+{d} peer_E={d:.3}\n", .{
+                        r.task_id, r.title, r.actual_delta_e, r.action_kind, r.acted, r.remedy_submitted, r.beliefs_added, r.host_crisis, r.act_human_tasks, r.peer_e_seen,
                     });
                     if (proposer_opt) |*p| {
                         p.setHostCrisis(r.host_crisis);
                     }
+                    if (r.peer_e_seen > 0.01) {
+                        agent.ed.peer_E_avg = if (agent.ed.peer_E_avg < 0.01) r.peer_e_seen else agent.ed.peer_E_avg * 0.7 + r.peer_e_seen * 0.3;
+                        agent.ed.sigma = 0.15;
+                    }
                 }
             } else |err| {
                 std.debug.print("[daemon] runNextPending failed: {t}\n", .{err});
+            }
+        }
+
+        // P5b: E 饱和 → 多样性代谢任务
+        if (agent.tick > 0 and agent.tick % 64 == 0 and agent.ed.e() >= harness.metabolism.E_SATURATED) {
+            const value_flat = @abs(value_tracker.trend()) < 0.0001 and value_tracker.count >= 8;
+            if (harness.metabolism.maybeInject(&task_queue, agent.ed.e(), false, value_flat, alloc)) |mr| {
+                if (mr.submitted > 0) {
+                    std.debug.print("[daemon] metabolism 入队 {d} (pending={d})\n", .{ mr.submitted, task_queue.pending_count });
+                }
+            } else |err| {
+                std.debug.print("[daemon] metabolism failed: {t}\n", .{err});
             }
         }
 
@@ -1006,6 +1213,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                                         };
                                         defer prop_result.deinit();
                                         llm_propose_count += 1;
+                                        if (prop_result.accepted > 0) {
+                                            if (sys_collector.last) |s| {
+                                                survival_feedback.markAfterCrisisRules(s, agent.tick, prop_result.accepted);
+                                            }
+                                        }
                                         const prop_summary = std.fmt.allocPrint(alloc, "force_l4: accepted={d} rejected={d}", .{
                                             prop_result.accepted, prop_result.rejected,
                                         }) catch null;
@@ -1088,7 +1300,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
             // 2. 每 16 loop_tick 写 snapshot
             if (loop_tick > 0 and loop_tick % 16 == 0) {
-                writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, path, agent.tick, self_evolve_count) catch |err| {
+                writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, &awaken_state, &state_meta, &host_profile, &peer_inbox, path, agent.tick, self_evolve_count) catch |err| {
                     if (cfg.log_every != 0) std.debug.print("[daemon] snapshot 失败: {t}\n", .{err});
                 };
 
@@ -1103,10 +1315,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         // 周期性进度日志 (默认每 256 loop_tick, --log-every 0 关闭)
         if (cfg.log_every != 0 and loop_tick > 0 and loop_tick % cfg.log_every == 0) {
-            std.debug.print("[daemon] loop_tick={d} agent_tick={d} E={d:.3} self_evolved_total={d} self_evolution_rate={d:.4}\n", .{
+            std.debug.print("[daemon] loop_tick={d} agent_tick={d} E={d:.3} phase={s} crisis={} self_evolved_total={d} self_evolution_rate={d:.4}\n", .{
                 loop_tick,
                 agent.tick,
                 agent.ed.e(),
+                existence_phase.label(),
+                last_shortfall.host_crisis,
                 self_evolve_count,
                 @as(f64, @floatFromInt(self_evolve_count)) / @as(f64, @floatFromInt(loop_tick)),
             });
@@ -1185,6 +1399,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         if (pressure_owned) |pl| p.setSystemPressure(pl);
                         p.setHostCrisis(harness.survival_learn.isCrisisSnap(s));
                     }
+                    if (world_digest_len > 0) {
+                        p.setWorldDigest(world_digest_buf[0..world_digest_len]);
+                    }
                     if (p.shouldPropose(cfg.rule_propose_threshold)) {
                         var prop_result = p.proposeAndAdopt(enc, grd, 3) catch |err| {
                             std.debug.print("[daemon] proposeAndAdopt failed: {t}\n", .{err});
@@ -1197,6 +1414,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                             prop_result.accepted,
                             prop_result.rejected,
                         });
+                        if (prop_result.accepted > 0) {
+                            if (sys_collector.last) |s| {
+                                survival_feedback.markAfterCrisisRules(s, agent.tick, prop_result.accepted);
+                            }
+                        }
                         llm_propose_count += 1;
                         const prop_summary = std.fmt.allocPrint(alloc, "propose: accepted={d} rejected={d}", .{
                             prop_result.accepted, prop_result.rejected,
@@ -1225,7 +1447,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // ===== 退出前最后 snapshot (graceful shutdown) =====
     if (cfg.state_out) |path| {
-        writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, path, agent.tick, self_evolve_count) catch |err| {
+        writeSnapshot(alloc, io, &agent, &memory, &task_queue, &human_gsp, &human_signal, &value_tracker, &awaken_state, &state_meta, &host_profile, &peer_inbox, path, agent.tick, self_evolve_count) catch |err| {
             std.debug.print("[daemon] 退出前 snapshot 失败: {t}\n", .{err});
         };
     }
@@ -1271,13 +1493,55 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 }
 
-// ===== Cross-host listener (v0.5.1 新增, TCP + HMAC 跨 host 通信) =====
-/// 简化版 server handler: 返 mock response, Phase 10+ 接 L4/L5 真实 handler
+// ===== Cross-host listener (TCP + HMAC) — 真 query_state / shortfall =====
+const DaemonLinkCtx = struct {
+    agent: *GHWAgent,
+    host_profile: *harness.host_profile.Profile,
+    last_shortfall: *harness.host_shortfall.Report,
+    peer_inbox: *harness.peer_inbox.Inbox,
+    memory: *Memory,
+    task_queue: *harness.human_symbiosis.TaskQueue,
+    io: std.Io,
+};
+
+fn extractJsonFloatField(json: []const u8, key: []const u8) ?f32 {
+    var needle_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":", .{key}) catch return null;
+    const pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    var i = pos + needle.len;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t')) : (i += 1) {}
+    const start = i;
+    while (i < json.len and (json[i] == '.' or json[i] == '-' or (json[i] >= '0' and json[i] <= '9') or json[i] == 'e' or json[i] == '+')) : (i += 1) {}
+    if (i == start) return null;
+    return std.fmt.parseFloat(f32, json[start..i]) catch null;
+}
+
+fn extractJsonStringField(json: []const u8, key: []const u8) ?[]const u8 {
+    var needle_buf: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":\"", .{key}) catch return null;
+    const pos = std.mem.indexOf(u8, json, needle) orelse return null;
+    const start = pos + needle.len;
+    const end = std.mem.indexOfPos(u8, json, start, "\"") orelse return null;
+    return json[start..end];
+}
+
+fn appendJsonString(alloc: std.mem.Allocator, body: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try body.appendSlice(alloc, "\\\""),
+            '\\' => try body.appendSlice(alloc, "\\\\"),
+            '\n' => try body.appendSlice(alloc, "\\n"),
+            else => try body.append(alloc, c),
+        }
+    }
+}
+
 fn crossHostHandler(method: []const u8, params: []const u8, ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!harness.ghw_link.Response {
-    _ = params;
-    _ = ctx;
+    const c: *DaemonLinkCtx = @ptrCast(@alignCast(ctx));
     if (std.mem.eql(u8, method, "ping")) {
-        const payload = try alloc.dupe(u8, "{\"pong\":true}");
+        const payload = try std.fmt.allocPrint(alloc, "{{\"pong\":true,\"peer_id\":\"{s}\",\"tick\":{d}}}", .{
+            c.agent.self_id, c.agent.tick,
+        });
         return .{ .ok = true, .payload = payload };
     }
     if (std.mem.eql(u8, method, "hello")) {
@@ -1286,20 +1550,58 @@ fn crossHostHandler(method: []const u8, params: []const u8, ctx: *anyopaque, all
         return .{ .ok = true, .payload = payload };
     }
     if (std.mem.eql(u8, method, "query_state")) {
-        const payload = try alloc.dupe(u8, "{\"tick\":0,\"E\":1.0,\"cross_host\":true}");
+        const payload = try std.fmt.allocPrint(alloc,
+            "{{\"tick\":{d},\"E\":{d:.3},\"M\":{d:.3},\"R\":{d:.3},\"N\":{d:.3},\"cross_host\":true}}", .{
+            c.agent.tick,
+            c.agent.ed.e(),
+            c.agent.ed.v.material,
+            c.agent.ed.v.representation,
+            c.agent.ed.v.nature,
+        });
         return .{ .ok = true, .payload = payload };
+    }
+    if (std.mem.eql(u8, method, "query_shortfall")) {
+        var body: std.ArrayList(u8) = .empty;
+        errdefer body.deinit(alloc);
+        try body.appendSlice(alloc, "{\"peer_id\":\"");
+        try appendJsonString(alloc, &body, c.agent.self_id);
+        try body.print(alloc, "\",\"tick\":{d},\"host_kind\":\"{s}\",\"report\":", .{
+            c.agent.tick, c.host_profile.kind.label(),
+        });
+        try harness.host_shortfall.appendJson(alloc, &body, c.last_shortfall.*);
+        try body.append(alloc, '}');
+        return .{ .ok = true, .payload = try body.toOwnedSlice(alloc) };
+    }
+    if (std.mem.eql(u8, method, "share_shortfall")) {
+        const peer_id = extractJsonStringField(params, "peer_id") orelse "unknown";
+        const report = harness.host_shortfall.parseJson(params) orelse {
+            return .{ .ok = false, .payload = try alloc.dupe(u8, "\"invalid shortfall\"") };
+        };
+        const now_u: i64 = @intCast(std.Io.Clock.real.now(c.io).toSeconds());
+        c.peer_inbox.push(peer_id, report, c.agent.tick, now_u);
+        const learned = harness.peer_symbiosis.learnFromShortfall(
+            c.memory,
+            c.task_queue,
+            peer_id,
+            report,
+            c.agent.tick,
+        ) catch harness.peer_symbiosis.ShortfallLearn{};
+        return .{ .ok = true, .payload = try std.fmt.allocPrint(alloc,
+            "{{\"accepted\":true,\"beliefs_added\":{d},\"followups\":{d},\"inbox_count\":{d}}}", .{
+            learned.beliefs_added, learned.followups, c.peer_inbox.count(),
+        }) };
     }
     const payload = try alloc.dupe(u8, "{\"unknown\":true}");
     return .{ .ok = false, .payload = payload };
 }
 
-fn crossHostListener(cl: *harness.ghw_link_tcp.CrossLink, stop: *std.atomic.Value(bool)) void {
-    cl.runServer(crossHostHandler, undefined, stop) catch |err| {
+fn crossHostListener(cl: *harness.ghw_link_tcp.CrossLink, ctx: *DaemonLinkCtx, stop: *std.atomic.Value(bool)) void {
+    cl.runServer(crossHostHandler, ctx, stop) catch |err| {
         std.debug.print("[daemon] cross-host listener 异常: {t}\n", .{err});
     };
 }
 
-// 写 snapshot 到 path (L3 持久化 + P4 memory 块)
+// 写 snapshot 到 path (L3 持久化 + P4 memory 块 + P2 host_profile/peer_inbox)
 fn writeSnapshot(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1309,10 +1611,29 @@ fn writeSnapshot(
     human_gsp: *harness.human_symbiosis.HumanGSP,
     human_signal: *harness.human_symbiosis.HumanSignal,
     value_tracker: *harness.human_symbiosis.ValueTrendTracker,
+    awaken_state: *const harness.awaken.State,
+    state_meta: *harness.state_contract.Meta,
+    host_profile: *const harness.host_profile.Profile,
+    peer_inbox: *const harness.peer_inbox.Inbox,
     path: []const u8,
     tick: u64,
     success_count: u32,
 ) !void {
+    var disk_meta: harness.state_contract.Meta = .{};
+    if (readFile(alloc, io, path)) |existing| {
+        defer alloc.free(existing);
+        if (try harness.state_contract.Meta.parseFromJson(existing, alloc)) |dm| {
+            disk_meta = dm;
+        }
+    } else |_| {}
+    const conflict = harness.state_contract.detectConflict(state_meta.*, disk_meta, .daemon);
+    if (conflict == .foreign_newer) {
+        std.debug.print("[daemon] snapshot 跳过: 磁盘 epoch={d} writer={s} (foreign_newer)\n", .{
+            disk_meta.epoch, disk_meta.writer.label(),
+        });
+        return;
+    }
+
     const ss = StateSerializer.init(alloc, io);
     var snap = StateSnapshot{
         .agent_id = try alloc.dupe(u8, agent.self_id),
@@ -1355,9 +1676,33 @@ fn writeSnapshot(
     defer alloc.free(with_sig);
     const merged = try mergeJsonBlockIntoSnapshot(alloc, with_sig, "value_tracker", vt_json);
     defer alloc.free(merged);
-    try writeFile(io, path, merged);
-    std.debug.print("[daemon] snapshot: {s} ({d} bytes, memory episodes={d}, tasks pending={d}, gsp peers={d}, value_count={d})\n", .{
-        path, merged.len, memory.episodes.items.len, task_queue.pending_count, human_gsp.peers.count(), value_tracker.count,
+    const awaken_json = try awaken_state.toJson(alloc);
+    defer alloc.free(awaken_json);
+    const with_awaken = try mergeJsonBlockIntoSnapshot(alloc, merged, "awaken", awaken_json);
+    defer alloc.free(with_awaken);
+
+    const hp_json = try host_profile.toJson(alloc);
+    defer alloc.free(hp_json);
+    const with_hp = try mergeJsonBlockIntoSnapshot(alloc, with_awaken, "host_profile", hp_json);
+    defer alloc.free(with_hp);
+    const inbox_json = try peer_inbox.toJson(alloc);
+    defer alloc.free(inbox_json);
+    const with_inbox = try mergeJsonBlockIntoSnapshot(alloc, with_hp, "peer_inbox", inbox_json);
+    defer alloc.free(with_inbox);
+
+    const now_unix: i64 = @intCast(std.Io.Clock.real.now(io).toSeconds());
+    state_meta.writer = .daemon;
+    state_meta.epoch = harness.state_contract.nextEpoch(state_meta.*, disk_meta);
+    state_meta.tick = tick;
+    state_meta.updated_at_unix = now_unix;
+    const meta_json = try state_meta.toJson(alloc);
+    defer alloc.free(meta_json);
+    const with_meta = try mergeJsonBlockIntoSnapshot(alloc, with_inbox, "state_meta", meta_json);
+    defer alloc.free(with_meta);
+
+    try harness.state_contract.writeAtomic(io, alloc, path, with_meta);
+    std.debug.print("[daemon] snapshot: {s} ({d} bytes, memory episodes={d}, tasks pending={d}, gsp peers={d}, value_count={d}, awakened={}, epoch={d}, inbox={d})\n", .{
+        path, with_meta.len, memory.episodes.items.len, task_queue.pending_count, human_gsp.peers.count(), value_tracker.count, awaken_state.awakened, state_meta.epoch, peer_inbox.count(),
     });
 }
 

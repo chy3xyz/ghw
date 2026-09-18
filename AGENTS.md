@@ -474,12 +474,18 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 - 收到品质/架构建议后，期望 agent 直接实施改进而非仅出方案（「按照你的建议来」「继续推进」）
 - 代码审查只要阻塞或高风险问题，按 path:line 简洁列出；无阻塞时明确说明并最多列 1–2 个可选改进
 - 长期目标是 GHW 作为可嵌入商城、CRM、研发工具等宿主产品的生产级数字生命底座，而非停留在研究 demo
+- UI/前端修复须实测验证（重启 ui_server + 浏览器硬刷新）后再声称修好，避免只改模板就报完成
 
 ## Learned Workspace Facts
 
+- 本地 Zig 工具链: `zigup` 当前推荐 `0.17.0-dev.1422+e863bf3be`（`~/.local/bin/zig` 应指向该版本）；工程已在 1422 上通过 `zig build` / `zig build test`
 - 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
 - UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN
-- ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程
-- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件 `x-data="ghwApp()"`；对可能为 null 的 state 字段用 `?.` 可选链
+- ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程并硬刷新浏览器
+- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件必须 `x-data="ghwApp()"`（带括号）；中间路径用 `?.`（`??` 只护最后一级）；`x-show` 为 false 时子表达式仍会求值；SVG 内禁止 Alpine `x-for`，图表用 JS 拼 SVG 再 `x-html`
 - 项目文档站位于 `/site`（VitePress）；Node 依赖仅存在于 `/site/package.json`，主 Zig 工程保持零依赖
 - Sandbox/CI 中 `zig build test` 若遇 Zig 全局 cache 权限错误，可用工作区内 `ZIG_GLOBAL_CACHE_DIR`（或 `ZIG_LOCAL_CACHE_DIR`）重跑
+- 外网主路径: AutoCLI → Memory.world_fetch → world_bridge 入队；`WorldCollector`（autocli ask 子进程）为遗留实验通道，勿与周期 AutoCLI 混用
+- 求存 P8: ActionRunner 在生存任务 pending 时让路 TaskExecutor；query_peer（含手动 API）统一走 `peer_symbiosis`；危机下采纳规则后经 `survival_feedback` 对照 disk/mem/load 是否真降并强化 `[survive:*]` 信念
+- 第一性先验: `harness/primordial_laws.zig` 为 15 条硬公理/生命规律/评估契约的单一事实源（阈值、Bias 上限、ρ、Guard 保护标记）；LLM 不可改写；经 `GET /api/laws` 与 UI「第一性原理」面板只读暴露；消费者必须引用该模块常量
+- 觉醒/求存理想生命周期与缺口评估见 `docs/AWAKENING_LIFECYCLE.md`（合理版：觉醒状态机、宿主短板→M/R/N、TaskQueue 为持久目标、有界求存；与自我进化内环融合：求存提供「为何进化」、L1–L5/规则过 Guard 提供「如何更会求存」；与产品 runtime 分轨）。**P0 已落地**：`awaken` / `host_shortfall` / `existence_phase`；ui_server 危机锁 + `POST /api/awaken`；daemon AutoCLI/world_bridge 默认对齐。**P1 已落地**：`evolution_acceptance` provenance + UI 验收面板；`state_contract` 防 ui/daemon 双写；任务维度台账 `by_dimension`。**P2 已落地**：`host_profile`（desktop/mobile 推送）+ `peer_inbox` + Link `query_shortfall`/`share_shortfall`；daemon CrossLink 对齐；验收脚本 `scripts/awakening_lifecycle_acceptance.sh`。**P2c**：`POST /api/peer-inbox/share` + Status UI inbox 详情 + RuleProposer peer digest；`scripts/peer_shortfall_link_acceptance.sh`

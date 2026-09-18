@@ -306,7 +306,7 @@ fn buildGhwStateString(alloc: Allocator, agent: *GHWAgent) ![]u8 {
 test "LLMGoalProposer: buildUserPrompt 注入自传体记忆" {
     const alloc = std.testing.allocator;
     var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
-    const chat = mock.asChat();
+    var chat = mock.asChat();
     var gp = LLMGoalProposer.init(alloc, &chat, "mock");
 
     var agent = try GHWAgent.init(alloc, "goal-test", 4, .{ 3, 3, 3 }, 1);

@@ -11,6 +11,8 @@ const TaskQueue = @import("human_symbiosis/task_queue.zig").TaskQueue;
 const task_executor = @import("task_executor.zig");
 const survival_remedy = @import("survival_remedy.zig");
 const survival_learn = @import("survival_learn.zig");
+const survival_act = @import("survival_act.zig");
+const peer_symbiosis = @import("peer_symbiosis.zig");
 
 pub const RunResult = struct {
     task_id: u64,
@@ -22,6 +24,11 @@ pub const RunResult = struct {
     remedy_submitted: u32 = 0,
     beliefs_added: u32 = 0,
     host_crisis: bool = false,
+    act_human_tasks: u32 = 0,
+    /// null = unchanged; Some(0) = clear; Some(N) = set override seconds
+    throttle_autocli_s: ?u64 = null,
+    peer_e_seen: f32 = 0,
+    peer_followups: u32 = 0,
 };
 
 /// 取最高优先级 pending 任务并执行。返回 null 表示队列空或 dequeue 失败。
@@ -107,6 +114,47 @@ pub fn runNextPendingWithEnv(
         }
     }
 
+    // P5a: 有界补救 — 节流 AutoCLI + 人类介入清单
+    var act_human_tasks: u32 = 0;
+    var throttle_autocli_s: ?u64 = null;
+    if (prep) |p| {
+        if (p.kind == .diagnose_host and p.acted and p.report.len > 0) {
+            const ar = survival_act.applyFromReport(
+                queue,
+                agent.memory,
+                agent.memory_io,
+                agent.tick,
+                p.report,
+                1,
+            ) catch null;
+            if (ar) |a| {
+                act_human_tasks = a.human_tasks;
+                throttle_autocli_s = a.throttle_autocli_s;
+            }
+        }
+    }
+
+    // P7: query_peer 结果 → 信念 + peer_E + follow-up
+    var peer_e_seen: f32 = 0;
+    var peer_followups: u32 = 0;
+    if (prep) |p| {
+        if (p.kind == .query_peer and p.acted and p.report.len > 0) {
+            const pin = peer_symbiosis.learnFromReport(
+                agent.memory,
+                agent.memory_io,
+                agent.tick,
+                p.report,
+                agent.ed.e(),
+                queue,
+            ) catch null;
+            if (pin) |ins| {
+                peer_e_seen = ins.peer_e;
+                peer_followups = ins.followups;
+                beliefs_added += ins.beliefs_added;
+            }
+        }
+    }
+
     return .{
         .task_id = t.id,
         .title = t.title,
@@ -117,6 +165,10 @@ pub fn runNextPendingWithEnv(
         .remedy_submitted = remedy_submitted,
         .beliefs_added = beliefs_added,
         .host_crisis = host_crisis,
+        .act_human_tasks = act_human_tasks,
+        .throttle_autocli_s = throttle_autocli_s,
+        .peer_e_seen = peer_e_seen,
+        .peer_followups = peer_followups,
     };
 }
 
@@ -193,6 +245,9 @@ test "task_runner: world_sensor 走 diagnose_host" {
     try std.testing.expect(queue.pending_count >= 1);
     try std.testing.expect(ran.?.beliefs_added >= 1);
     try std.testing.expect(ran.?.host_crisis);
+    try std.testing.expect(ran.?.act_human_tasks >= 1);
+    try std.testing.expect(ran.?.throttle_autocli_s != null);
+    try std.testing.expect(ran.?.throttle_autocli_s.? >= 900);
     try std.testing.expect(mem.episodes.items.len >= 1);
     try std.testing.expect(mem.episodes.items[0].detail != null);
     // 求存信念已写入

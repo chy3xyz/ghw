@@ -50,6 +50,10 @@ pub const Task = struct {
         human,
         world_sensor,
         survival_remedy,
+        survival_act,
+        metabolism,
+        world_fetch,
+        peer_symbiosis,
     };
 
     pub fn sourceLabel(s: Source) []const u8 {
@@ -62,6 +66,10 @@ pub const Task = struct {
             .human => "human",
             .world_sensor => "world",
             .survival_remedy => "remedy",
+            .survival_act => "act",
+            .metabolism => "meta",
+            .world_fetch => "fetch",
+            .peer_symbiosis => "peer",
         };
     }
 
@@ -290,6 +298,25 @@ pub const TaskQueue = struct {
             if (t.result) |r| sum += r.actual_delta_e;
         }
         return sum;
+    }
+
+    /// P1: 按 M/R/N 维聚合任务台账
+    pub fn dimensionLedger(self: *const TaskQueue) DimensionLedger {
+        var led: DimensionLedger = .{};
+        for (self.tasks.items) |t| {
+            const bucket = switch (t.required_dimension) {
+                .material => &led.material,
+                .representation => &led.representation,
+                .nature => &led.nature,
+                .all => &led.all,
+            };
+            accBucket(bucket, t);
+        }
+        return led;
+    }
+
+    pub fn appendDimensionLedgerJson(_: *const TaskQueue, alloc: Allocator, body: *std.ArrayList(u8), led: DimensionLedger) !void {
+        try appendDimensionLedgerJsonImpl(alloc, body, led);
     }
 
     /// 序列化为 JSON (P7: state.json 持久化 pending/in_progress 及历史任务)
@@ -614,6 +641,61 @@ fn writeJsonString(alloc: Allocator, buf: *std.ArrayList(u8), s: []const u8) !vo
     }
 }
 
+/// 求存相关任务来源 (P1 台账)
+pub fn isSurvivalSource(source: Task.Source) bool {
+    return switch (source) {
+        .survival_remedy, .survival_act, .world_sensor, .metabolism, .world_fetch => true,
+        else => false,
+    };
+}
+
+pub const DimBucket = struct {
+    pending: u32 = 0,
+    completed: u32 = 0,
+    failed: u32 = 0,
+    survival: u32 = 0,
+    evolution_linked: u32 = 0,
+};
+
+pub const DimensionLedger = struct {
+    material: DimBucket = .{},
+    representation: DimBucket = .{},
+    nature: DimBucket = .{},
+    all: DimBucket = .{},
+};
+
+fn accBucket(bucket: *DimBucket, t: *const Task) void {
+    switch (t.status) {
+        .pending, .in_progress => bucket.pending += 1,
+        .completed => bucket.completed += 1,
+        .failed, .abandoned => bucket.failed += 1,
+    }
+    if (isSurvivalSource(t.source)) bucket.survival += 1;
+    if (isSurvivalSource(t.source) and t.status == .completed) {
+        if (t.result) |r| {
+            if (r.actual_delta_e > 0.01) bucket.evolution_linked += 1;
+        }
+    }
+}
+
+fn appendDimBucketJson(alloc: Allocator, body: *std.ArrayList(u8), name: []const u8, b: DimBucket) !void {
+    try body.print(alloc,
+        \\"{s}":{{"pending":{d},"completed":{d},"failed":{d},"survival":{d},"evolution_linked":{d}}}
+    , .{ name, b.pending, b.completed, b.failed, b.survival, b.evolution_linked });
+}
+
+fn appendDimensionLedgerJsonImpl(alloc: Allocator, body: *std.ArrayList(u8), led: DimensionLedger) !void {
+    try body.appendSlice(alloc, "\"by_dimension\":{");
+    try appendDimBucketJson(alloc, body, "material", led.material);
+    try body.append(alloc, ',');
+    try appendDimBucketJson(alloc, body, "representation", led.representation);
+    try body.append(alloc, ',');
+    try appendDimBucketJson(alloc, body, "nature", led.nature);
+    try body.append(alloc, ',');
+    try appendDimBucketJson(alloc, body, "all", led.all);
+    try body.append(alloc, '}');
+}
+
 // ===== Tests =====
 
 const testing = std.testing;
@@ -726,6 +808,20 @@ test "TaskQueue: toJson/loadFromJson roundtrip" {
     try testing.expectEqualStrings("done output", restored.result.?.output);
     try testing.expectEqual(@as(i8, 5), restored.feedback.?.score);
     try testing.expect(q2.next_id > id2);
+}
+
+test "TaskQueue: dimensionLedger survival + evolution_linked" {
+    const alloc = testing.allocator;
+    var q = TaskQueue.init(alloc);
+    defer q.deinit();
+    const id = try q.submitWithSource("remedy", "fix disk", "sys", 9, .material, 4, .survival_remedy);
+    const t = q.dequeue().?;
+    try testing.expectEqual(id, t.id);
+    try q.complete(id, "ok", 0.05, 1);
+    const led = q.dimensionLedger();
+    try testing.expectEqual(@as(u32, 1), led.material.completed);
+    try testing.expectEqual(@as(u32, 1), led.material.survival);
+    try testing.expectEqual(@as(u32, 1), led.material.evolution_linked);
 }
 
 test "TaskQueue: source roundtrip" {

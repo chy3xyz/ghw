@@ -18,6 +18,7 @@ const util = @import("../util/mod.zig");
 const math_util = util.math;
 const F = util.F;
 const LCG = util.LCG;
+const primordial_laws = @import("primordial_laws.zig");
 
 // ============================================================
 //   BoundaryGuardian:  边界守护者
@@ -182,8 +183,8 @@ pub const ResourceHardLimits = struct {
     cpu_units: F = 100.0,
     memory_units: F = 100.0,
     time_units: F = 100.0,
-    /// 总预留比例
-    reserve_ratio: F = 0.10,
+    /// 总预留比例 (primordial_laws L12)
+    reserve_ratio: F = primordial_laws.Axioms.RESERVE_RATIO,
 };
 
 pub const ResourceScheduler = struct {
