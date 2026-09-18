@@ -478,7 +478,8 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 
 ## Learned Workspace Facts
 
-- 本地 Zig 工具链: `zigup` 当前推荐 `0.17.0-dev.1422+e863bf3be`（`~/.local/bin/zig` 应指向该版本）；工程已在 1422 上通过 `zig build` / `zig build test`
+- 本地 Zig 工具链: 当前 `~/.local/bin/zig` 指向 `zigup` 的 `0.17.0-dev.2151+2ec5523d5`（旧记录 1422 已过时）；工程已在该版本通过 `zig build` / `zig build test` / 三个验收脚本
+- **测试接线约定**: Zig 0.17 只收集**被分析文件**的 test 块——新增 harness 模块必须同时 (a) `src/harness/mod.zig` 导出 (b) `src/ghw.zig` comptime 引用块 `_ = harness.xxx;`，否则其测试**静默不运行**、且 `zig build` 产物可能编译失败；曾因此积压 57 个暗测试（2026-09 已清零，382/382 可达）
 - 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
 - UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN
 - ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程并硬刷新浏览器
