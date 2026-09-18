@@ -106,4 +106,9 @@ rollback(change)
 
 `docs/AWAKENING_LIFECYCLE.md`
 
-其中 P0 缺口摘要：Awaken 状态机、daemon 对齐 AutoCLI/world_bridge、HostShortfall 显式映射层、**危机锁与 L1–L5 调度融合**。
+状态：P0–P2c 已全部落地（Awaken 状态机、daemon 对齐 AutoCLI/world_bridge、HostShortfall 显式映射层、危机锁与 L1–L5 调度融合、手机 HostProfile、同伴 shortfall inbox 与 Link 交换、双写契约与验收面板）。验收：`scripts/awakening_lifecycle_acceptance.sh` 与 `scripts/peer_shortfall_link_acceptance.sh`。
+
+## 工程质量防线
+
+- `scripts/check_dark_tests.sh`：普查全部声明的 test 块是否真的在运行（防 Zig 0.17 惰性测试发现导致新模块测试静默丢失），任一未运行即失败。
+- `scripts/product_runtime_acceptance.sh`：产品轨 propose → approve → apply → rollback + audit hash 链验收。

@@ -55,13 +55,18 @@ pub const HttpLLM = struct {
 
     /// 构造 Anthropic provider
     pub fn anthropic(alloc: std.mem.Allocator, io: std.Io, model: []const u8, api_key: []const u8) !HttpLLM {
+        return anthropicWithBase(alloc, io, model, api_key, "https://api.anthropic.com");
+    }
+
+    /// anthropic + 自定义 base_url (自托管网关 / 本地 mock 测试)
+    pub fn anthropicWithBase(alloc: std.mem.Allocator, io: std.Io, model: []const u8, api_key: []const u8, base_url: []const u8) !HttpLLM {
         return .{
             .allocator = alloc,
             .io = io,
             .provider = .anthropic,
             .model = try alloc.dupe(u8, model),
             .api_key = try alloc.dupe(u8, api_key),
-            .base_url = try alloc.dupe(u8, "https://api.anthropic.com"),
+            .base_url = try alloc.dupe(u8, base_url),
             .anthropic_version = try alloc.dupe(u8, "2023-06-01"),
         };
     }
@@ -347,17 +352,13 @@ pub const HttpLLM = struct {
 
         // 简单 JSON 解析: 找 "content":[{"text":"..."}] 里的 text
         // 找 "usage":{"input_tokens":N,"output_tokens":M}
-        if (findJsonString(body, "\"text\":")) |start| {
-            const text_start = start + "\"text\":".len;
-            // 跳过空白
-            var i = text_start;
-            while (i < body.len and (body[i] == ' ' or body[i] == '\n' or body[i] == '\t')) : (i += 1) {}
-            if (i < body.len and body[i] == '"') {
-                const content_start = i + 1;
-                const content_end = findStringEnd(body, content_start) orelse body.len;
-                const raw = body[content_start..content_end];
-                resp.content = try unescapeJsonString(a, raw);
-            }
+        // findJsonString 返回**值开引号**位置 (与 openai 路径同约定)。
+        // 旧实现又加了 key 长度, 导致 content 恒为 null — 由 mock server 集成测试暴露。
+        if (findJsonString(body, "\"text\":")) |open_quote| {
+            const content_start = open_quote + 1;
+            const content_end = findStringEnd(body, content_start) orelse body.len;
+            const raw = body[content_start..content_end];
+            resp.content = try unescapeJsonString(a, raw);
         }
         if (findJsonNumber(body, "\"input_tokens\":")) |s| {
             resp.usage.prompt_tokens = try std.fmt.parseInt(u32, s, 10);
@@ -488,4 +489,175 @@ fn findJsonNumber(body: []const u8, key: []const u8) ?[]const u8 {
         if (i > start) return body[start..i];
     }
     return null;
+}
+
+// ===== 集成测试: 本地 mock HTTP server, 验证真实网络往返 (无需 API key) =====
+
+const testing = std.testing;
+
+/// 单连接 mock server: 收一条 HTTP 请求, 回固定 OpenAI 兼容 JSON
+const MockServerCtx = struct {
+    io: std.Io,
+    port: u16,
+    /// 默认回 OpenAI 兼容形状; anthropic 用例换 anthropic 形状
+    response_body: []const u8 =
+        \\{"id":"mock-1","object":"chat.completion","model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"你好, 来自本地 mock server 的回复"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}
+    ,
+    received: [16384]u8 = undefined,
+    received_len: usize = 0,
+
+    fn run(ctx: *MockServerCtx) void {
+        ctx.serve() catch |err| {
+            std.debug.print("[mock-llm-server] serve 失败: {t}\n", .{err});
+        };
+    }
+
+    fn serve(ctx: *MockServerCtx) !void {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", ctx.port);
+        var server = try address.listen(ctx.io, .{ .reuse_address = true });
+        defer server.deinit(ctx.io);
+
+        var stream: std.Io.net.Stream = try server.accept(ctx.io);
+        defer stream.close(ctx.io);
+
+        // 读到 headers 结束 + Content-Length 满足
+        var header_end: usize = 0;
+        var content_len: usize = 0;
+        while (ctx.received_len < ctx.received.len) {
+            if (header_end == 0) {
+                if (std.mem.indexOf(u8, ctx.received[0..ctx.received_len], "\r\n\r\n")) |he| {
+                    header_end = he + 4;
+                    content_len = parseContentLength(ctx.received[0..header_end]);
+                }
+            }
+            if (header_end > 0 and ctx.received_len >= header_end + content_len) break;
+            const n = try stream.read(ctx.io, @constCast(&[_][]u8{ctx.received[ctx.received_len..]}));
+            if (n == 0) break;
+            ctx.received_len += n;
+        }
+
+        const body = ctx.response_body;
+        var head_buf: [256]u8 = undefined;
+        const head = try std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{body.len});
+        var wbuf: [512]u8 = undefined;
+        var w = stream.writer(ctx.io, &wbuf);
+        try w.interface.writeAll(head);
+        try w.interface.writeAll(body);
+        try w.interface.flush();
+    }
+};
+
+fn parseContentLength(headers: []const u8) usize {
+    var it = std.mem.splitSequence(u8, headers, "\r\n");
+    while (it.next()) |line| {
+        const lower = std.ascii.allocLowerString(testing.allocator, line) catch return 0;
+        defer testing.allocator.free(lower);
+        if (std.mem.startsWith(u8, lower, "content-length:")) {
+            return std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " "), 10) catch 0;
+        }
+    }
+    return 0;
+}
+
+test "HttpLLM: openai_compat 经本地 mock server 完成 HTTP 往返" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 在候选端口上找可用的 (避免 CI 端口冲突)
+    var ctx: MockServerCtx = .{ .io = io, .port = 0 };
+    const candidate_ports = [_]u16{ 19871, 19872, 19873, 19874 };
+    var probe: ?u16 = null;
+    for (candidate_ports) |p| {
+        const address = std.Io.net.IpAddress.parse("127.0.0.1", p) catch continue;
+        var srv = address.listen(io, .{ .reuse_address = true }) catch continue;
+        srv.deinit(io);
+        probe = p;
+        break;
+    }
+    try testing.expect(probe != null);
+    ctx.port = probe.?;
+
+    const thread = try std.Thread.spawn(.{}, MockServerCtx.run, .{&ctx});
+
+    const base_url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{ctx.port});
+    var llm = try HttpLLM.openai(alloc, io, "mock-model", "test-key", base_url);
+    defer llm.deinit();
+    defer alloc.free(base_url);
+    var chat = llm.asChat();
+    var resp = try chat.complete(.{
+        .model = "mock-model",
+        .messages = &.{
+            .{ .role = .user, .content = "帮我诊断 daemon" },
+        },
+        .max_tokens = 64,
+    }, alloc);
+    defer resp.deinit();
+
+    thread.join();
+
+    // 响应侧: content / usage / 统计
+    try testing.expect(resp.content != null);
+    try testing.expectEqualStrings("你好, 来自本地 mock server 的回复", resp.content.?);
+    try testing.expectEqual(@as(u32, 11), resp.usage.prompt_tokens);
+    try testing.expectEqual(@as(u32, 7), resp.usage.completion_tokens);
+    try testing.expectEqual(@as(u64, 1), llm.total_calls);
+
+    // 请求侧: mock server 实际收到了什么
+    const req = ctx.received[0..ctx.received_len];
+    try testing.expect(std.mem.indexOf(u8, req, "POST /v1/chat/completions") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "authorization: Bearer test-key") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "帮我诊断 daemon") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"model\":\"mock-model\"") != null);
+}
+
+test "HttpLLM: anthropic 头与端点 (本地 mock server)" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx: MockServerCtx = .{ .io = io, .port = 0, .response_body =
+        \\{"id":"msg_mock_1","type":"message","role":"assistant","model":"claude-mock","content":[{"type":"text","text":"anthropic mock 回复"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}
+    };
+    const candidate_ports = [_]u16{ 19881, 19882, 19883, 19884 };
+    var probe: ?u16 = null;
+    for (candidate_ports) |p| {
+        const address = std.Io.net.IpAddress.parse("127.0.0.1", p) catch continue;
+        var srv = address.listen(io, .{ .reuse_address = true }) catch continue;
+        srv.deinit(io);
+        probe = p;
+        break;
+    }
+    try testing.expect(probe != null);
+    ctx.port = probe.?;
+
+    const thread = try std.Thread.spawn(.{}, MockServerCtx.run, .{&ctx});
+
+    const base_url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}", .{ctx.port});
+    var llm = try HttpLLM.anthropicWithBase(alloc, io, "claude-mock", "ant-key", base_url);
+    defer llm.deinit();
+    defer alloc.free(base_url);
+    var chat = llm.asChat();
+    var resp = try chat.complete(.{
+        .model = "claude-mock",
+        .messages = &.{
+            .{ .role = .user, .content = "review this" },
+        },
+        .max_tokens = 64,
+    }, alloc);
+    defer resp.deinit();
+
+    thread.join();
+
+    try testing.expectEqualStrings("anthropic mock 回复", resp.content.?);
+    try testing.expectEqual(@as(u32, 5), resp.usage.prompt_tokens);
+    try testing.expectEqual(@as(u32, 3), resp.usage.completion_tokens);
+    try testing.expectEqual(@as(u64, 1), llm.total_calls);
+
+    const req = ctx.received[0..ctx.received_len];
+    try testing.expect(std.mem.indexOf(u8, req, "POST /v1/messages") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "x-api-key: ant-key") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "anthropic-version:") != null);
 }
