@@ -14,6 +14,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const F = @import("../util/math.zig").F;
 
+/// Bias 判 balanced 的容差: 三源份额 max-min ≤ 该值视为「三者差不多」
+const BALANCED_EPS: F = 0.02;
+
 pub const Mood = enum {
     thriving, // E > 0.8, 上升
     stable, // 0.6-0.8
@@ -87,12 +90,10 @@ pub const Personality = struct {
         else
             self.mood = .dormant;
 
-        // Bias: 哪一维最大
+        // Bias: 哪一维最大; 三者差不多 (max-min ≤ 0.02) ⇒ balanced
         const max_dim = @max(m_share, @max(r_share, n_share));
-        const max_count: u8 = (if (m_share == max_dim) @as(u8, 1) else @as(u8, 0)) +
-            (if (r_share == max_dim) @as(u8, 1) else @as(u8, 0)) +
-            (if (n_share == max_dim) @as(u8, 1) else @as(u8, 0));
-        if (max_count > 1) {
+        const min_dim = @min(m_share, @min(r_share, n_share));
+        if (max_dim - min_dim <= BALANCED_EPS) {
             self.bias = .balanced;
         } else if (m_share == max_dim) {
             self.bias = .material;

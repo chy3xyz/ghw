@@ -340,7 +340,7 @@ test "TemplateEnhancer: buildUserPrompt 注入 buildContext" {
     const io = threaded.io();
 
     var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
-    const chat = mock.asChat();
+    var chat = mock.asChat();
     var enh = TemplateEnhancer.init(alloc, io, &chat, "mock");
 
     var mem = Memory.init(alloc, 1);

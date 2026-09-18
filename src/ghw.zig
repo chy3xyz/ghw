@@ -167,6 +167,22 @@ comptime {
     _ = harness.product_intent;
     _ = harness.kpi_bridge;
     _ = harness.product_runtime;
+    _ = harness.personality;
+    _ = harness.reflection;
+    _ = harness.goal_proposer;
+    _ = harness.template_enhancer;
+    _ = harness.autocli;
+    _ = harness.task_runner;
+    _ = harness.world_context;
+    _ = harness.product_adapter;
+    _ = harness.llm_code_generator;
+    _ = harness.ghw_link_tcp;
+    _ = harness.evolution_rationale;
+    _ = harness.llm_driver;
+    _ = harness.mock_provider;
+    _ = harness.user_channel;
+    _ = harness.wechat.bot;
+    _ = harness.human_symbiosis.chat_reply;
 }
 
 // 注意: test {} 块在每个子模块自身内部,这样可以保持测试代码本地化

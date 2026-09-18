@@ -119,13 +119,17 @@ const testing = std.testing;
 
 test "chat_reply: buildChatReply meta 标记 memory 注入" {
     const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var mem = Memory.init(alloc, 7);
     defer mem.deinit();
-    mem.self_narrative = try alloc.dupe(u8, "我是测试生命, 最近在探索 nature");
-    try mem.addBelief(.nature, "探索比静止更有价值", 0.9);
-    try mem.recordAt(null, .system_event, 1, "cycle 1 explore", "explore daemon cpu", 3, 0.05);
+    try mem.setSelfNarrative("我是测试生命, 最近在探索 nature");
+    try mem.addBelief(.nature, "探索比静止更有价值", 0.9, &[_]u64{1});
+    try mem.recordAt(io, .system_event, 1, "cycle 1 explore", "explore daemon cpu", 3, 0.05);
 
-    var agent = GHWAgent.init(alloc);
+    var agent = try GHWAgent.init(alloc, "chat-reply-test", 4, .{ 3, 3, 3 }, 1);
     defer agent.deinit();
     agent.tick = 42;
     agent.ed.v = .{ .material = 0.4, .representation = 0.5, .nature = 0.3 };
@@ -142,7 +146,7 @@ test "chat_reply: 空记忆 meta.memory_injected=false" {
     const alloc = testing.allocator;
     var mem = Memory.init(alloc, 7);
     defer mem.deinit();
-    var agent = GHWAgent.init(alloc);
+    var agent = try GHWAgent.init(alloc, "chat-reply-empty", 4, .{ 3, 3, 3 }, 1);
     defer agent.deinit();
     agent.ed.v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 };
 

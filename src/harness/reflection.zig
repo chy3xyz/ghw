@@ -313,7 +313,7 @@ test "Reflection: buildUserPrompt 注入自传体记忆 + 时序 episodes" {
     const io = threaded.io();
 
     var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "[]");
-    const chat = mock.asChat();
+    var chat = mock.asChat();
     var reflect = Reflection.init(alloc, &chat, "mock");
 
     var agent = try GHWAgent.init(alloc, "reflect-test", 4, .{ 3, 3, 3 }, 1);

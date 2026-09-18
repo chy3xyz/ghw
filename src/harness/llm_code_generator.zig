@@ -143,7 +143,7 @@ test "LlmCodeGenerator: extractCode 从 fence 提取" {
 test "LlmCodeGenerator: buildUserPrompt 含 memory prompt" {
     const alloc = std.testing.allocator;
     var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, "```zig\npub const T = struct {};\n```");
-    const chat = mock.asChat();
+    var chat = mock.asChat();
     var gen = LlmCodeGenerator.init(alloc, &chat, "mock");
     const prompt = try gen.buildUserPrompt(.{
         .kind = .param_adjustment,
@@ -160,7 +160,7 @@ test "LlmCodeGenerator: Mock LLM 生成代码" {
     const alloc = std.testing.allocator;
     const canned = "```zig\npub const SelfTunedAttention = struct {\n    pub const gamma: f32 = 0.25;\n};\n```";
     var mock = @import("llm/mock_chat_llm.zig").MockChatLLM.init(alloc, canned);
-    const chat = mock.asChat();
+    var chat = mock.asChat();
     var gen = LlmCodeGenerator.init(alloc, &chat, "mock");
     const cg = gen.asGenerator();
     var result = try cg.generate(.{

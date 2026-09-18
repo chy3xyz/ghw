@@ -540,7 +540,7 @@ fn parseLstart(out: []const u8) i64 {
 
 test "world context on macos" {
     if (!is_macos) return;
-    var wc = WorldContext.init(std.testing.allocator, std.testing.io);
+    var wc = WorldContext.init(std.testing.allocator, std.testing.io, std.process.Environ.empty);
     defer wc.deinit();
     const snap = try wc.collect();
     try std.testing.expect(snap.top_procs.len > 0);

@@ -67,6 +67,10 @@ pub const mock_llm = @import("llm/mock_llm.zig");
 pub const shell_llm = @import("llm/shell_llm.zig");
 pub const http_llm = @import("llm/http_llm.zig");
 pub const mock_chat_llm = @import("llm/mock_chat_llm.zig");
+pub const llm_driver = @import("llm_driver.zig");
+pub const mock_provider = @import("mock_provider.zig");
+pub const evolution_rationale = @import("evolution_rationale.zig");
+pub const user_channel = @import("user_channel.zig");
 
 pub const BoundaryGuardian = core.BoundaryGuardian;
 pub const BoundaryLayer = core.BoundaryLayer;
