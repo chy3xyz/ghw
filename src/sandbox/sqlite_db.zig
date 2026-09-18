@@ -653,6 +653,7 @@ pub const SqliteDb = struct {
     /// 记录 adopt (idempotent via UNIQUE constraint)
     pub fn recordAdopted(
         self: *const SqliteDb,
+        io: std.Io,
         kind: []const u8,
         tick: i64,
         filename: []const u8,
@@ -695,7 +696,7 @@ pub const SqliteDb = struct {
 
         _ = sqlite3_bind_int64(stmt, 7, size);
 
-        _ = sqlite3_bind_int64(stmt, 8, 0); // TODO: unix timestamp (std.c.time 0.17 不可用)
+        _ = sqlite3_bind_int64(stmt, 8, std.Io.Clock.real.now(io).toSeconds());
 
         _ = sqlite3_step(stmt);
     }

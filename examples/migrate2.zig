@@ -153,7 +153,11 @@ pub fn main() !void {
         .{ .id = 1, .label = "自适应", .features = .{ 0.8, 0.8, 0.8, 0.1 } },
     };
 
-    var migrator = ghw.SelfMigration.init(allocator);
+    // Threaded Io: spawn/wait/落盘需要真实 I/O (initMemory 的 undefined io 会崩)
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    var migrator = ghw.SelfMigration.initWithIo(allocator, threaded.io());
     defer migrator.deinit();
 
     println("    ┌──────┬──────┬──────────┬────────┬─────────────┐", .{});
@@ -216,7 +220,8 @@ pub fn main() !void {
         println("    [stub] 新进程将检测到 --migrate-from, 加载 state.json, 接管", .{});
     } else {
         println("    ✓ 新进程已 spawn, PID = {d}", .{new_pid});
-        migrator.waitNewProcess(new_pid);
+        const exit_code = try migrator.waitNewProcess(new_pid);
+        println("    ✓ 新进程已退出, exit code = {d}", .{exit_code});
     }
 
     // ============================================================

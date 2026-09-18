@@ -719,7 +719,7 @@ fn adoptIntoGhwSource(app: *App, src_path: []const u8) !?[]u8 {
                 tick_val = std.fmt.parseInt(i64, basename[num_start..num_end], 10) catch 0;
             }
         }
-        db.recordAdopted(kind, tick_val, basename, hash, evolved_src, ghw_dst, @intCast(stat.size)) catch |err| {
+        db.recordAdopted(app.io, kind, tick_val, basename, hash, evolved_src, ghw_dst, @intCast(stat.size)) catch |err| {
             std.debug.print("[adopt] recordAdopted 失败: {t}\n", .{err});
         };
     }
@@ -6126,7 +6126,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 defer alloc.free(evolved_src);
                 const ghw_dst = std.fs.path.join(alloc, &[_][]const u8{ app.ghw_root, sub, entry.name }) catch continue;
                 defer alloc.free(ghw_dst);
-                db.recordAdopted(kind, tick_val, entry.name, hash, evolved_src, ghw_dst, @intCast(st.size)) catch continue;
+                db.recordAdopted(app.io, kind, tick_val, entry.name, hash, evolved_src, ghw_dst, @intCast(st.size)) catch continue;
                 backfilled += 1;
             } else |_| {}
         }

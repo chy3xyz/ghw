@@ -111,3 +111,13 @@ __pycache__/
 *.pyo
 *.sqlite
 *.sqlite-journal
+
+# Local agent/tool workspace (not project source)
+.codegraph/
+.cursor/
+.worktrees/
+.zig-cache-global/
+reasonix.toml
+
+# Stray runtime sqlite at repo root
+/.db
