@@ -486,6 +486,8 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 - Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件必须 `x-data="ghwApp()"`（带括号）；中间路径用 `?.`（`??` 只护最后一级）；`x-show` 为 false 时子表达式仍会求值；SVG 内禁止 Alpine `x-for`，图表用 JS 拼 SVG 再 `x-html`；**面板级深链 `x-show="state?.provenance?.x"` 不随轮询重算**（x-text 会更新但 x-show 效果停在初值，2026-09 实测致 4 个诊断面板永久不可见、domSnapshot 含隐藏元素会掩盖此问题）——面板可见性禁用深链 x-show，常驻或用 `|| true`，数据占位 `?? '—'`
 - 项目文档站位于 `/site`（VitePress）；Node 依赖仅存在于 `/site/package.json`，主 Zig 工程保持零依赖
 - Sandbox/CI 中 `zig build test` 若遇 Zig 全局 cache 权限错误，可用工作区内 `ZIG_GLOBAL_CACHE_DIR`（或 `ZIG_LOCAL_CACHE_DIR`）重跑
+- macOS 内存语义: `SystemCollector` 的 mem_pct = (wired+active+compressor)/total —— inactive/speculative 是可回收储备**不计入**（旧公式计入则 macOS 常年 ~95% 假危机、物质基底被永久误压）；页大小从 vm_stat 头解析（Intel 4096）；判据与实测见 `system_collector.zig` VmStatPages 测试
+- 验收脚本与并行构建竞写 zig-out 二进制会导致启动瞬死（空日志、连接拒绝）—— 跑验收时不要同时跑 `zig build`
 - 外网主路径: AutoCLI → Memory.world_fetch → world_bridge 入队；`WorldCollector`（autocli ask 子进程）为遗留实验通道，勿与周期 AutoCLI 混用
 - 求存 P8: ActionRunner 在生存任务 pending 时让路 TaskExecutor；query_peer（含手动 API）统一走 `peer_symbiosis`；危机下采纳规则后经 `survival_feedback` 对照 disk/mem/load 是否真降并强化 `[survive:*]` 信念
 - 第一性先验: `harness/primordial_laws.zig` 为 15 条硬公理/生命规律/评估契约的单一事实源（阈值、Bias 上限、ρ、Guard 保护标记）；LLM 不可改写；经 `GET /api/laws` 与 UI「第一性原理」面板只读暴露；消费者必须引用该模块常量

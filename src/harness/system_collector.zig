@@ -198,25 +198,11 @@ pub const SystemCollector = struct {
             snap.mem_total_gb = @as(F, @floatFromInt(total)) / 1024.0 / 1024.0 / 1024.0;
         }
 
-        // 3) vm_stat: 拿 pages
+        // 3) vm_stat: 拿 pages (页大小从输出头解析 — Intel Mac 是 4096, 硬编码会 4x 高估)
         if (try runCmd(self.alloc, self.io, &[_][]const u8{ "/usr/bin/vm_stat" })) |out| {
             defer self.alloc.free(out);
-            const page_size: u64 = 16384; // Apple Silicon 默认
-            var active_pages: u64 = 0;
-            var inactive_pages: u64 = 0;
-            var wired_pages: u64 = 0;
-            var compressed_pages: u64 = 0;
-
-            var it = std.mem.splitScalar(u8, out, '\n');
-            while (it.next()) |line| {
-                const n = extractTrailingNumber(line) orelse continue;
-                if (std.mem.indexOf(u8, line, "Pages active") != null) active_pages = n
-                else if (std.mem.indexOf(u8, line, "Pages inactive") != null) inactive_pages = n
-                else if (std.mem.indexOf(u8, line, "Pages wired down") != null) wired_pages = n
-                else if (std.mem.indexOf(u8, line, "Pages occupied by compressor") != null) compressed_pages = n;
-            }
-            const used_pages = active_pages + inactive_pages + wired_pages + compressed_pages;
-            const used_bytes = used_pages * page_size;
+            const pages = parseVmStat(out);
+            const used_bytes = pages.usedBytes();
             snap.mem_used_gb = @as(F, @floatFromInt(used_bytes)) / 1024.0 / 1024.0 / 1024.0;
             if (snap.mem_total_gb > 0) snap.mem_pct = snap.mem_used_gb / snap.mem_total_gb * 100.0;
         }
@@ -561,6 +547,68 @@ fn extractLeadingNumber(line: []const u8) ?u64 {
     return null;
 }
 
+/// macOS vm_stat 页类快照 (纯数据, 可测)
+const VmStatPages = struct {
+    page_size: u64 = 16384,
+    active: u64 = 0,
+    inactive: u64 = 0,
+    wired: u64 = 0,
+    compressor: u64 = 0, // "Pages occupied by compressor"
+
+    /// 已用 = wired + active + compressor。语义对齐 Linux 的
+    /// MemTotal − MemAvailable: inactive/speculative 是**可回收储备**
+    /// (文件缓存 + 待驱逐页), 不计危机水位 —— 计入则 macOS 正常运行
+    /// 常年 ~95% 假危机 (2026-09 实测: 旧公式 95.3% vs 承诺内存 79.1%,
+    /// 同时 memory_pressure 报 free 47%)。
+    pub fn usedBytes(p: VmStatPages) u64 {
+        return (p.wired + p.active + p.compressor) * p.page_size;
+    }
+};
+
+/// 解析 vm_stat 输出 (含 "page size of N bytes" 头)
+fn parseVmStat(out: []const u8) VmStatPages {
+    var p: VmStatPages = .{};
+    var it = std.mem.splitScalar(u8, out, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "page size of")) |_| {
+            if (extractTrailingNumberBefore(line, " bytes")) |n| p.page_size = n;
+            continue;
+        }
+        const n = extractTrailingNumber(line) orelse continue;
+        if (std.mem.indexOf(u8, line, "Pages active") != null) {
+            p.active = n;
+        } else if (std.mem.indexOf(u8, line, "Pages inactive") != null) {
+            p.inactive = n;
+        } else if (std.mem.indexOf(u8, line, "Pages wired down") != null) {
+            p.wired = n;
+        } else if (std.mem.indexOf(u8, line, "Pages occupied by compressor") != null) {
+            p.compressor = n;
+        }
+    }
+    return p;
+}
+
+fn extractTrailingNumberBefore(line: []const u8, suffix: []const u8) ?u64 {
+    const idx = std.mem.indexOf(u8, line, suffix) orelse return null;
+    var end = idx;
+    while (end > 0 and line[end - 1] >= '0' and line[end - 1] <= '9') : (end -= 1) {}
+    if (end == idx) return null;
+    // 跳过分隔逗号
+    var start = end;
+    while (start > 0 and (line[start - 1] == ',' or (line[start - 1] >= '0' and line[start - 1] <= '9'))) : (start -= 1) {}
+    const digits = line[start..idx];
+    var clean_buf: [32]u8 = undefined;
+    var w: usize = 0;
+    for (digits) |c| {
+        if (c >= '0' and c <= '9' and w < clean_buf.len) {
+            clean_buf[w] = c;
+            w += 1;
+        }
+    }
+    if (w == 0) return null;
+    return std.fmt.parseInt(u64, clean_buf[0..w], 10) catch null;
+}
+
 fn extractTrailingNumber(line: []const u8) ?u64 {
     // "Pages free:                                3757." → 3757
     var it = std.mem.tokenizeScalar(u8, line, ' ');
@@ -581,4 +629,48 @@ test "macos system sample" {
     const snap = try sc.collect();
     try std.testing.expect(snap.mem_total_gb > 0);
     try std.testing.expect(snap.proc_count > 0);
+}
+
+// ===== vm_stat 解析测试 =====
+
+test "SystemCollector: parseVmStat — inactive 不计入已用 + 页大小解析" {
+    const apple_silicon =
+        \\Mach Virtual Memory Statistics: (page size of 16384 bytes)
+        \\Pages free:                             7202.
+        \\Pages active:                         171694.
+        \\Pages inactive:                       168933.
+        \\Pages speculative:                      1659.
+        \\Pages wired down:                     242982.
+        \\Pages occupied by compressor:          414803.
+        \\"Pages compressed:                    3479181."
+    ;
+    const p = parseVmStat(apple_silicon);
+    try std.testing.expectEqual(@as(u64, 16384), p.page_size);
+    try std.testing.expectEqual(@as(u64, 171694), p.active);
+    try std.testing.expectEqual(@as(u64, 168933), p.inactive);
+    try std.testing.expectEqual(@as(u64, 242982), p.wired);
+    try std.testing.expectEqual(@as(u64, 414803), p.compressor);
+    // 已用 = wired+active+compressor (inactive 排除)
+    const expect_used = (242982 + 171694 + 414803) * 16384;
+    try std.testing.expectEqual(expect_used, p.usedBytes());
+    // 旧公式 (含 inactive) 在本机样本上给出 95.3% 假危机水位; 新公式 79.1%
+    const total = 1048576 * 16384;
+    const old_pct = @as(f64, @floatFromInt((242982 + 171694 + 414803 + 168933) * 16384)) / @as(f64, @floatFromInt(total)) * 100;
+    const new_pct = @as(f64, @floatFromInt(expect_used)) / @as(f64, @floatFromInt(total)) * 100;
+    try std.testing.expect(old_pct > 94.0); // 旧公式确实假危机
+    try std.testing.expect(new_pct < 80.0 and new_pct > 78.0); // 新公式低于 MEM_PCT_EPS=92
+}
+
+test "SystemCollector: parseVmStat — Intel 页大小 4096 不再 4x 高估" {
+    const intel =
+        \\Mach Virtual Memory Statistics: (page size of 4096 bytes)
+        \\Pages free:                             10000.
+        \\Pages active:                           500000.
+        \\Pages inactive:                         400000.
+        \\Pages wired down:                       300000.
+        \\Pages occupied by compressor:            50000.
+    ;
+    const p = parseVmStat(intel);
+    try std.testing.expectEqual(@as(u64, 4096), p.page_size);
+    try std.testing.expectEqual((300000 + 500000 + 50000) * 4096, p.usedBytes());
 }
