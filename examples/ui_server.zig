@@ -1186,8 +1186,38 @@ fn linkHandler(method: []const u8, params: []const u8, ctx: *anyopaque, alloc: A
 
 // ===== 信号处理 =====
 var should_stop_ui: std.atomic.Value(bool) = .init(false);
+/// 监听端口 (runServer 启动时设置), 供信号 handler 自连唤醒阻塞的 accept
+var g_listen_port: u16 = 0;
+
+// libc 三件套 (二进制已 -lc): handler 内只做 syscall, 无分配, 信号安全
+extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+extern "c" fn connect(fd: c_int, addr: *const anyopaque, len: c_uint) c_int;
+extern "c" fn close(fd: c_int) c_int;
+
+const C_sockaddr_in = extern struct {
+    len: u8 = 16,
+    family: u8 = 2, // AF_INET
+    port: u16,
+    addr: u32,
+    zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+};
+
+/// 自连本机监听端口唤醒 accept: std.Io 的 accept 对 EINTR 无限重试
+/// (Threaded.netAcceptPosix), 只设 flag 无法解阻 — TERM 会永远挂起。
+fn wakeAcceptSelfConnect(port: u16) void {
+    const fd = socket(2, 1, 0); // AF_INET, SOCK_STREAM
+    if (fd < 0) return;
+    defer _ = close(fd);
+    var sa = C_sockaddr_in{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
+    };
+    _ = connect(fd, @ptrCast(&sa), @sizeOf(C_sockaddr_in));
+}
+
 fn signalHandler(_: std.posix.SIG) callconv(.c) void {
     should_stop_ui.store(true, .release);
+    if (g_listen_port != 0) wakeAcceptSelfConnect(g_listen_port);
 }
 
 // ===== Args =====
@@ -5523,8 +5553,11 @@ fn autocliThreadFn(app: *App) void {
                 ac.markFetched(now_ns);
             }
         }
-        // sleep 30s 检查 shouldFetch
-        app.io.sleep(.{ .nanoseconds = @intCast(30 * std.time.ns_per_s) }, std.Io.Clock.real) catch {};
+        // 可中断睡眠 (1s 粒度): 优雅退出时 join 不被 30s 长眠卡住
+        var slept: u64 = 0;
+        while (slept < 30 and !app.autocli_stop.load(.seq_cst)) : (slept += 1) {
+            app.io.sleep(.{ .nanoseconds = std.time.ns_per_s }, std.Io.Clock.real) catch {};
+        }
     }
     std.debug.print("[autocli] 退出\n", .{});
 }
@@ -5707,7 +5740,9 @@ fn handleGetWorld(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *
 fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u16) !void {
     const address = try std.Io.net.IpAddress.parseIp4(host, port);
     var server = try address.listen(io, .{ .reuse_address = true });
-    defer server.deinit(io);    std.debug.print("[ui] 监听 http://{s}:{d}\n", .{ host, port });
+    defer server.deinit(io);
+    g_listen_port = port; // 信号 handler 唤醒用
+    std.debug.print("[ui] 监听 http://{s}:{d}\n", .{ host, port });
 
     while (!should_stop_ui.load(.acquire)) {
         const conn = server.accept(io) catch |err| {
@@ -5716,6 +5751,11 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
             continue;
         };
         var stream: std.Io.net.Stream = conn;
+        // TERM/INT 唤醒连接: 直接丢弃并退出 (优雅关闭)
+        if (should_stop_ui.load(.acquire)) {
+            stream.close(io);
+            break;
+        }
         const req = readHttpRequest(alloc, &stream, io) catch |err| {
             std.debug.print("[ui] request 解析失败: {t}\n", .{err});
             stream.close(io);
@@ -6586,6 +6626,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     app.autocli_stop.store(true, .seq_cst);
     if (app.autocli_thread) |t| t.join();
     if (app.auto_tick_thread) |t| t.join();
+
+    // 优雅退出: 最终落盘 (state_contract 防越权写, 失败不阻断退出)
+    saveState(&app) catch |err| {
+        std.debug.print("[ui] 退出前存盘失败: {t}\n", .{err});
+    };
 
     std.debug.print("[ui] 收到停止信号, 退出\n", .{});
 }

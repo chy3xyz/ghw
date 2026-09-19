@@ -483,12 +483,12 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 - 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
 - UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN
 - ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程并硬刷新浏览器
-- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件必须 `x-data="ghwApp()"`（带括号）；中间路径用 `?.`（`??` 只护最后一级）；`x-show` 为 false 时子表达式仍会求值；SVG 内禁止 Alpine `x-for`，图表用 JS 拼 SVG 再 `x-html`；**面板级深链 `x-show="state?.provenance?.x"` 不随轮询重算**（x-text 会更新但 x-show 效果停在初值，2026-09 实测致 4 个诊断面板永久不可见、domSnapshot 含隐藏元素会掩盖此问题）——面板可见性禁用深链 x-show，常驻或用 `|| true`，数据占位 `?? '—'`
+- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件必须 `x-data="ghwApp()"`（带括号）；中间路径用 `?.`（`??` 只护最后一级）；`x-show` 为 false 时子表达式仍会求值；SVG 内禁止 Alpine `x-for`，图表用 JS 拼 SVG 再 `x-html`；**UI 测量陷阱（2026-09 定案）**：① 调查面板可见性必须等首次 /api/state 轮询落地（重载机器 ≥12s），state=null 时深链门控隐藏是**正确行为**非 bug；② 测试驱动 Alpine 状态必须走页面事件（@click），`evaluate` 里 `_x_dataStack[0].x=...` 原生赋值不能可靠触发 x-show（x-text 仍更新，会造成「选择性失效」假象）；③ `innerText` 排除隐藏元素且受 CSS uppercase 变换，判断可见性用 `getComputedStyle().display`。诊断结论：vendored Alpine 3.13.5 与官方逐字节一致、功能完好（最小复现 + A/B 验证）
 - 项目文档站位于 `/site`（VitePress）；Node 依赖仅存在于 `/site/package.json`，主 Zig 工程保持零依赖
 - Sandbox/CI 中 `zig build test` 若遇 Zig 全局 cache 权限错误，可用工作区内 `ZIG_GLOBAL_CACHE_DIR`（或 `ZIG_LOCAL_CACHE_DIR`）重跑
 - 负载危机语义: `isHostCrisis` 按**每核负载**判定（load_1m ≥ n_cpus × LOAD_EPS_PER_CORE=1.0，全核饱和才危机）——旧绝对值 8.0 在 12 核机 70% 忙即误判、4 核机又漏报；`SystemCollector` 采集 `n_cpus`（macOS hw.ncpu / Linux getCpuCount）；world_sensor/host_shortfall/survival_learn 全部走同一语义
 - macOS 内存语义: `SystemCollector` 的 mem_pct = (wired+active+compressor)/total —— inactive/speculative 是可回收储备**不计入**（旧公式计入则 macOS 常年 ~95% 假危机、物质基底被永久误压）；页大小从 vm_stat 头解析（Intel 4096）；判据与实测见 `system_collector.zig` VmStatPages 测试
-- 验收脚本 flake 根因（2026-09 定案）：ui_server **无 SIGTERM handler**，脚本 trap 的普通 kill 杀不掉 → 服务器进程泄漏占住端口 → 下次验收绑端口失败瞬死（空日志、连接拒绝）。已改 trap 为 `kill -9`；手动复现时先 `pkill -9 -f zig-out/bin/ui_server` 清泄漏。次要因素：并行 `zig build` 竞写 zig-out、重负载下启动超过等待窗（脚本已放宽到 120×0.5s）
+- ui_server 优雅退出（2026-09）：SIGTERM/INT handler 设 flag + **自连本机端口唤醒 accept**（std.Io 的 accept 对 EINTR 无限重试，只设 flag 解不了阻）+ accept 后查 flag + 退出前存盘；autocli 线程 1s 粒度可中断睡眠。实测 TERM 4–5s 干净退出。验收脚本 trap 仍用 `kill -9`（对一次性实例确定性强）；手动清理 `pkill -9 -f zig-out/bin/ui_server`。次要 flake 因素：并行 `zig build` 竞写 zig-out、重载下启动超窗（脚本已放宽 120×0.5s）
 - 外网主路径: AutoCLI → Memory.world_fetch → world_bridge 入队；`WorldCollector`（autocli ask 子进程）为遗留实验通道，勿与周期 AutoCLI 混用
 - 求存 P8: ActionRunner 在生存任务 pending 时让路 TaskExecutor；query_peer（含手动 API）统一走 `peer_symbiosis`；危机下采纳规则后经 `survival_feedback` 对照 disk/mem/load 是否真降并强化 `[survive:*]` 信念
 - 第一性先验: `harness/primordial_laws.zig` 为 15 条硬公理/生命规律/评估契约的单一事实源（阈值、Bias 上限、ρ、Guard 保护标记）；LLM 不可改写；经 `GET /api/laws` 与 UI「第一性原理」面板只读暴露；消费者必须引用该模块常量

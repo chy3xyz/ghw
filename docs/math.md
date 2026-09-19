@@ -168,11 +168,13 @@ soak 结果: 负载尖峰 (load>8) 时 M 诚实下压、E 回落; 负载恢复�
 - 边界 (源=0) 微扰不产生 NaN/Inf, 输出恒 clamp 在 [0,1] (`敏感性: 边界` 测试);
 - 实用防抖由调用层承担: KPI 限频 (`kpi_refresh_interval_hours`)、供源回流单次有界、`GEOMETRIC_THRESHOLD` 防 1/p 放大。
 
-### 6.4 CoappropriationTensor 状态
+### 6.4 CoappropriationTensor 现状 (2026-09 勘察)
 
-`world/core.zig` 的三阶张量 (init/implant/coherence/decay) 为**研究遗迹**: 生产路径是
-标量幂平均 + 供源层, 张量暂无调用方。保留供后续「合恰度作为相干项 φ·C」的研究
-(若接线须走加性有界项, 过性质 C 单调性测试); 不接线则应在引入 φ·C 研究前删除。
+张量**形式接线、实质惰性**: GHWAgent 持有 `wms` 字段并每 cycle snapshot+decay,
+goal 相位引擎消费其 coherence —— 但 `implant` 生产路径零调用 (仅测试), 张量恒为
+全零 ⇒ coherence ≡ 0 (相位引擎自有动力学 `+target_focus·0.2` 抬升, 不依赖它)。
+完整摘除需改 `GHWAgent.init` 签名 (wms_shape 参数波及 ui/daemon/examples),
+属独立重构; 在引入 φ·C 研究前维持现状即可, 此处记录以杜绝「已接线」的误读。
 
 ### 6.5 失衡触发
 
