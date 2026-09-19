@@ -652,30 +652,47 @@ pub const GHWAgent = struct {
             // E_t = E_{t-1} + λ_E · ΔE - λ_D · D
             // λ_E 来自 outcome 的 de_delta, λ_D 来自世界模型预测误差
             const action_gain = o.de_delta * 0.5;
-            const err_cost = err * 0.1;
+            // 预测误差是「象」的损耗, 且 ∝ 象存量 (常数速率会在危机下磨穿 R 至
+            // 死亡螺旋 — soak 实测; 比例损耗自带稳定平衡: R→0 ⇒ 损耗→0 ⇒ 存量
+            // 引力重新养起 R)
+            const err_cost = @min(err * 0.1, world.SourceBackflow.ERR_COST_MAX) * self.ed.v.representation;
             if (self.dim_attribution) |dim| {
-                // 归因分账: 行动收益归任务维度; 预测误差是「象」的损耗, 记 R
+                // 归因分账: 行动收益归任务维度
                 self.ed.applyDim(action_gain, dim);
-                if (err_cost > 0) self.ed.applyDim(-err_cost, .representation);
             } else {
-                self.ed.apply(action_gain - err_cost);
+                self.ed.apply(action_gain);
             }
-            // 象维度专项更新
+            if (err_cost > 1e-9) self.ed.applyDim(-err_cost, .representation);
+            // 旧直连通道, 缩放为供源回流的从属 (SourceBackflow.LEGACY_CHANNEL_SCALE):
+            // 象生产缩放; 物只保留磨损 (取消 +0.05 白吃补给 — 物由宿主基底牵引 +
+            // 归因任务增益决定); 性成功加成缩到 NATURE_SUCCESS_GAIN。soak 实测
+            // 旧值在 ~20 cycle 内推满三源, 使 M=1.0 与宿主危机并存。
+            const lsc = world.SourceBackflow.LEGACY_CHANNEL_SCALE;
             self.ed.v.representation = math_util.clamp(
-                self.ed.v.representation + o.representation_gain * self.eta_H,
+                self.ed.v.representation + o.representation_gain * self.eta_H * lsc,
                 0,
                 1,
             );
-            // 物维度更新 (使用资源)
+            // 物: 只保留资源磨损 (全保真, 不缩放)
             self.ed.v.material = math_util.clamp(
-                self.ed.v.material + (0.05 - o.material_cost) * self.eta_H,
+                self.ed.v.material - o.material_cost * self.eta_H,
                 0,
                 1,
             );
-            // 性维度更新 (目标完成的清晰度)
+            // 性: 成功清晰度小加成 (×(1−N) 自限) + 自然衰减 (∝N) —
+            // 平衡点 ~0.67: 高 N 只能靠意义承认 (value/验证信念) 维持
             if (o.success) {
-                self.ed.v.nature = math_util.clamp(self.ed.v.nature + 0.02 * self.eta_H, 0, 1);
+                self.ed.v.nature = math_util.clamp(
+                    self.ed.v.nature + world.SourceBackflow.NATURE_SUCCESS_GAIN * self.eta_H * (1.0 - self.ed.v.nature),
+                    0,
+                    1,
+                );
             }
+            self.ed.v.nature = math_util.clamp(
+                self.ed.v.nature * (1.0 - world.SourceBackflow.NATURE_DECAY),
+                0,
+                1,
+            );
         }
 
         // 5. 反思层 (最慢尺度)

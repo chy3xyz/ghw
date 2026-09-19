@@ -293,8 +293,11 @@ const App = struct {
     /// P0 lifecycle: 觉醒 + 宿主短板 + 存在相
     awaken: ghw_harness.awaken.State = .{},
     last_shortfall: ghw_harness.host_shortfall.Report = .{},
-    /// 供源回流节流: 上次回流的 tick (BACKFLOW_INTERVAL_TICKS)
+    /// 供源回流节流: 上次回流的 tick (BACKFLOW_INTERVAL_TICKS)。
+    /// 价值→N 用独立变量 — 共享会被先执行的宿主/象回流饿死 (每周期 refreshLifecycle
+    /// 先刷新 last_backflow_tick, recordValueTrend 的守卫永假)。
     last_backflow_tick: u64 = 0,
+    last_value_backflow_tick: u64 = 0,
     existence_phase: ghw_harness.existence_phase.Phase = .awakening,
     /// P2: 宿主画像 (desktop 采样 / mobile 推送)
     host_profile: ghw_harness.host_profile.Profile = .{},
@@ -1585,8 +1588,10 @@ fn recordValueTrend(app: *App) void {
         &app.human_gsp,
     );
     app.value_tracker.record(score);
-    // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益; 与宿主/象回流同频节流
-    if (app.agent.tick >= app.last_backflow_tick + ghw_harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+    // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益; 独立节流 (勿与
+    // last_backflow_tick 共享 — 会饿死, 见字段注释)
+    if (app.agent.tick >= app.last_value_backflow_tick + ghw_harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+        app.last_value_backflow_tick = app.agent.tick;
         app.agent.ed.applyNatureRecognition(score, 0);
     }
 }

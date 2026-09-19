@@ -87,6 +87,21 @@ pub const SourceBackflow = struct {
     pub const BACKFLOW_INTERVAL_TICKS: u64 = 32;
     /// 宿主康复对 M 的单次最大回升 (磨损全速、康复半速 — 生物学上保守)
     pub const HOST_RECOVER_MAX: F = HOST_DRAIN_MAX * 0.5;
+    /// 旧 runCycle 直连通道 (rep_gain 生产 / N 成功加成) 的缩放 — 浸泡实测
+    /// 不缩放时每-cycle +0.05 会在 ~20 cycle 内把维度推满, 压过供源引力
+    /// (M=R=N=1.0 且宿主危机下物仍满格, 2026-09 soak 发现)。
+    /// 磨损 (material_cost) 不缩放: 代价全保真。
+    pub const LEGACY_CHANNEL_SCALE: F = 0.1;
+    /// N 的目标成功清晰度加成 (缩放后; 原值 0.02/cycle 会廉价饱和「性」)
+    pub const NATURE_SUCCESS_GAIN: F = 0.004;
+    /// 性的自然衰减率 (∝N, 每 cycle): 赋义之能需要持续承认来维持 —
+    /// 无 value/信念供源时, 单靠成功底噪 (NATURE_SUCCESS_GAIN·(1−N)) 的
+    /// 平衡点约在 N≈0.67, 真正的高 N 只能来自意义承认。
+    pub const NATURE_DECAY: F = 0.002;
+    /// 世界模型预测误差对源的每-cycle 损耗上界 — 冷启动期 err 可达 ~1.0,
+    /// 不设界则 −0.1/cycle 会在 ~30 cycle 内抽干三源 (旧时代被 +0.12 补贴
+    /// 对冲, 补贴移除后暴露; soak 2026-09 实测 M=R=N→0)。学习应缓慢出血。
+    pub const ERR_COST_MAX: F = 0.01;
 };
 
 /// 由协同系数 ν 与失衡系数 μ 推出幂平均的可替代性指数 p∈(0,1]。

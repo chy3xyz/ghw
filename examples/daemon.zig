@@ -549,6 +549,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer sys_collector.deinit();
     var last_world_sensor_tick: u64 = 0;
     var last_backflow_tick: u64 = 0;
+    var last_value_backflow_tick: u64 = 0;
     var survival_feedback: harness.survival_feedback.Tracker = .{};
     var survival_feedback_evals: u32 = 0;
     var survival_feedback_improved: u32 = 0;
@@ -1183,7 +1184,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         {
             const vscore = harness.human_symbiosis.computeScore(&human_signal, &task_queue, &human_gsp);
             value_tracker.record(vscore);
-            if (agent.tick >= last_backflow_tick + harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+            // 独立节流: P2 块每 tick 先刷 last_backflow_tick, 共享会饿死此通道
+            if (agent.tick >= last_value_backflow_tick + harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+                last_value_backflow_tick = agent.tick;
                 agent.ed.applyNatureRecognition(vscore, 0);
             }
         }
