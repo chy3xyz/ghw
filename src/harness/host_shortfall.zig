@@ -58,7 +58,8 @@ pub fn assessWithProfile(
         out.host_crisis = survival_learn.isCrisisSnap(s);
         out.disk_hot = s.disk_used_pct >= primordial_laws.HostCrisis.DISK_PCT_EPS;
         out.mem_hot = s.mem_pct >= primordial_laws.HostCrisis.MEM_PCT_EPS;
-        out.load_hot = s.load_1m >= primordial_laws.HostCrisis.LOAD_EPS;
+        // L07: 负载按每核归一 (load ≥ n_cpus = 全核饱和)
+        out.load_hot = s.load_1m >= primordial_laws.HostCrisis.LOAD_EPS_PER_CORE * @as(F, @floatFromInt(@max(s.n_cpus, 1)));
         if (out.disk_hot) out.material += 0.45;
         if (out.mem_hot) out.material += 0.35;
         if (out.load_hot) out.material += 0.30;

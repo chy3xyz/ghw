@@ -38,13 +38,13 @@ GHW_ADMIN_TOKEN="$TOKEN" ./zig-out/bin/ui_server \
   --product-config "$CONFIG" \
   --admin-token-env GHW_ADMIN_TOKEN > /tmp/ghw-product-acceptance.log 2>&1 &
 PID=$!
-trap 'kill "$PID" >/dev/null 2>&1 || true' EXIT
+trap 'kill -9 "$PID" >/dev/null 2>&1 || true' EXIT  # -9: ui_server 无 SIGTERM handler, 普通 kill 泄漏
 
-for _ in $(seq 1 40); do
+for _ in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$PORT/api/product/intent" >/tmp/ghw-product-intent.json; then
     break
   fi
-  sleep 0.25
+  sleep 0.5
 done
 
 grep -q '"enabled":true' /tmp/ghw-product-intent.json

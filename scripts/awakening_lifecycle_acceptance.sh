@@ -37,13 +37,13 @@ echo "[acceptance] start ui_server :$PORT"
   --auto-tick-ms 0 \
   > /tmp/ghw-awakening-acceptance.log 2>&1 &
 PID=$!
-trap 'kill "$PID" >/dev/null 2>&1 || true' EXIT
+trap 'kill -9 "$PID" >/dev/null 2>&1 || true' EXIT  # -9: ui_server 无 SIGTERM handler, 普通 kill 泄漏
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$PORT/api/laws" >/tmp/ghw-awaken-laws.json 2>/dev/null; then
     break
   fi
-  sleep 0.2
+  sleep 0.5
 done
 
 if ! [[ -s /tmp/ghw-awaken-laws.json ]]; then

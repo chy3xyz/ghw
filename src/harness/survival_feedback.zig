@@ -105,6 +105,7 @@ fn sampleSnap(disk: F, mem: F, load: F) SystemSnapshot {
         .mem_pct = mem,
         .disk_used_pct = disk,
         .load_1m = load,
+        .n_cpus = 8,
         .proc_count = 200,
         .net_in_mbps = 0,
         .net_out_mbps = 0,

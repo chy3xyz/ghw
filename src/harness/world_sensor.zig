@@ -14,7 +14,8 @@ const primordial_laws = @import("primordial_laws.zig");
 
 pub const DISK_PCT_EPS: F = primordial_laws.HostCrisis.DISK_PCT_EPS;
 pub const MEM_PCT_EPS: F = primordial_laws.HostCrisis.MEM_PCT_EPS;
-pub const LOAD_EPS: F = primordial_laws.HostCrisis.LOAD_EPS;
+/// 每核负载阈值 (×n_cpus = 该机危机线)
+pub const LOAD_EPS_PER_CORE: F = primordial_laws.HostCrisis.LOAD_EPS_PER_CORE;
 
 pub const SubmitResult = struct {
     submitted: u32 = 0,
@@ -62,7 +63,7 @@ pub fn maybeSubmitFromSnapshot(queue: *TaskQueue, snap: SystemSnapshot, alloc: A
         }
     }
 
-    if (snap.load_1m >= LOAD_EPS) {
+    if (snap.load_1m >= LOAD_EPS_PER_CORE * @as(F, @floatFromInt(@max(snap.n_cpus, 1)))) {
         const prefix = "[world] load spike";
         if (hasPendingTitlePrefix(queue, prefix)) {
             out.skipped_dup += 1;
@@ -106,6 +107,7 @@ test "WorldSensor: disk pressure submits material task once" {
         .mem_pct = 50,
         .disk_used_pct = 95,
         .load_1m = 1.0,
+        .n_cpus = 8,
         .proc_count = 200,
         .net_in_mbps = 0,
         .net_out_mbps = 0,
@@ -137,6 +139,7 @@ test "WorldSensor: healthy snapshot submits nothing" {
         .mem_pct = 25,
         .disk_used_pct = 40,
         .load_1m = 1.2,
+        .n_cpus = 8,
         .proc_count = 100,
         .net_in_mbps = 0.1,
         .net_out_mbps = 0.1,
@@ -154,5 +157,5 @@ test "WorldSensor: healthy snapshot submits nothing" {
 test "world_sensor: thresholds alias primordial_laws" {
     try testing.expectEqual(primordial_laws.HostCrisis.DISK_PCT_EPS, DISK_PCT_EPS);
     try testing.expectEqual(primordial_laws.HostCrisis.MEM_PCT_EPS, MEM_PCT_EPS);
-    try testing.expectEqual(primordial_laws.HostCrisis.LOAD_EPS, LOAD_EPS);
+    try testing.expectEqual(primordial_laws.HostCrisis.LOAD_EPS_PER_CORE, LOAD_EPS_PER_CORE);
 }

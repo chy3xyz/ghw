@@ -36,6 +36,8 @@ pub const SystemSnapshot = struct {
     disk_used_pct: F, // disk used % (root partition)
     load_1m: F, // 1-minute load average
     proc_count: u32, // total process count
+    /// 逻辑核数 (危机判定按每核负载归一; 0/未采集按 1)
+    n_cpus: u32 = 0,
     /// 网络 in MB/s (rate, 从 prev 算的 delta)
     net_in_mbps: F,
     /// 网络 out MB/s (rate)
@@ -198,6 +200,13 @@ pub const SystemCollector = struct {
             snap.mem_total_gb = @as(F, @floatFromInt(total)) / 1024.0 / 1024.0 / 1024.0;
         }
 
+        // 2b) sysctl hw.ncpu: 逻辑核数 (load 危机按每核归一)
+        if (try runCmd(self.alloc, self.io, &[_][]const u8{ "/usr/sbin/sysctl", "-n", "hw.ncpu" })) |out| {
+            defer self.alloc.free(out);
+            if (std.fmt.parseInt(u32, std.mem.trim(u8, out, " \n"), 10)) |n| {
+                if (n > 0) snap.n_cpus = n;
+            } else |_| {}
+        }
         // 3) vm_stat: 拿 pages (页大小从输出头解析 — Intel Mac 是 4096, 硬编码会 4x 高估)
         if (try runCmd(self.alloc, self.io, &[_][]const u8{ "/usr/bin/vm_stat" })) |out| {
             defer self.alloc.free(out);
@@ -274,6 +283,10 @@ pub const SystemCollector = struct {
 
     /// Linux: 读 /proc 文件
     fn collectLinux(self: *SystemCollector, snap: *SystemSnapshot, cum: *CumulativeState) !void {
+        // 逻辑核数 (load 危机按每核归一)
+        if (std.Thread.getCpuCount()) |n| {
+            if (n > 0) snap.n_cpus = @intCast(@min(n, std.math.maxInt(u32)));
+        } else |_| {}
         // /proc/stat: cpu line "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
         if (try readFile(self.alloc, self.io, "/proc/stat")) |content| {
             defer self.alloc.free(content);
@@ -381,7 +394,7 @@ pub const SystemCollector = struct {
         // 1) 系统资源压力 (CPU + mem + load 归一)
         const resource_pressure: F = blk: {
             const cpu_avg = (snap.cpu_user_pct + snap.cpu_sys_pct) / 2.0;
-            const load_norm = @min(1.0, snap.load_1m / 8.0) * 100.0; // 8 核算满
+            const load_norm = @min(1.0, snap.load_1m / @as(F, @floatFromInt(@max(snap.n_cpus, 1)))) * 100.0; // 全核饱和算满
             break :blk @min(1.0, (cpu_avg + snap.mem_pct + load_norm) / 300.0);
         };
         try items.append(allocs, .{

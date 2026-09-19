@@ -18,7 +18,7 @@ pub const LearnResult = struct {
 };
 
 pub fn isCrisisSnap(snap: SystemSnapshot) bool {
-    return primordial_laws.isHostCrisis(snap.disk_used_pct, snap.mem_pct, snap.load_1m);
+    return primordial_laws.isHostCrisis(snap.disk_used_pct, snap.mem_pct, snap.load_1m, snap.n_cpus);
 }
 
 pub fn isCrisisReport(report: []const u8) bool {
@@ -151,6 +151,7 @@ test "survival_learn: isCrisisSnap thresholds" {
         .mem_pct = 25,
         .disk_used_pct = 40,
         .load_1m = 1.0,
+        .n_cpus = 8,
         .proc_count = 100,
         .net_in_mbps = 0,
         .net_out_mbps = 0,

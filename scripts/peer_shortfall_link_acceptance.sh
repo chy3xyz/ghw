@@ -51,16 +51,16 @@ echo "[peer-sf] start ui_server B :$PORT_B (peer-sf-b)"
 PID_B=$!
 
 cleanup() {
-  kill "$PID_A" "$PID_B" >/dev/null 2>&1 || true
+  kill -9 "$PID_A" "$PID_B" >/dev/null 2>&1 || true  # -9: ui_server 无 SIGTERM handler
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$PORT_A/api/laws" >/dev/null 2>&1 \
     && curl -fsS "http://127.0.0.1:$PORT_B/api/laws" >/dev/null 2>&1; then
     break
   fi
-  sleep 0.2
+  sleep 0.5
 done
 
 if ! curl -fsS "http://127.0.0.1:$PORT_A/api/laws" >/dev/null 2>&1; then
@@ -98,7 +98,7 @@ grep -q '"host_crisis":true' /tmp/ghw-peer-sf-body.json
 SOCK_B="/tmp/ghw_peer-sf-b.sock"
 for _ in $(seq 1 30); do
   [[ -S "$SOCK_B" ]] && break
-  sleep 0.2
+  sleep 0.5
 done
 if [[ ! -S "$SOCK_B" ]]; then
   echo "[peer-sf] missing sock $SOCK_B; B log:"; tail -40 /tmp/ghw-peer-sf-b.log || true

@@ -69,7 +69,9 @@ pub const Axioms = struct {
 pub const HostCrisis = struct {
     pub const DISK_PCT_EPS: F = 90.0;
     pub const MEM_PCT_EPS: F = 92.0;
-    pub const LOAD_EPS: F = 8.0;
+    /// 每核负载危机阈值: load_1m ≥ n_cpus × PER_CORE ⇒ 全核饱和才危机。
+    /// 旧绝对值 8.0 在 12 核机上 70% 忙就误判危机 (2026-09 实测), 4 核机又漏报。
+    pub const LOAD_EPS_PER_CORE: F = 1.0;
     /// 手机: 电量低于此视为 material 危机信号
     pub const BATTERY_LOW_PCT: F = 15.0;
 };
@@ -109,10 +111,11 @@ pub const PROTECTED_MARKERS = [_][]const u8{
 };
 
 /// L07: 由 disk/mem/load 判定主机危机
-pub fn isHostCrisis(disk_pct: F, mem_pct: F, load_1m: F) bool {
+pub fn isHostCrisis(disk_pct: F, mem_pct: F, load_1m: F, n_cpus: u32) bool {
+    const load_eps = HostCrisis.LOAD_EPS_PER_CORE * @as(F, @floatFromInt(@max(n_cpus, 1)));
     return disk_pct >= HostCrisis.DISK_PCT_EPS or
         mem_pct >= HostCrisis.MEM_PCT_EPS or
-        load_1m >= HostCrisis.LOAD_EPS;
+        load_1m >= load_eps;
 }
 
 /// L13: 是否应触发规则提议 (纯函数, 供 RuleProposer 委托)
@@ -172,7 +175,7 @@ pub fn toJson(alloc: Allocator) ![]u8 {
         ProposeTriggers.E_SATURATED,
         HostCrisis.DISK_PCT_EPS,
         HostCrisis.MEM_PCT_EPS,
-        HostCrisis.LOAD_EPS,
+        HostCrisis.LOAD_EPS_PER_CORE,
         Axioms.RHO,
         BiasLimits.RULE_MAX_BONUS,
         BiasLimits.TASK_MAX_BONUS,
@@ -206,10 +209,12 @@ pub fn assertChecklist() !void {
     try testing.expectEqual(Axioms.RHO, ed.rho);
 
     // L07
-    try testing.expect(isHostCrisis(90, 0, 0));
-    try testing.expect(isHostCrisis(0, 92, 0));
-    try testing.expect(isHostCrisis(0, 0, 8));
-    try testing.expect(!isHostCrisis(40, 30, 1));
+    try testing.expect(isHostCrisis(90, 0, 0, 1));
+    try testing.expect(isHostCrisis(0, 92, 0, 1));
+    try testing.expect(isHostCrisis(0, 0, 8, 8)); // 8 核 load 8 = 全饱和
+    try testing.expect(!isHostCrisis(0, 0, 8, 12)); // 12 核 load 8 = 67% 忙, 非危机
+    try testing.expect(isHostCrisis(0, 0, 13, 12)); // 超订才危机
+    try testing.expect(!isHostCrisis(40, 30, 0.5, 1));
 
     // L13
     const t = ProposeTriggers.E_THRESHOLD;
@@ -236,7 +241,7 @@ pub fn assertChecklist() !void {
     // 常量域合理
     try testing.expect(HostCrisis.DISK_PCT_EPS > 50);
     try testing.expect(HostCrisis.MEM_PCT_EPS > 50);
-    try testing.expect(HostCrisis.LOAD_EPS > 1);
+    try testing.expect(HostCrisis.LOAD_EPS_PER_CORE > 0.5 and HostCrisis.LOAD_EPS_PER_CORE <= 2.0);
     try testing.expect(BiasLimits.TASK_MAX_BONUS > BiasLimits.RULE_MAX_BONUS);
     try testing.expect(ProposeTriggers.E_SATURATED > ProposeTriggers.E_THRESHOLD);
     try testing.expect(Axioms.RESERVE_RATIO > 0 and Axioms.RESERVE_RATIO < 0.5);
