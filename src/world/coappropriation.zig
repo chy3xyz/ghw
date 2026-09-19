@@ -63,6 +63,27 @@ pub const GEOMETRIC_THRESHOLD: F = 0.05;
 /// μ 对曲率的额外影响强度 (μ 偏离 0.5 每单位对 p 的拉动)
 const MU_CURVATURE: F = 0.5;
 
+/// ===== 三源供源回流常量 (2026-09 物象性供源闭环) =====
+/// 全部作用于**供源层**(每源凭什么涨落), 不改 E 聚合公理;
+/// 单次调用均有界, 由调用方按宿主检查/事后评估节奏触发。
+/// primordial_laws.SourceBackflow 从此处 alias (单一事实源)。
+pub const SourceBackflow = struct {
+    /// 宿主物质压力对 M 的单次最大抽降 (pressure∈[0,1] 线性缩放)
+    pub const HOST_DRAIN_MAX: F = 0.02;
+    /// 人类价值承认对 N 生效的中性线 (低于此不增益, 防无互动通胀)
+    pub const NATURE_NEUTRAL: F = 0.30;
+    /// 人类价值承认对 N 的单次最大增益
+    pub const NATURE_RECOGNITION_MAX: F = 0.012;
+    /// 单条已验证 [survive:*] 信念对 N 的增益 (赋义被事实承认)
+    pub const NATURE_PER_VALIDATED_BELIEF: F = 0.006;
+    /// 象存量牵引对 R 的单次最大漂移 (双向: 存量萎缩时 R 也回落)
+    pub const REPRESENTATION_DRIFT_MAX: F = 0.02;
+    /// 象存量饱和常数 (加权存量 = K ⇒ stock score ≈ 0.63; 3K ⇒ ≈0.95)
+    pub const REPRESENTATION_STOCK_K: F = 120.0;
+    /// 按维度归因: 增益归本源的比例, 其余按短板协同溢出
+    pub const DIM_ATTRIBUTION: F = 0.70;
+};
+
 /// 由协同系数 ν 与失衡系数 μ 推出幂平均的可替代性指数 p∈(0,1]。
 ///   p = 1 − 1.5·ν − MU_CURVATURE·(μ − 0.5)
 /// ν∈[0.05,0.50], μ∈[0.20,0.80] (adaptEFormula 取值域) ⇒ p∈(0,1)。
@@ -258,4 +279,49 @@ test "合恰度诊断: 平衡 H=1, 极端撕裂 H=0" {
     try eq(1.0, harmony(0.5, 0.5, 0.5), 1e-6);
     try eq(0.0, harmony(1.0, 0.0, 1.0), 1e-6);
     try eq(0.7, harmony(0.6, 0.3, 0.4), 1e-6);
+}
+
+test "敏感性: 内部区域输入微扰 ⇒ E 扰动有界 (经验 Lipschitz)" {
+    // p<1 时 x^p 在原点非 Lipschitz (Hölder), 全局利普希茨不成立;
+    // 本测试量化实用区间 [0.1,1]^3 的经验常数, 并确认边界不爆 NaN/Inf。
+    // 1e-6 级扰动在 f32 下被量化噪声淹没; 1e-4 是有意义的测量尺度
+    const eps: F = 1e-4;
+    var max_ratio: F = 0;
+    const grid = [_]F{ 0.1, 0.25, 0.5, 0.75, 0.9, 1.0 };
+    for (grid) |m| {
+        for (grid) |r| {
+            for (grid) |n| {
+                for ([_]F{ 0.06, 0.3, 0.55, 0.9 }) |p| {
+                    const base = weightedPowerMean(.{ m, r, n }, .{ 0.33, 0.34, 0.33 }, p);
+                    const up = weightedPowerMean(.{ m + eps, r, n }, .{ 0.33, 0.34, 0.33 }, p);
+                    const ratio = @abs(up - base) / eps;
+                    if (ratio > max_ratio) max_ratio = ratio;
+                }
+            }
+        }
+    }
+    // f32 精度下 1e-6 扰动可能被量化淹没 (ratio=0); 实测到的比率也应温和
+    std.debug.print("[sensitivity] interior max |dE|/eps = {d:.3}\n", .{max_ratio});
+    // 解析导数界 ≈ 0.5 (f32 下 pow 有额外噪声); 护栏取 5.0 — 防 catastrophic 敏感性回归
+    try testing.expect(max_ratio < 5.0);
+    try testing.expect(max_ratio > 0); // 非平凡: 确实测到了响应
+}
+
+test "敏感性: 边界 (源=0) 微扰不产生 NaN/Inf, 放大有界" {
+    // p→GEOMETRIC_THRESHOLD 时 0→ε 的跳变最大; 量化并确认输出恒在 [0,1]。
+    const eps: F = 1e-6;
+    const cases = [_][3]F{
+        .{ 0.0, 0.5, 0.5 }, .{ 0.0, 0.0, 0.5 }, .{ 0.0, 0.0, 0.0 },
+        .{ 0.5, 0.0, 0.5 }, .{ 0.5, 0.5, 0.0 },
+    };
+    for (cases) |c| {
+        for ([_]F{ 0.05, 0.3, 0.55, 1.0 }) |p| {
+            const z = weightedPowerMean(c, .{ 0.33, 0.34, 0.33 }, p);
+            try testing.expect(z >= 0 and z <= 1);
+            const pert: [3]F = .{ c[0] + eps, c[1] + eps, c[2] + eps };
+            const v = weightedPowerMean(pert, .{ 0.33, 0.34, 0.33 }, p);
+            try testing.expect(v >= 0 and v <= 1);
+            try testing.expect(!std.math.isNan(v));
+        }
+    }
 }

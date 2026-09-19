@@ -1583,6 +1583,8 @@ fn recordValueTrend(app: *App) void {
         &app.human_gsp,
     );
     app.value_tracker.record(score);
+    // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益 (低于中性线不增益)
+    app.agent.ed.applyNatureRecognition(score, 0);
 }
 
 /// P13: LLM 规则提议 (E/KPI/value 下滑 → Guard → SelfEncoder; 决策权仍在数字生命)
@@ -1787,7 +1789,11 @@ fn maybeWorldSensorTasks(app: *App) void {
     if (app.survival_feedback.maybeEvaluate(snap, app.agent.tick, &app.memory, app.io)) |maybe_ev| {
         if (maybe_ev) |ev| {
             app.survival_feedback_evals += 1;
-            if (ev.improved) app.survival_feedback_improved += 1;
+            if (ev.improved) {
+                app.survival_feedback_improved += 1;
+                // P0-2 供源回流: 危机规则真降压力 = 赋义被事实承认 ⇒ 性 (N) 增益
+                app.agent.ed.applyNatureRecognition(0, ev.beliefs_boosted);
+            }
             std.debug.print("[ui] tick={d} survival_feedback improved={} diskΔ={d:.1} memΔ={d:.1} loadΔ={d:.2} boost={d}\n", .{
                 app.agent.tick, ev.improved, ev.disk_delta, ev.mem_delta, ev.load_delta, ev.beliefs_boosted,
             });
@@ -1910,8 +1916,19 @@ fn refreshLifecycle(app: *App) void {
         app.value_tracker.trend(),
         app.host_profile,
     );
+    // P0-1 供源回流: 宿主物质压力 ⇒ 物 (M) 有界抽降; P1-3 象存量 ⇒ 象 (R) 有界牵引
+    app.agent.ed.applyHostPressure(app.last_shortfall.material);
+    {
+        const episodes_n: u32 = @intCast(app.memory.episodes.items.len);
+        const beliefs_n: u32 = @intCast(app.memory.beliefs.items.len);
+        const stock = @as(F, @floatFromInt(episodes_n + world_fetch_count)) +
+            2.0 * @as(F, @floatFromInt(beliefs_n)) +
+            3.0 * @as(F, @floatFromInt(app.agent.last_rule_bias.rule_count));
+        app.agent.ed.applyRepresentationStock(stock);
+    }
     if (app.rule_proposer) |*p| {
         p.setHostCrisis(app.last_shortfall.host_crisis);
+        p.setImbalanceLoss(app.agent.ed.imbalanceLossNow());
         applyDigestToProposer(app, p);
     } else {
         refreshCombinedDigest(app);
@@ -2102,6 +2119,11 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     try body.append(alloc, ',');
     try app.peer_inbox.appendSummaryJson(alloc, body);
     try body.print(alloc, ",\"peer_shortfall_ingest_total\":{d}", .{app.peer_shortfall_ingest_total});
+    // P2: 三源合恰诊断 (失衡损失 + 合恰度) — 只读暴露, 不进 E
+    try body.print(alloc, ",\"existence\":{{\"imbalance_loss\":{d:.4},\"harmony\":{d:.4}}}", .{
+        app.agent.ed.imbalanceLossNow(),
+        app.agent.ed.harmonyNow(),
+    });
     try body.append(alloc, '}'); // close survival
     const crisis = app.last_shortfall.host_crisis or (app.existence_phase == .crisis);
     const accept_snap = ghw_harness.evolution_acceptance.Snapshot{

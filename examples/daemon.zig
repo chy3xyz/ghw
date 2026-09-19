@@ -887,7 +887,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 if (survival_feedback.maybeEvaluate(s, agent.tick, &memory, io)) |maybe_ev| {
                     if (maybe_ev) |ev| {
                         survival_feedback_evals += 1;
-                        if (ev.improved) survival_feedback_improved += 1;
+                        if (ev.improved) {
+                            survival_feedback_improved += 1;
+                            // P0-2: 危机规则真降压力 ⇒ 性 (N) 增益
+                            agent.ed.applyNatureRecognition(0, ev.beliefs_boosted);
+                        }
                         std.debug.print("[daemon] survival_feedback improved={} evals={d}/{d} diskΔ={d:.1}\n", .{
                             ev.improved, survival_feedback_improved, survival_feedback_evals, ev.disk_delta,
                         });
@@ -940,7 +944,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 value_tracker.trend(),
                 host_profile,
             );
-            if (proposer_opt) |*p| p.setHostCrisis(last_shortfall.host_crisis);
+            // P0-1/P1-3 供源回流: 宿主压力→M, 象存量→R, 失衡喂提议器
+            agent.ed.applyHostPressure(last_shortfall.material);
+            {
+                const episodes_n: u32 = @intCast(memory.episodes.items.len);
+                const beliefs_n: u32 = @intCast(memory.beliefs.items.len);
+                const stock = @as(F, @floatFromInt(episodes_n + world_fetch_count)) +
+                    2.0 * @as(F, @floatFromInt(beliefs_n)) +
+                    3.0 * @as(F, @floatFromInt(agent.last_rule_bias.rule_count));
+                agent.ed.applyRepresentationStock(stock);
+            }
+            if (proposer_opt) |*p| {
+                p.setHostCrisis(last_shortfall.host_crisis);
+                p.setImbalanceLoss(agent.ed.imbalanceLossNow());
+            }
             const balanced = harness.existence_phase.mrnBalanced(
                 agent.ed.v.material,
                 agent.ed.v.representation,
@@ -1159,8 +1176,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
 
-        // P11: 人类 value_score 趋势采样
-        value_tracker.record(harness.human_symbiosis.computeScore(&human_signal, &task_queue, &human_gsp));
+        // P11: 人类 value_score 趋势采样; P0-2 供源回流: 价值承认 ⇒ N
+        {
+            const vscore = harness.human_symbiosis.computeScore(&human_signal, &task_queue, &human_gsp);
+            value_tracker.record(vscore);
+            agent.ed.applyNatureRecognition(vscore, 0);
+        }
 
         // ===== Loop Engine 4-phase PDCA (Boris) =====
         if (loop_engine_opt) |*le| {

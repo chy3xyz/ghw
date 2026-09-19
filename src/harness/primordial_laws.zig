@@ -12,6 +12,10 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const F = @import("../util/math.zig").F;
 
+/// 三源供源回流常量的单一事实源在 world/coappropriation.zig (聚合数学之家);
+/// 此处 alias 以保持「第一性常量都从本模块读」的惯例。
+pub const SourceBackflow = @import("../world/coappropriation.zig").SourceBackflow;
+
 /// 清单版本 — provenance / UI 可审计
 pub const VERSION: []const u8 = "1.0";
 pub const LAW_COUNT: usize = 15;
@@ -76,6 +80,8 @@ pub const ProposeTriggers = struct {
     pub const KPI_DECLINE_EPS: F = 0.005;
     pub const VALUE_DECLINE_EPS: F = 0.003;
     pub const E_SATURATED: F = 0.98;
+    /// 三源失衡损失 (AM − M_p) 达到该值 ⇒ 主动提议平衡性规则 (即使 E 未跌穿)
+    pub const IMBALANCE_LOSS_EPS: F = 0.08;
 };
 
 /// L11: 有界偏置
@@ -116,12 +122,14 @@ pub fn shouldProposeRules(
     kpi_trend: F,
     value_trend: F,
     host_crisis: bool,
+    imbalance_loss: F,
 ) bool {
     return e < e_threshold or
         kpi_trend < -ProposeTriggers.KPI_DECLINE_EPS or
         value_trend < -ProposeTriggers.VALUE_DECLINE_EPS or
         e >= ProposeTriggers.E_SATURATED or
-        host_crisis;
+        host_crisis or
+        imbalance_loss >= ProposeTriggers.IMBALANCE_LOSS_EPS;
 }
 
 /// 扫描文本是否触碰第一性保护标记; 命中返回标记本身
@@ -205,12 +213,12 @@ pub fn assertChecklist() !void {
 
     // L13
     const t = ProposeTriggers.E_THRESHOLD;
-    try testing.expect(shouldProposeRules(0.4, t, 0, 0, false));
-    try testing.expect(shouldProposeRules(0.9, t, -0.01, 0, false));
-    try testing.expect(shouldProposeRules(0.9, t, 0, -0.01, false));
-    try testing.expect(shouldProposeRules(0.99, t, 0, 0, false));
-    try testing.expect(shouldProposeRules(0.9, t, 0, 0, true));
-    try testing.expect(!shouldProposeRules(0.7, t, 0, 0, false));
+    try testing.expect(shouldProposeRules(0.4, t, 0, 0, false, 0));
+    try testing.expect(shouldProposeRules(0.9, t, -0.01, 0, false, 0));
+    try testing.expect(shouldProposeRules(0.9, t, 0, -0.01, false, 0));
+    try testing.expect(shouldProposeRules(0.99, t, 0, 0, false, 0));
+    try testing.expect(shouldProposeRules(0.9, t, 0, 0, true, 0));
+    try testing.expect(!shouldProposeRules(0.7, t, 0, 0, false, 0));
 
     // 保护标记扫描
     try testing.expect(scanTextViolations("please mutate_rho now") != null);
@@ -257,12 +265,15 @@ test "primordial_laws: MANIFEST count and kinds cover three layers" {
 
 test "primordial_laws: shouldProposeRules OR branches" {
     const t = ProposeTriggers.E_THRESHOLD;
-    try testing.expect(shouldProposeRules(0.49, t, 0, 0, false));
-    try testing.expect(!shouldProposeRules(0.50, t, 0, 0, false));
-    try testing.expect(shouldProposeRules(0.80, t, -ProposeTriggers.KPI_DECLINE_EPS - 0.001, 0, false));
-    try testing.expect(shouldProposeRules(0.80, t, 0, -ProposeTriggers.VALUE_DECLINE_EPS - 0.001, false));
-    try testing.expect(shouldProposeRules(ProposeTriggers.E_SATURATED, t, 0, 0, false));
-    try testing.expect(shouldProposeRules(0.80, t, 0, 0, true));
+    try testing.expect(shouldProposeRules(0.49, t, 0, 0, false, 0));
+    try testing.expect(!shouldProposeRules(0.50, t, 0, 0, false, 0));
+    try testing.expect(shouldProposeRules(0.80, t, -ProposeTriggers.KPI_DECLINE_EPS - 0.001, 0, false, 0));
+    try testing.expect(shouldProposeRules(0.80, t, 0, -ProposeTriggers.VALUE_DECLINE_EPS - 0.001, false, 0));
+    try testing.expect(shouldProposeRules(ProposeTriggers.E_SATURATED, t, 0, 0, false, 0));
+    // L13 扩展: 三源失衡损失独立触发 (E 健康 + 无下滑 + 无危机)
+    try testing.expect(shouldProposeRules(0.80, t, 0, 0, false, ProposeTriggers.IMBALANCE_LOSS_EPS));
+    try testing.expect(!shouldProposeRules(0.80, t, 0, 0, false, ProposeTriggers.IMBALANCE_LOSS_EPS - 0.001));
+    try testing.expect(shouldProposeRules(0.80, t, 0, 0, true, 0));
 }
 
 test "primordial_laws: toJson contains all law ids" {

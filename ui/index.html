@@ -197,7 +197,7 @@
     </div>
 
     <!-- 生命代谢看板 (pending/peers/ΔE往事, 不只看 E≈1) -->
-    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state?.provenance?.vitality">
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6">
       <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">生命代谢 (Vitality)</h2>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
         <div>
@@ -325,7 +325,7 @@
     </div>
 
     <!-- P1: 进化验收 + 稳态门槛 -->
-    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state?.provenance?.evolution_acceptance">
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6">
       <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">进化验收 (求存 × 进化)</h2>
       <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4 text-center">
         <template x-for="lv in evolutionLevelRows()" :key="lv.key">
@@ -430,7 +430,7 @@
 
     <!-- 提议目标预览 / 其他 status 内容继续 -->
     <!-- P12: 人类共生 ValueMetric 仪表盘 -->
-    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6" x-show="state?.provenance?.human_symbiosis">
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6">
       <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">人类共生 (ValueMetric)</h2>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div>
@@ -480,6 +480,42 @@
               <span class="ml-1" :class="trustLevelColor(p.trust_level)" x-text="p.trust_level"></span>
             </span>
           </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- 三源合恰诊断 (P2: 失衡损失 + 合恰度, 只读) -->
+    <div class="bg-ghw-panel rounded-lg p-5 border border-slate-800 mb-6">
+      <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider mb-4">三源合恰 (物 · 象 · 性)</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+          <div class="text-xs text-ghw-dim">失衡损失</div>
+          <div class="text-2xl font-mono font-bold"
+               :class="(state?.provenance?.survival?.existence?.imbalance_loss ?? 0) >= 0.08 ? 'text-rose-300' : 'text-emerald-300'"
+               x-text="(state?.provenance?.survival?.existence?.imbalance_loss ?? 0).toFixed(4)"></div>
+          <div class="text-xs text-ghw-dim mt-2">AM − M_p ≥ 0.08 触发平衡提议</div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">合恰度 H</div>
+          <div class="text-2xl font-mono font-bold text-sky-300"
+               x-text="(state?.provenance?.survival?.existence?.harmony ?? 0).toFixed(4)"></div>
+          <div class="text-xs text-ghw-dim mt-2">1 − (max−min), 诊断量不进 E</div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">供源回流</div>
+          <div class="text-xs font-mono mt-1 text-slate-300 leading-5">
+            宿主压力 → 物 (M)<br>
+            记忆/规则/外网 → 象 (R)<br>
+            价值/验证信念 → 性 (N)
+          </div>
+        </div>
+        <div>
+          <div class="text-xs text-ghw-dim">归因</div>
+          <div class="text-xs font-mono mt-1 text-slate-300 leading-5">
+            任务增益 70% 归本源<br>
+            30% 协同溢出给短板<br>
+            预测误差记象 (R)
+          </div>
         </div>
       </div>
     </div>

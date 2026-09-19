@@ -87,6 +87,8 @@ pub const RuleProposer = struct {
     last_world_digest: []const u8 = "",
     /// P4: 主机危机 (disk/mem/load 越阈) — 主动提议求存规则
     last_host_crisis: bool = false,
+    /// 三源失衡损失 (AM − M_p), 由 caller 每 post-cycle 喂入
+    last_imbalance_loss: F = 0.0,
     proposal_count: u32 = 0,
     accepted_count: u32 = 0,
     rejected_count: u32 = 0,
@@ -147,6 +149,11 @@ pub const RuleProposer = struct {
     /// P4: 主机危机标志 (生存压力 → 应提议 material 规则)
     pub fn setHostCrisis(self: *RuleProposer, crisis: bool) void {
         self.last_host_crisis = crisis;
+    }
+
+    /// P2: 三源失衡损失喂入 (达到 IMBALANCE_LOSS_EPS 触发提议)
+    pub fn setImbalanceLoss(self: *RuleProposer, loss: F) void {
+        self.last_imbalance_loss = loss;
     }
 
     /// 绑定自传体记忆, 让规则提议带上"我是谁/我相信什么/相关往事"。
@@ -228,6 +235,7 @@ pub const RuleProposer = struct {
             self.last_kpi_trend,
             self.last_value_trend,
             self.last_host_crisis,
+            self.last_imbalance_loss,
         );
     }
 

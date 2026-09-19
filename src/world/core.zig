@@ -127,6 +127,18 @@ pub const ExistenceVector = struct {
         return @min(self.material, @min(self.representation, self.nature));
     }
 
+    /// 短板维度 (并列时 material < representation < nature 优先)
+    pub fn minDim(self: ExistenceVector) SourceDim {
+        var d: SourceDim = .material;
+        var lo = self.material;
+        if (self.representation < lo) {
+            d = .representation;
+            lo = self.representation;
+        }
+        if (self.nature < lo) d = .nature;
+        return d;
+    }
+
     pub fn variance(self: ExistenceVector) F {
         const m = self.mean();
         const d2 = (self.material - m) * (self.material - m) +
@@ -149,6 +161,13 @@ pub const ExistenceVector = struct {
 ///     σ = 共生系数, S = 共生度
 ///   关系涌现: +λ·D(relations)  (Phase 8 2026-06-09: GoalGraph 9 关系多样性加成)
 ///     λ = 关系多样性系数, D = distinct/9 (0..1, 关系种类归一化)
+/// 三源的供源维度 (物/象/性)。供源层归因用; 与 harness 层 RuleDim/Task.Dimension 同构。
+pub const SourceDim = enum {
+    material,
+    representation,
+    nature,
+};
+
 pub const ExistenceDegree = struct {
     v: ExistenceVector = .{},
     weights: ExistenceWeights = .{},
@@ -234,6 +253,16 @@ pub const ExistenceDegree = struct {
     /// `αM+βR+γN − μ·Var + ν·min` 线性加权 + 外挂补丁 (见
     /// `world/coappropriation.zig` 的推导与性质证明)。
     /// σ·S (共生) 与 λ·D (关系涌现) 仍作为有界加性调制项叠加。
+    /// 生效 μ (L1/L4 自适应后)
+    pub fn effectiveMu(self: ExistenceDegree) F {
+        return if (self.mu_auto) self.mu_computed else self.mu;
+    }
+
+    /// 生效 ν
+    pub fn effectiveNu(self: ExistenceDegree) F {
+        return if (self.nu_auto) self.nu_computed else self.nu;
+    }
+
     pub fn e(self: ExistenceDegree) F {
         // Phase 8.6: 4 加项系数都可自调 (L4 闭环)
         const eff_mu: F = if (self.mu_auto) self.mu_computed else self.mu;
@@ -480,6 +509,124 @@ pub const ExistenceDegree = struct {
         }
         // 触发权重自适应
         self.weights.adapt(self.v);
+    }
+
+    /// ===== 三源供源回流 (2026-09 物象性闭环) =====
+    /// 与 apply() 的"短板再分配"不同, 这些方法按**存在论语义**归因:
+    /// 物的增益归物, 意义的承认归性, 符号的存量对象。全部有界、可审计。
+
+    /// 按维度归因的增益: DIM_ATTRIBUTION 归本源, 其余按短板协同溢出;
+    /// 损耗归因到本源 (资源的磨损发生在使用它的维度)。
+    pub fn applyDim(self: *ExistenceDegree, gain: F, dim: SourceDim) void {
+        const attr = coappropriation.SourceBackflow.DIM_ATTRIBUTION;
+        if (gain >= 0) {
+            const spill = gain * (1.0 - attr);
+            const own = gain * attr;
+            const min_dim = self.v.minDim();
+            switch (dim) {
+                .material => {
+                    self.v.material = math_util.clamp(self.v.material + own, 0, 1);
+                    self.spillToShortest(spill, .material, min_dim);
+                },
+                .representation => {
+                    self.v.representation = math_util.clamp(self.v.representation + own, 0, 1);
+                    self.spillToShortest(spill, .representation, min_dim);
+                },
+                .nature => {
+                    self.v.nature = math_util.clamp(self.v.nature + own, 0, 1);
+                    self.spillToShortest(spill, .nature, min_dim);
+                },
+            }
+        } else {
+            // 损耗归本源 (磨损发生在使用它的维度)
+            switch (dim) {
+                .material => self.v.material = math_util.clamp(self.v.material + gain, 0, 1),
+                .representation => self.v.representation = math_util.clamp(self.v.representation + gain, 0, 1),
+                .nature => self.v.nature = math_util.clamp(self.v.nature + gain, 0, 1),
+            }
+        }
+        self.weights.adapt(self.v);
+    }
+
+    fn spillToShortest(self: *ExistenceDegree, spill: F, from: SourceDim, min_dim: SourceDim) void {
+        // 溢出全部给当前短板; 若本源即短板, 则均分给**另外两源** (溢出不回流本源)
+        if (from == min_dim) {
+            switch (from) {
+                .material => {
+                    self.v.representation = math_util.clamp(self.v.representation + spill / 2.0, 0, 1);
+                    self.v.nature = math_util.clamp(self.v.nature + spill / 2.0, 0, 1);
+                },
+                .representation => {
+                    self.v.material = math_util.clamp(self.v.material + spill / 2.0, 0, 1);
+                    self.v.nature = math_util.clamp(self.v.nature + spill / 2.0, 0, 1);
+                },
+                .nature => {
+                    self.v.material = math_util.clamp(self.v.material + spill / 2.0, 0, 1);
+                    self.v.representation = math_util.clamp(self.v.representation + spill / 2.0, 0, 1);
+                },
+            }
+            return;
+        }
+        switch (min_dim) {
+            .material => self.v.material = math_util.clamp(self.v.material + spill, 0, 1),
+            .representation => self.v.representation = math_util.clamp(self.v.representation + spill, 0, 1),
+            .nature => self.v.nature = math_util.clamp(self.v.nature + spill, 0, 1),
+        }
+    }
+
+    /// 宿主物质压力有界回流 M: 宿主 (disk/mem/load/battery) 是数字生命的
+    /// 物质基底, 其压力应直接压低本体的「物」。pressure∈[0,1], 0 = 健康 ⇒ 零抽降。
+    pub fn applyHostPressure(self: *ExistenceDegree, material_pressure: F) void {
+        if (material_pressure <= 0) return;
+        const drain = coappropriation.SourceBackflow.HOST_DRAIN_MAX * math_util.clamp(material_pressure, 0, 1);
+        self.v.material = math_util.clamp(self.v.material - drain, 0, 1);
+        self.weights.adapt(self.v);
+    }
+
+    /// 意义承认回流 N (赋义之能被承认 ⇒ 性增长):
+    /// value_score 高于中性线按比例增益; 每条已验证 [survive:*] 信念固定增益。
+    pub fn applyNatureRecognition(self: *ExistenceDegree, value_score: F, validated_beliefs: u32) void {
+        const sb = coappropriation.SourceBackflow;
+        const above = math_util.clamp(value_score - sb.NATURE_NEUTRAL, 0, 1 - sb.NATURE_NEUTRAL);
+        const strength = above / (1.0 - sb.NATURE_NEUTRAL);
+        const gain = sb.NATURE_RECOGNITION_MAX * strength +
+            sb.NATURE_PER_VALIDATED_BELIEF * @as(F, @floatFromInt(validated_beliefs));
+        if (gain <= 0) return;
+        self.v.nature = math_util.clamp(self.v.nature + gain, 0, 1);
+        self.weights.adapt(self.v);
+    }
+
+    /// 象存量牵引 R: 符号系统的真实规模 (记忆 episodes / 信念 / 已采纳规则 /
+    /// 外网存量, 调用方加权合计) 经饱和函数 1−e^(−s/K) 映射为目标水位,
+    /// R 每次最多向其漂移 REPRESENTATION_DRIFT_MAX (双向 — 存量萎缩象也回落)。
+    pub fn applyRepresentationStock(self: *ExistenceDegree, weighted_stock: F) void {
+        if (weighted_stock < 0) return;
+        const sb = coappropriation.SourceBackflow;
+        const target = 1.0 - @exp(-weighted_stock / sb.REPRESENTATION_STOCK_K);
+        const diff = target - self.v.representation;
+        const drift = math_util.clamp(diff, -sb.REPRESENTATION_DRIFT_MAX, sb.REPRESENTATION_DRIFT_MAX);
+        if (drift == 0) return;
+        self.v.representation = math_util.clamp(self.v.representation + drift, 0, 1);
+        self.weights.adapt(self.v);
+    }
+
+    /// 当前失衡损失 = AM − M_p (三源不合恰的存在度代价), 供触发器/provenance。
+    pub fn imbalanceLossNow(self: *ExistenceDegree) F {
+        return coappropriation.imbalanceLoss(
+            self.v.material,
+            self.v.representation,
+            self.v.nature,
+            self.weights.alpha,
+            self.weights.beta,
+            self.weights.gamma,
+            self.effectiveMu(),
+            self.effectiveNu(),
+        );
+    }
+
+    /// 三源合恰度 H = 1 − (max−min), 纯诊断量 (不进 E, 保单调)。
+    pub fn harmonyNow(self: *ExistenceDegree) F {
+        return coappropriation.harmony(self.v.material, self.v.representation, self.v.nature);
     }
 
     /// 喂入一个新的复合 KPI 值 K∈[0,1] (来自 crm_kpi.composite)。
@@ -897,6 +1044,73 @@ test "ExistenceDegree: E in [0,1]" {
     try std.testing.expect(d.e() > e0);
     d.apply(-0.5);
     try std.testing.expect(d.e() < 0.6);
+}
+
+// ===== 三源供源回流测试 (2026-09 物象性闭环) =====
+
+test "SourceBackflow: applyDim 按维度归因 (70% 本源 + 协同溢出)" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.4, .nature = 0.3 } };
+    // material 任务增益 0.1: M 应得 0.07, 溢出 0.03 归短板 N
+    d.applyDim(0.1, .material);
+    try std.testing.expectApproxEqAbs(@as(F, 0.57), d.v.material, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.4), d.v.representation, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.33), d.v.nature, 1e-6);
+
+    // 损耗归因本源: material 损耗只扣 M
+    d.applyDim(-0.05, .material);
+    try std.testing.expectApproxEqAbs(@as(F, 0.52), d.v.material, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.4), d.v.representation, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.33), d.v.nature, 1e-6);
+}
+
+test "SourceBackflow: applyDim 本源即短板 ⇒ 溢出均分" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.2, .representation = 0.6, .nature = 0.7 } };
+    d.applyDim(0.1, .material);
+    // own 0.07 → M; spill 0.03 均分给 R/N 各 0.015
+    try std.testing.expectApproxEqAbs(@as(F, 0.27), d.v.material, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.615), d.v.representation, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.715), d.v.nature, 1e-6);
+}
+
+test "SourceBackflow: 宿主压力有界回流 M, 健康时零抽降" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 } };
+    d.applyHostPressure(0.0);
+    try std.testing.expectEqual(@as(F, 0.5), d.v.material);
+    d.applyHostPressure(1.0);
+    try std.testing.expectApproxEqAbs(@as(F, 0.48), d.v.material, 1e-6); // HOST_DRAIN_MAX=0.02
+    d.applyHostPressure(5.0); // 越界输入按 1.0 截断
+    try std.testing.expectApproxEqAbs(@as(F, 0.46), d.v.material, 1e-6);
+}
+
+test "SourceBackflow: 意义承认回流 N (中性线 + 验证信念)" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.5, .nature = 0.3 } };
+    d.applyNatureRecognition(0.2, 0); // 低于中性线 ⇒ 不变
+    try std.testing.expectEqual(@as(F, 0.3), d.v.nature);
+    d.applyNatureRecognition(1.0, 1); // 满强度 + 1 信念
+    const expect_gain = coappropriation.SourceBackflow.NATURE_RECOGNITION_MAX +
+        coappropriation.SourceBackflow.NATURE_PER_VALIDATED_BELIEF;
+    try std.testing.expectApproxEqAbs(@as(F, 0.3) + expect_gain, d.v.nature, 1e-6);
+}
+
+test "SourceBackflow: 象存量牵引 R 双向有界" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.1, .nature = 0.5 } };
+    d.applyRepresentationStock(0); // 空存量: target=0, 每次最多降 DRIFT_MAX
+    try std.testing.expectApproxEqAbs(@as(F, 0.08), d.v.representation, 1e-6);
+    d.applyRepresentationStock(1000); // 大存量: target≈1, 每次最多 +0.02
+    try std.testing.expectApproxEqAbs(@as(F, 0.10), d.v.representation, 1e-6);
+    // 反复牵引收敛于 target 附近, 不越界
+    for (0..200) |_| d.applyRepresentationStock(1000);
+    try std.testing.expect(d.v.representation <= 1.0 and d.v.representation > 0.9);
+}
+
+test "SourceBackflow: imbalanceLossNow/harmonyNow 与直算一致" {
+    var d: ExistenceDegree = .{ .v = .{ .material = 0.9, .representation = 0.5, .nature = 0.1 } };
+    const loss = d.imbalanceLossNow();
+    try std.testing.expect(loss > 0.01); // 撕裂态损失显著
+    const h = d.harmonyNow();
+    try std.testing.expectApproxEqAbs(@as(F, 0.2), h, 1e-6); // 1-(0.9-0.1)
+    d.v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 };
+    try std.testing.expectApproxEqAbs(@as(F, 0), d.imbalanceLossNow(), 1e-6);
 }
 
 test "ExistenceDegree: weights adapt to imbalance" {

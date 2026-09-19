@@ -149,6 +149,9 @@ pub const GHWAgent = struct {
     self_id: []const u8,
     /// 三层
     ed: ExistenceDegree,
+    /// 供源归因维度: 任务执行期间, runCycle 的增益按该维度归因 (物归物/象归象/性归性);
+    /// null ⇒ 旧 apply() 短板分配 (非任务路径不变)
+    dim_attribution: ?world.SourceDim = null,
     wm: WorldModel,
     wms: CoappropriationTensor,
     attn: AttentionEngine,
@@ -648,8 +651,15 @@ pub const GHWAgent = struct {
         if (outcome) |o| {
             // E_t = E_{t-1} + λ_E · ΔE - λ_D · D
             // λ_E 来自 outcome 的 de_delta, λ_D 来自世界模型预测误差
-            const gain = o.de_delta * 0.5 - err * 0.1;
-            self.ed.apply(gain);
+            const action_gain = o.de_delta * 0.5;
+            const err_cost = err * 0.1;
+            if (self.dim_attribution) |dim| {
+                // 归因分账: 行动收益归任务维度; 预测误差是「象」的损耗, 记 R
+                self.ed.applyDim(action_gain, dim);
+                if (err_cost > 0) self.ed.applyDim(-err_cost, .representation);
+            } else {
+                self.ed.apply(action_gain - err_cost);
+            }
             // 象维度专项更新
             self.ed.v.representation = math_util.clamp(
                 self.ed.v.representation + o.representation_gain * self.eta_H,
@@ -835,6 +845,14 @@ pub const GHWAgent = struct {
         action_report: ?[]const u8,
     ) !HumanTaskResult {
         const e_before = self.ed.e();
+        // P1-4 按维度归因: 任务的 required_dimension 决定其存在度收益落点 (all ⇒ 旧行为)
+        self.dim_attribution = switch (task.required_dimension) {
+            .material => @as(?world.SourceDim, .material),
+            .representation => @as(?world.SourceDim, .representation),
+            .nature => @as(?world.SourceDim, .nature),
+            .all => null,
+        };
+        defer self.dim_attribution = null;
         var cycles_used: u32 = 0;
         var last_outcome: ?ActionOutcome = null;
         for (0..task.cycles_allocated) |i| {
@@ -1004,6 +1022,63 @@ test "GHWAgent: TaskQueue pending 任务偏置目标选择 (P5 闭环 + provenan
     agent.task_queue = null;
     const top2 = agent.selectTopGoal().?;
     try std.testing.expectEqual(GoalKind.acquire_resource, top2.kind);
+}
+
+test "GHWAgent: 任务 required_dimension 归因到本源维度 (供源闭环)" {
+    const alloc = std.testing.allocator;
+    const TaskQueue = @import("../harness/human_symbiosis/task_queue.zig").TaskQueue;
+
+    var agent = try GHWAgent.init(alloc, "dim-attr-test", 4, .{ 3, 3, 3 }, 42);
+    defer agent.deinit();
+
+    // 精确控制 outcome: representation_gain=0, material_cost=0 ⇒ 维度变化全部来自归因路径
+    const Ctx = struct {
+        fn handler(ctx: *anyopaque, a: Allocator, act: Action) anyerror!ActionOutcome {
+            _ = ctx;
+            _ = a;
+            _ = act;
+            return .{ .success = true, .de_delta = 0.2, .representation_gain = 0, .material_cost = 0, .log = "ok" };
+        }
+    };
+    _ = try agent.methods.register("default", .basic, .{ 1, 0, 0, 0 }, 0, Ctx.handler, null);
+
+    var info_stream: [5]Information = .{
+        .{ .id = 1, .label = "compute power available", .features = .{ 0.7, 0.8, 0.3, 0.2 } },
+        .{ .id = 2, .label = "new knowledge found", .features = .{ 0.6, 0.7, 0.6, 0.1 } },
+        .{ .id = 3, .label = "memory warning", .features = .{ 0.4, 0.3, 0.4, 0.5 } },
+        .{ .id = 4, .label = "energy low", .features = .{ 0.8, 0.5, 0.2, 0.3 } },
+        .{ .id = 5, .label = "new tool available", .features = .{ 0.5, 0.6, 0.8, 0.2 } },
+    };
+
+    agent.ed.v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 };
+    const m0 = agent.ed.v.material;
+    const r0 = agent.ed.v.representation;
+    const n0 = agent.ed.v.nature;
+
+    // 直接验证 runCycle 接线: 归因上下文 = material
+    agent.dim_attribution = .material;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        _ = try agent.runCycle(&info_stream);
+    }
+    agent.dim_attribution = null;
+
+    // material 归因 ⇒ 收益大头归 M; R 可能带预测误差损耗, N 只有协同溢出 + 成功加成
+    const dm = agent.ed.v.material - m0;
+    const dr = agent.ed.v.representation - r0;
+    const dn = agent.ed.v.nature - n0;
+    try std.testing.expect(dm > dr);
+    try std.testing.expect(dm > dn);
+
+    // 任务路径: runTaskPrepared 按 required_dimension 设置归因, 结束后清理
+    var queue = TaskQueue.init(alloc);
+    defer queue.deinit();
+    _ = try queue.submit("clean disk", "free space", "human", 8, .material, 1);
+    const t = queue.dequeue().?;
+    const tr = try agent.runTaskPrepared(t, &info_stream, null);
+    defer agent.allocator.free(tr.output);
+    queue.complete(t.id, "done", 0, 1) catch {};
+    try std.testing.expect(agent.dim_attribution == null);
 }
 
 test "GHWAgent: 完整生命周期" {
