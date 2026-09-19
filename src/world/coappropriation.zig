@@ -82,6 +82,11 @@ pub const SourceBackflow = struct {
     pub const REPRESENTATION_STOCK_K: F = 120.0;
     /// 按维度归因: 增益归本源的比例, 其余按短板协同溢出
     pub const DIM_ATTRIBUTION: F = 0.70;
+    /// 供源回流的最小 tick 间隔 — 「单次有界」必须配低频调用,
+    /// 否则每-cycle 调用会在几分钟内打穿 M / 通胀 N (caller 强制遵守)
+    pub const BACKFLOW_INTERVAL_TICKS: u64 = 32;
+    /// 宿主康复对 M 的单次最大回升 (磨损全速、康复半速 — 生物学上保守)
+    pub const HOST_RECOVER_MAX: F = HOST_DRAIN_MAX * 0.5;
 };
 
 /// 由协同系数 ν 与失衡系数 μ 推出幂平均的可替代性指数 p∈(0,1]。

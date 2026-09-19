@@ -773,6 +773,7 @@ pub const GHWAgent = struct {
         // 7. 记录
         const e_after = self.ed.e();
         try self.e_history.append(self.allocator, e_after);
+        self.ed.recordMrn();
         if (self.e_history.items.len > 1024) {
             _ = self.e_history.orderedRemove(0);
         }

@@ -548,6 +548,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var sys_collector = harness.system_collector.SystemCollector.init(alloc, io, cfg.seed);
     defer sys_collector.deinit();
     var last_world_sensor_tick: u64 = 0;
+    var last_backflow_tick: u64 = 0;
     var survival_feedback: harness.survival_feedback.Tracker = .{};
     var survival_feedback_evals: u32 = 0;
     var survival_feedback_improved: u32 = 0;
@@ -944,9 +945,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 value_tracker.trend(),
                 host_profile,
             );
-            // P0-1/P1-3 供源回流: 宿主压力→M, 象存量→R, 失衡喂提议器
-            agent.ed.applyHostPressure(last_shortfall.material);
-            {
+            // P0-1/P1-3 供源回流: 宿主基底双向牵引 M, 象存量牵引 R —
+            // 本块每 tick 都跑, 必须节流 BACKFLOW_INTERVAL_TICKS
+            if (agent.tick >= last_backflow_tick + harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+                last_backflow_tick = agent.tick;
+                agent.ed.applyHostPressure(last_shortfall.material);
                 const episodes_n: u32 = @intCast(memory.episodes.items.len);
                 const beliefs_n: u32 = @intCast(memory.beliefs.items.len);
                 const stock = @as(F, @floatFromInt(episodes_n + world_fetch_count)) +
@@ -1180,7 +1183,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         {
             const vscore = harness.human_symbiosis.computeScore(&human_signal, &task_queue, &human_gsp);
             value_tracker.record(vscore);
-            agent.ed.applyNatureRecognition(vscore, 0);
+            if (agent.tick >= last_backflow_tick + harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+                agent.ed.applyNatureRecognition(vscore, 0);
+            }
         }
 
         // ===== Loop Engine 4-phase PDCA (Boris) =====

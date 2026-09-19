@@ -9,6 +9,10 @@ function ghwApp() {
     // ===== 状态 =====
     tab: 'status',
     state: null,            // 最新 /api/state
+    // x-text/x-html 计算值: 深链 x-show 效果不重算 (AGENTS.md), 数据绑定走文本通道
+    saveBlockedHtml: '',
+    ruleProposeLine: '规则提议: off',
+    chatInfoLine: '',
     log: [],                // 最新 /api/log
     error: null,
     _pollTimer: null,
@@ -796,6 +800,16 @@ function ghwApp() {
         const r = await fetch('/api/state');
         if (!r.ok) throw new Error('state fetch failed: ' + r.status);
         this.state = await r.json();
+        const p = (this.state && this.state.provenance) || {};
+        this.saveBlockedHtml = (p.state_contract && p.state_contract.save_blocked)
+          ? '<div class="text-sm font-semibold text-rose-200">state 保存已暂停</div><div class="text-xs text-ghw-dim mt-1">磁盘 state 由 <span class="font-mono text-rose-300">' + (p.state_contract.writer || '?') + '</span> 写入 (epoch=' + (p.state_contract.epoch ?? 0) + ')。请勿与 daemon 共用同一 state 文件同时写入；请只保留一个 writer 或分开路径。</div>'
+          : '';
+        this.ruleProposeLine = p.rule_propose
+          ? '规则提议: ' + (p.rule_propose.enabled ? 'on' : 'off') + ' · total=' + (p.rule_propose.total ?? 0) + ' · rules=' + (p.rule_propose.adopted_rules ?? 0)
+          : '规则提议: off';
+        this.chatInfoLine = p.chat
+          ? '最近回复 memory=' + (p.chat.last_memory_injected ? 'on' : 'off') + ' · 往事=' + (p.chat.episode_count ?? 0) + ' · 信念=' + (p.chat.belief_count ?? 0) + ' · 累计 memory 回复=' + (p.chat.replies_with_memory ?? 0)
+          : '';
         this.error = null;
       } catch (e) {
         this.error = String(e);

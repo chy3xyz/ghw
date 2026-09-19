@@ -240,6 +240,10 @@ pub const ExistenceDegree = struct {
     kpi_target: F = 1.0,
     /// 64 周期环形缓冲, 供趋势/方差 (不进 E 公式, 仅供反思层/L4 提议器)。
     kpi_history: [64]F = @splat(0.5),
+    /// M/R/N 每-cycle 轨迹 (64 环形缓冲, 语义同 kpi_history: 供趋势/回放, 不进 E)
+    mrn_history: [64][3]F = @splat(.{ 0, 0, 0 }),
+    mrn_history_idx: usize = 0,
+    mrn_history_count: usize = 0,
     kpi_history_idx: u8 = 0,
     kpi_history_count: u8 = 0,
 
@@ -574,12 +578,21 @@ pub const ExistenceDegree = struct {
         }
     }
 
-    /// 宿主物质压力有界回流 M: 宿主 (disk/mem/load/battery) 是数字生命的
-    /// 物质基底, 其压力应直接压低本体的「物」。pressure∈[0,1], 0 = 健康 ⇒ 零抽降。
+    /// 宿主物质基底对 M 的有界牵引 (双向): 宿主健康度决定物的目标水位
+    /// (target = 1 − pressure)。磨损全速 (HOST_DRAIN_MAX), 康复半速
+    /// (HOST_RECOVER_MAX) — 修物(清理磁盘)→宿主压力降→物回升, 求存环闭合。
+    /// 调用方必须遵守 BACKFLOW_INTERVAL_TICKS 节流。
     pub fn applyHostPressure(self: *ExistenceDegree, material_pressure: F) void {
-        if (material_pressure <= 0) return;
-        const drain = coappropriation.SourceBackflow.HOST_DRAIN_MAX * math_util.clamp(material_pressure, 0, 1);
-        self.v.material = math_util.clamp(self.v.material - drain, 0, 1);
+        const p = math_util.clamp(material_pressure, 0, 1);
+        const target = 1.0 - p;
+        const diff = target - self.v.material;
+        const sb = coappropriation.SourceBackflow;
+        const drift = if (diff > 0)
+            @min(diff, sb.HOST_RECOVER_MAX)
+        else
+            @max(diff, -sb.HOST_DRAIN_MAX);
+        if (drift == 0) return;
+        self.v.material = math_util.clamp(self.v.material + drift, 0, 1);
         self.weights.adapt(self.v);
     }
 
@@ -608,6 +621,32 @@ pub const ExistenceDegree = struct {
         if (drift == 0) return;
         self.v.representation = math_util.clamp(self.v.representation + drift, 0, 1);
         self.weights.adapt(self.v);
+    }
+
+    /// 记录当前三源水位 (cycle 末调用)
+    pub fn recordMrn(self: *ExistenceDegree) void {
+        self.mrn_history[self.mrn_history_idx] = .{ self.v.material, self.v.representation, self.v.nature };
+        self.mrn_history_idx = (self.mrn_history_idx + 1) % 64;
+        if (self.mrn_history_count < 64) self.mrn_history_count += 1;
+    }
+
+    /// 最近 n 条 [M,R,N] 追加为 JSON 数组 [[m,r,n],...] (时间升序), 供 provenance sparkline
+    pub fn appendMrnSamplesJson(self: *const ExistenceDegree, alloc: Allocator, body: *std.ArrayList(u8), n: usize) !void {
+        const cnt = @min(n, self.mrn_history_count);
+        if (cnt == 0) {
+            try body.appendSlice(alloc, "[]");
+            return;
+        }
+        try body.append(alloc, '[');
+        // 时间升序输出最近 cnt 条: 起点为回绕安全的 (idx − cnt)
+        const idx0 = (self.mrn_history_idx + 64 - cnt) % 64;
+        var k: usize = 0;
+        while (k < cnt) : (k += 1) {
+            const idx = (idx0 + k) % 64;
+            const s = self.mrn_history[idx];
+            try body.print(alloc, "[{d:.3},{d:.3},{d:.3}]{s}", .{ s[0], s[1], s[2], if (k + 1 < cnt) "," else "" });
+        }
+        try body.append(alloc, ']');
     }
 
     /// 当前失衡损失 = AM − M_p (三源不合恰的存在度代价), 供触发器/provenance。
@@ -1072,14 +1111,19 @@ test "SourceBackflow: applyDim 本源即短板 ⇒ 溢出均分" {
     try std.testing.expectApproxEqAbs(@as(F, 0.715), d.v.nature, 1e-6);
 }
 
-test "SourceBackflow: 宿主压力有界回流 M, 健康时零抽降" {
+test "SourceBackflow: 宿主基底双向牵引 M (磨损全速 / 康复半速)" {
     var d: ExistenceDegree = .{ .v = .{ .material = 0.5, .representation = 0.5, .nature = 0.5 } };
-    d.applyHostPressure(0.0);
-    try std.testing.expectEqual(@as(F, 0.5), d.v.material);
-    d.applyHostPressure(1.0);
-    try std.testing.expectApproxEqAbs(@as(F, 0.48), d.v.material, 1e-6); // HOST_DRAIN_MAX=0.02
+    d.applyHostPressure(0.0); // 宿主完全健康 ⇒ M 向 1 回升, 单次 +HOST_RECOVER_MAX
+    try std.testing.expectApproxEqAbs(@as(F, 0.51), d.v.material, 1e-6);
+    d.applyHostPressure(1.0); // 宿主满压 ⇒ M 向 0 抽降, 单次 -HOST_DRAIN_MAX
+    try std.testing.expectApproxEqAbs(@as(F, 0.49), d.v.material, 1e-6);
     d.applyHostPressure(5.0); // 越界输入按 1.0 截断
-    try std.testing.expectApproxEqAbs(@as(F, 0.46), d.v.material, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(F, 0.47), d.v.material, 1e-6);
+    // 收敛: 反复满压 ⇒ M → 0; 反复健康 ⇒ M → 1 (慢速)
+    for (0..200) |_| d.applyHostPressure(1.0);
+    try std.testing.expect(d.v.material < 0.01);
+    for (0..400) |_| d.applyHostPressure(0.0);
+    try std.testing.expect(d.v.material > 0.99);
 }
 
 test "SourceBackflow: 意义承认回流 N (中性线 + 验证信念)" {
@@ -1551,4 +1595,38 @@ test "WorldModel: error_history 容量 128, 老数据被淘汰" {
     // 容量应被 cap 在 128
     try std.testing.expect(wm.error_history.items.len <= 128);
     try std.testing.expect(wm.learn_steps == 500);
+}
+
+test "SourceBackflow: MRN 轨迹环形缓冲 + samples JSON 时间升序" {
+    const alloc = std.testing.allocator;
+    var d: ExistenceDegree = .{};
+    // 空 ⇒ []
+    {
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(alloc);
+        try d.appendMrnSamplesJson(alloc, &body, 16);
+        try std.testing.expectEqualStrings("[]", body.items);
+    }
+    // 记 3 条递增水位
+    for (0..3) |i| {
+        d.v = .{ .material = @as(F, @floatFromInt(i)) / 10.0, .representation = 0.5, .nature = 0.5 };
+        d.recordMrn();
+    }
+    {
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(alloc);
+        try d.appendMrnSamplesJson(alloc, &body, 2); // 只要最近 2 条
+        // 最近两条: [0.100,...],[0.200,...] — 时间升序 (旧→新)
+        try std.testing.expect(std.mem.indexOf(u8, body.items, "[0.100,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body.items, "[0.200,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body.items, "[0.000,") == null);
+        try std.testing.expect(body.items[0] == '[' and body.items[body.items.len - 1] == ']');
+    }
+    // 环绕: 记满 64+ 条不越界
+    for (0..70) |_| d.recordMrn();
+    try std.testing.expect(d.mrn_history_count == 64);
+    var body2: std.ArrayList(u8) = .empty;
+    defer body2.deinit(alloc);
+    try d.appendMrnSamplesJson(alloc, &body2, 16);
+    try std.testing.expect(body2.items.len > 2);
 }

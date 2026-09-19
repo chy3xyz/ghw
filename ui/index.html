@@ -137,16 +137,9 @@
               @click="doAwaken()"
               x-text="awakenBusy ? '觉醒中…' : '确认觉醒'"></button>
     </div>
-    <!-- P1: state 双写冲突警告 -->
+    <!-- P1: state 双写冲突警告 (x-html 通道: 深链 x-show 效果不重算, 见 AGENTS.md) -->
     <div class="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3"
-         x-show="state?.provenance?.state_contract?.save_blocked">
-      <div class="text-sm font-semibold text-rose-200">state 保存已暂停</div>
-      <div class="text-xs text-ghw-dim mt-1">
-        磁盘 state 由 <span class="font-mono text-rose-300" x-text="state?.provenance?.state_contract?.writer ?? '?'"></span>
-        写入 (epoch=<span class="font-mono" x-text="state?.provenance?.state_contract?.epoch ?? 0"></span>)。
-        请勿与 daemon 共用同一 state 文件同时写入；请只保留一个 writer 或分开路径。
-      </div>
-    </div>
+         x-html="saveBlockedHtml"></div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
 
       <!-- E 详情卡 -->
@@ -462,11 +455,7 @@
           <div class="text-xs text-ghw-dim">投递任务</div>
           <div class="text-xs text-ghw-dim mt-2 font-mono">chat: <code>@task 描述</code> 强制入队</div>
           <div class="text-xs text-ghw-dim mt-1">或关键词: 帮我 / 任务 / 麻烦…</div>
-          <div x-show="state?.provenance?.rule_propose" class="text-xs text-ghw-dim mt-2 font-mono">
-            规则提议: <span x-text="state?.provenance?.rule_propose?.enabled ? 'on' : 'off'"></span>
-            · total=<span x-text="state?.provenance?.rule_propose?.total ?? 0"></span>
-            · rules=<span x-text="state?.provenance?.rule_propose?.adopted_rules ?? 0"></span>
-          </div>
+          <div class="text-xs text-ghw-dim mt-2 font-mono" x-text="ruleProposeLine"></div>
         </div>
       </div>
       <div x-show="(state?.provenance?.human_symbiosis?.peers || []).length">
@@ -517,6 +506,20 @@
             预测误差记象 (R)
           </div>
         </div>
+      </div>
+      <!-- 最近 16 cycle 三源轨迹: 每组三根细柱 (物=amber 象=sky 性=violet) -->
+      <div x-show="(state?.provenance?.survival?.existence?.samples || []).length" class="mt-4">
+        <div class="text-xs text-ghw-dim uppercase tracking-wider mb-2">三源轨迹 (最近 16 cycle)</div>
+        <div class="flex items-end gap-1 h-12">
+          <template x-for="(s, i) in (state?.provenance?.survival?.existence?.samples || [])" :key="i">
+            <div class="flex-1 flex items-end gap-px h-full" :title="`M${s[0].toFixed(2)} R${s[1].toFixed(2)} N${s[2].toFixed(2)}`">
+              <div class="flex-1 bg-amber-500/60 rounded-t min-h-[2px]" :style="`height: ${(s[0]*100).toFixed(0)}%`"></div>
+              <div class="flex-1 bg-sky-500/60 rounded-t min-h-[2px]" :style="`height: ${(s[1]*100).toFixed(0)}%`"></div>
+              <div class="flex-1 bg-violet-500/60 rounded-t min-h-[2px]" :style="`height: ${(s[2]*100).toFixed(0)}%`"></div>
+            </div>
+          </template>
+        </div>
+        <div class="text-[9px] text-ghw-dim mt-1 font-mono">物(amber) · 象(sky) · 性(violet) — 旧 → 新</div>
       </div>
     </div>
 
@@ -1751,13 +1754,7 @@
       <div class="px-5 py-3 border-b border-slate-800">
         <h2 class="text-sm font-semibold text-ghw-dim uppercase tracking-wider">与 GHW 对话</h2>
         <p class="text-xs text-ghw-dim mt-1">每条消息会触发 1 个 cycle, GHW 用自己的 E 状态回应</p>
-        <div x-show="state?.provenance?.chat" class="text-xs text-ghw-dim mt-2 font-mono flex flex-wrap gap-x-3 gap-y-1">
-          <span>最近回复 memory=<span :class="state?.provenance?.chat?.last_memory_injected ? 'text-emerald-300' : 'text-ghw-dim'"
-                x-text="state?.provenance?.chat?.last_memory_injected ? 'on' : 'off'"></span></span>
-          <span>往事=<span x-text="state?.provenance?.chat?.episode_count ?? 0"></span></span>
-          <span>信念=<span x-text="state?.provenance?.chat?.belief_count ?? 0"></span></span>
-          <span>累计 memory 回复=<span x-text="state?.provenance?.chat?.replies_with_memory ?? 0"></span></span>
-        </div>
+        <div class="text-xs text-ghw-dim mt-2 font-mono" x-text="chatInfoLine"></div>
       </div>
 
       <!-- 消息列表 (HTMX-loaded + 每 1.2s poll, 异步 chat worker 写完 GHW reply 后下次 poll 出现) -->

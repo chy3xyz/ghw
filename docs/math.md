@@ -120,9 +120,14 @@ M 只是内部记账, R 与符号系统实际规模脱钩, N 几乎只是任务�
 
 | 源 | 存在论 | 供源 (有界回流) | 常量 |
 |----|--------|----------------|------|
-| M 物 | 物质基底 (宿主机) | 宿主压力 `applyHostPressure` (disk/mem/load/battery → 抽降); 任务代谢 | `HOST_DRAIN_MAX=0.02/次` |
+| M 物 | 物质基底 (宿主机) | 宿主基底**双向牵引** `applyHostPressure` (target=1−pressure; 磨损全速抽降, 康复半速回升 — 修物→宿主压力降→物回升, 求存环闭合); 任务代谢 | `HOST_DRAIN_MAX=0.02/次`, `HOST_RECOVER_MAX=0.01/次` |
 | R 象 | 符号思想 | 存量牵引 `applyRepresentationStock` (episodes + 2·beliefs + 3·rules + world_fetch → 1−e^(−s/K) 饱和水位, 双向漂移); 预测误差记为 R 的损耗 | `DRIFT_MAX=0.02/次`, `K=120` |
 | N 性 | 赋义之能 | 意义承认 `applyNatureRecognition` (value_score 高于中性线 0.30 按比例; 每条已验证 [survive:*] 信念固定增益) | `RECOGNITION_MAX=0.012/次` |
+
+**调用节奏**: 「单次有界」必须配低频 — 全部回流遵守 `BACKFLOW_INTERVAL_TICKS=32`
+(ui_server/daemon 以 tick 节流; 否则每-cycle 调用会在几分钟内打穿 M / 通胀 N)。
+`survival_feedback` 改进→N 为事件驱动, 不受此节流。M/R/N 另有 64 点轨迹环
+(`mrn_history`, 语义同 `kpi_history`), 供 provenance sparkline 与回放, 不进 E。
 
 ### 6.1 加性项 vs 三源内部的判据
 

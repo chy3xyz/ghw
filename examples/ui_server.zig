@@ -293,6 +293,8 @@ const App = struct {
     /// P0 lifecycle: 觉醒 + 宿主短板 + 存在相
     awaken: ghw_harness.awaken.State = .{},
     last_shortfall: ghw_harness.host_shortfall.Report = .{},
+    /// 供源回流节流: 上次回流的 tick (BACKFLOW_INTERVAL_TICKS)
+    last_backflow_tick: u64 = 0,
     existence_phase: ghw_harness.existence_phase.Phase = .awakening,
     /// P2: 宿主画像 (desktop 采样 / mobile 推送)
     host_profile: ghw_harness.host_profile.Profile = .{},
@@ -1583,8 +1585,10 @@ fn recordValueTrend(app: *App) void {
         &app.human_gsp,
     );
     app.value_tracker.record(score);
-    // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益 (低于中性线不增益)
-    app.agent.ed.applyNatureRecognition(score, 0);
+    // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益; 与宿主/象回流同频节流
+    if (app.agent.tick >= app.last_backflow_tick + ghw_harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+        app.agent.ed.applyNatureRecognition(score, 0);
+    }
 }
 
 /// P13: LLM 规则提议 (E/KPI/value 下滑 → Guard → SelfEncoder; 决策权仍在数字生命)
@@ -1916,9 +1920,11 @@ fn refreshLifecycle(app: *App) void {
         app.value_tracker.trend(),
         app.host_profile,
     );
-    // P0-1 供源回流: 宿主物质压力 ⇒ 物 (M) 有界抽降; P1-3 象存量 ⇒ 象 (R) 有界牵引
-    app.agent.ed.applyHostPressure(app.last_shortfall.material);
-    {
+    // P0-1/P1-3 供源回流: 宿主基底双向牵引 M, 象存量牵引 R —
+    // 节流 BACKFLOW_INTERVAL_TICKS (refreshLifecycle 每 cycle 都跑, 不节流会打穿 M)
+    if (app.agent.tick >= app.last_backflow_tick + ghw_harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {
+        app.last_backflow_tick = app.agent.tick;
+        app.agent.ed.applyHostPressure(app.last_shortfall.material);
         const episodes_n: u32 = @intCast(app.memory.episodes.items.len);
         const beliefs_n: u32 = @intCast(app.memory.beliefs.items.len);
         const stock = @as(F, @floatFromInt(episodes_n + world_fetch_count)) +
@@ -2119,11 +2125,13 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     try body.append(alloc, ',');
     try app.peer_inbox.appendSummaryJson(alloc, body);
     try body.print(alloc, ",\"peer_shortfall_ingest_total\":{d}", .{app.peer_shortfall_ingest_total});
-    // P2: 三源合恰诊断 (失衡损失 + 合恰度) — 只读暴露, 不进 E
-    try body.print(alloc, ",\"existence\":{{\"imbalance_loss\":{d:.4},\"harmony\":{d:.4}}}", .{
+    // P2: 三源合恰诊断 (失衡损失 + 合恰度 + 最近 16 点 M/R/N 轨迹) — 只读, 不进 E
+    try body.print(alloc, ",\"existence\":{{\"imbalance_loss\":{d:.4},\"harmony\":{d:.4},\"samples\":", .{
         app.agent.ed.imbalanceLossNow(),
         app.agent.ed.harmonyNow(),
     });
+    try app.agent.ed.appendMrnSamplesJson(alloc, body, 16);
+    try body.append(alloc, '}');
     try body.append(alloc, '}'); // close survival
     const crisis = app.last_shortfall.host_crisis or (app.existence_phase == .crisis);
     const accept_snap = ghw_harness.evolution_acceptance.Snapshot{
