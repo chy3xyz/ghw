@@ -80,6 +80,8 @@ const Config = struct {
     llm_model: []const u8 = "claude-sonnet-4-5",
     /// env var name with API key
     llm_api_key_env: []const u8 = "ANTHROPIC_API_KEY",
+    /// System-0 (zjev-serve) 决策核端点; 空 = 禁用
+    zjev_endpoint: []const u8 = "",
     /// base url (deepseek / 智谱 / 自定义端点)
     llm_base_url: []const u8 = "https://api.anthropic.com",
     /// 当 E < 此值时触发 RuleProposer
@@ -200,6 +202,9 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArg;
             cfg.llm_model = args[i];
+        } else if (std.mem.eql(u8, a, "--zjev-endpoint")) {
+            i += 1;
+            if (i < args.len) cfg.zjev_endpoint = args[i];
         } else if (std.mem.eql(u8, a, "--llm-key-env")) {
             i += 1;
             if (i >= args.len) return error.MissingArg;
@@ -550,6 +555,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var last_world_sensor_tick: u64 = 0;
     var last_backflow_tick: u64 = 0;
     var last_value_backflow_tick: u64 = 0;
+    var last_decision0: harness.decision_bridge.Decision0 = .{};
+    var decision0_consults: u32 = 0;
+    var decision0_gate_skips: u32 = 0;
+    var last_decision0_tick: u64 = 0;
+    if (cfg.zjev_endpoint.len > 0) std.debug.print("[daemon] System-0 (zjev) 决策核启用: {s}\n", .{cfg.zjev_endpoint});
     var survival_feedback: harness.survival_feedback.Tracker = .{};
     var survival_feedback_evals: u32 = 0;
     var survival_feedback_improved: u32 = 0;
@@ -899,12 +909,37 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         });
                     }
                 } else |_| {}
-                const wr = harness.world_sensor.maybeSubmitFromSnapshot(&task_queue, s, alloc) catch null;
-                if (wr) |r| {
-                    if (r.submitted > 0) {
-                        std.debug.print("[daemon] world_sensor 入队 {d} 个生存任务 pending={d}\n", .{
-                            r.submitted, task_queue.pending_count,
-                        });
+                // System-0 (P0): 危机动作先过决策核; abstain ⇒ 等下一采样; 失败直通
+                var gate0: harness.decision_bridge.GateAction = .above;
+                if (cfg.zjev_endpoint.len > 0 and agent.tick >= last_decision0_tick + harness.decision_bridge.CONSULT_INTERVAL_TICKS) {
+                    last_decision0_tick = agent.tick;
+                    if (harness.decision_bridge.buildCrisisRequest(alloc, agent.ed.v.material, agent.ed.v.representation, agent.ed.v.nature, s.disk_used_pct, s.mem_pct, s.load_1m, s.n_cpus, agent.ed.e())) |req| {
+                        defer alloc.free(req);
+                        var d0: harness.decision_bridge.Decision0 = .{};
+                        if (harness.decision_bridge.consult(alloc, io, cfg.zjev_endpoint, req, harness.decision_bridge.DEFAULT_THRESHOLD, &d0)) |_| {
+                            last_decision0 = d0;
+                            decision0_consults += 1;
+                            gate0 = d0.gate;
+                            std.debug.print("[decision0] action={s} conf={d:.3} abstain={d:.3} gate={s} ({d}us)\n", .{ d0.action(), d0.confidence, d0.abstention, d0.gate.label(), d0.latency_us });
+                        } else |err| {
+                            std.debug.print("[decision0] 咨询失败, 直通: {t}\n", .{err});
+                        }
+                    } else |_| {}
+                }
+                if (gate0 == .abstain) {
+                    decision0_gate_skips += 1;
+                    std.debug.print("[decision0] gate=abstain, 跳过本轮生存任务入队 (skips={d})\n", .{decision0_gate_skips});
+                } else {
+                    const wr = harness.world_sensor.maybeSubmitFromSnapshot(&task_queue, s, alloc) catch null;
+                    if (wr) |r| {
+                        if (r.submitted > 0) {
+                            std.debug.print("[daemon] world_sensor 入队 {d} 个生存任务 pending={d}\n", .{
+                                r.submitted, task_queue.pending_count,
+                            });
+                        }
+                    }
+                    if (gate0 == .below) {
+                        _ = task_queue.submitWithSource("[act] human: decision0 handoff", "System-0 置信不足, 请人工接管宿主危机", "human", 9, .material, 3, .human) catch {};
                     }
                 }
             }

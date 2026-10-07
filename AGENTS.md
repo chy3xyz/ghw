@@ -478,7 +478,8 @@ P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探�
 
 ## Learned Workspace Facts
 
-- 本地 Zig 工具链: 当前 `~/.local/bin/zig` 指向 `zigup` 的 `0.17.0-dev.2151+2ec5523d5`（旧记录 1422 已过时）；工程已在该版本通过 `zig build` / `zig build test` / 三个验收脚本
+- 本地 Zig 工具链（**2026-10 漂移警示**）：`~/.local/bin/zig` 已被切到 **0.17.0 正式版**（zigup 无版本目录），但本工程仍按 **`0.17.0-dev.2151+2ec5523d5`** 开发（语法/`std.Io` API 有差异，如 `Stream.read` 返回 ReadResult、数组 `**` 空格规则）。显式用 `ZIG=~/.local/share/zigup/0.17.0-dev.2151+2ec5523d5/files/zig`；验收脚本已内置该默认。迁移 0.17.0 正式版是独立适配轮
+- **System-0 决策核 (zjev, 2026-10 P0)**：`harness/decision_bridge.zig` 把危机状态（M/R/N/E + 宿主传感）发给 [zjev-serve](https://github.com/chy3xyz/zjev)（同工具链 Zig sidecar，`../zjev`），取回温度校准的 choice + confidence/abstention。Gate 三义：`.above` 直通 / `.below` 追加人类移交任务 / `.abstain` 本轮跳过生存任务入队。红线：只偏置不夺权、E/Guard 无写路径、sidecar 失败必直通（绝不阻塞求存）、未启用零行为变化。`--zjev-endpoint URL`（ui/daemon 同名）启用；provenance `survival.decision0`（未启用无此块）；节流 `CONSULT_INTERVAL_TICKS=8`。验收 `scripts/decision0_acceptance.sh`（自动跳过无 zjev 环境）。**时序陷阱**：refreshLifecycle 里咨询点在 assessWithProfile **之前**（用上一轮 shortfall），危机注入后需再推一个 tick；无 LLM 部署推 tick 用 `POST /api/tick`（chat 仅在有 LLM 时走 cycle worker）。P1 计划：sqlite 任务史导出 jsonl → zjev-fit 温度标定 → traj 校准进进化验收面板
 - **测试接线约定**: Zig 0.17 只收集**被分析文件**的 test 块——新增 harness 模块必须同时 (a) `src/harness/mod.zig` 导出 (b) `src/ghw.zig` comptime 引用块 `_ = harness.xxx;`，否则其测试**静默不运行**、且 `zig build` 产物可能编译失败；曾因此积压 57 个暗测试（2026-09 已清零，382/382 可达）。回归防护：`bash scripts/check_dark_tests.sh`（独立 cache 全量普查，任一声明 test 未运行即非零退出），新增模块后建议跑一次
 - 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
 - UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN

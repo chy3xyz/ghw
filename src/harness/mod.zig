@@ -71,6 +71,7 @@ pub const llm_driver = @import("llm_driver.zig");
 pub const mock_provider = @import("mock_provider.zig");
 pub const evolution_rationale = @import("evolution_rationale.zig");
 pub const user_channel = @import("user_channel.zig");
+pub const decision_bridge = @import("decision_bridge.zig");
 
 pub const BoundaryGuardian = core.BoundaryGuardian;
 pub const BoundaryLayer = core.BoundaryLayer;

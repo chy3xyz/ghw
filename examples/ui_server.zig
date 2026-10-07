@@ -298,6 +298,13 @@ const App = struct {
     /// 先刷新 last_backflow_tick, recordValueTrend 的守卫永假)。
     last_backflow_tick: u64 = 0,
     last_value_backflow_tick: u64 = 0,
+    /// System-0 (zjev) 决策核: 端点缓冲 + 最近一次咨询快照 + 节流
+    zjev_endpoint_buf: [128]u8 = std.mem.zeroes([128]u8),
+    zjev_endpoint_len: usize = 0,
+    last_decision0: ghw_harness.decision_bridge.Decision0 = .{},
+    decision0_consults: u32 = 0,
+    decision0_gate_skips: u32 = 0,
+    last_decision0_tick: u64 = 0,
     existence_phase: ghw_harness.existence_phase.Phase = .awakening,
     /// P2: 宿主画像 (desktop 采样 / mobile 推送)
     host_profile: ghw_harness.host_profile.Profile = .{},
@@ -1246,6 +1253,8 @@ const Args = struct {
     product_config_path: []const u8 = "",
     /// Env var containing admin token for mutating APIs. Empty disables auth.
     admin_token_env: []const u8 = "GHW_ADMIN_TOKEN",
+    /// System-0 (zjev-serve) 决策核端点; 空 = 禁用 (零行为变化)
+    zjev_endpoint: []const u8 = "",
     /// P26: 显式 GHW 实例 ID (默认 {product_id}@{node_id})
     ghw_instance_id: []const u8 = "",
     /// P26: GHW 节点 ID (默认 --agent-id)
@@ -1312,6 +1321,9 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--admin-token-env")) {
             i += 1;
             if (i < raw.len) a.admin_token_env = raw[i];
+        } else if (std.mem.eql(u8, arg, "--zjev-endpoint")) {
+            i += 1;
+            if (i < raw.len) a.zjev_endpoint = raw[i];
         } else if (std.mem.eql(u8, arg, "--ghw-instance-id")) {
             i += 1;
             if (i < raw.len) a.ghw_instance_id = raw[i];
@@ -1840,6 +1852,13 @@ fn maybeWorldSensorTasks(app: *App) void {
     } else |err| {
         std.debug.print("[ui] survival_feedback 失败: {t}\n", .{err});
     }
+    // System-0 (P0): 危机动作先过决策核; abstain ⇒ 本轮等待下一采样
+    const gate0 = maybeConsultDecision0(app, snap);
+    if (gate0 == .abstain) {
+        app.decision0_gate_skips += 1;
+        std.debug.print("[decision0] gate=abstain, 本轮跳过生存任务入队 (skips={d})\n", .{app.decision0_gate_skips});
+        return;
+    }
     const r = ghw_harness.world_sensor.maybeSubmitFromSnapshot(&app.task_queue, snap, app.alloc) catch |err| {
         std.debug.print("[ui] world_sensor 失败: {t}\n", .{err});
         return;
@@ -1849,6 +1868,45 @@ fn maybeWorldSensorTasks(app: *App) void {
             app.agent.tick, r.submitted, app.task_queue.pending_count,
         });
     }
+    // System-0 置信不足 ⇒ 追加人类移交 (纪律「破坏性动作人类移交」的类型化通道)
+    if (gate0 == .below) {
+        _ = app.task_queue.submitWithSource("[act] human: decision0 handoff", "System-0 置信不足, 请人工接管宿主危机", "human", 9, .material, 3, .human) catch {};
+    }
+}
+
+/// System-0 (zjev) 咨询: 仅危机时 + 节流; 未启用/失败 ⇒ .above 直通
+/// (sidecar 不可用绝不阻塞求生)。返回 gate 决定本轮生存任务是否入队。
+fn maybeConsultDecision0(app: *App, snap: ghw_harness.system_collector.SystemSnapshot) ghw_harness.decision_bridge.GateAction {
+    const db = ghw_harness.decision_bridge;
+    if (app.zjev_endpoint_len == 0) return .above;
+    if (!app.last_shortfall.host_crisis) return .above;
+    if (app.agent.tick < app.last_decision0_tick + db.CONSULT_INTERVAL_TICKS) return .above;
+    app.last_decision0_tick = app.agent.tick;
+
+    const req = db.buildCrisisRequest(
+        app.alloc,
+        app.agent.ed.v.material,
+        app.agent.ed.v.representation,
+        app.agent.ed.v.nature,
+        snap.disk_used_pct,
+        snap.mem_pct,
+        snap.load_1m,
+        snap.n_cpus,
+        app.agent.ed.e(),
+    ) catch return .above;
+    defer app.alloc.free(req);
+
+    var d0: db.Decision0 = .{};
+    db.consult(app.alloc, app.io, app.zjev_endpoint_buf[0..app.zjev_endpoint_len], req, db.DEFAULT_THRESHOLD, &d0) catch |err| {
+        std.debug.print("[decision0] 咨询失败, 直通: {t}\n", .{err});
+        return .above;
+    };
+    app.last_decision0 = d0;
+    app.decision0_consults += 1;
+    std.debug.print("[decision0] action={s} conf={d:.3} abstain={d:.3} gate={s} ({d}us)\n", .{
+        d0.action(), d0.confidence, d0.abstention, d0.gate.label(), d0.latency_us,
+    });
+    return d0.gate;
 }
 
 /// P8a: 生存类 pending/in_progress 时 ActionRunner 让路给 TaskExecutor
@@ -2167,6 +2225,21 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     });
     try app.agent.ed.appendMrnSamplesJson(alloc, body, 16);
     try body.append(alloc, '}');
+    // System-0 (zjev): 最近一次咨询快照 — 只读暴露; 未启用无此块
+    if (app.zjev_endpoint_len > 0) {
+        const d0 = &app.last_decision0;
+        try body.print(alloc, ",\"decision0\":{{\"enabled\":true,\"action\":\"{s}\",\"confidence\":{d:.4},\"abstention\":{d:.4},\"entropy\":{d:.4},\"gate\":\"{s}\",\"calibration\":\"{s}\",\"latency_us\":{d},\"consults\":{d},\"gate_skips\":{d}}}", .{
+            if (d0.ok) d0.action() else "—",
+            d0.confidence,
+            d0.abstention,
+            d0.entropy,
+            d0.gate.label(),
+            if (d0.ok) d0.calibration() else "—",
+            d0.latency_us,
+            app.decision0_consults,
+            app.decision0_gate_skips,
+        });
+    }
     try body.append(alloc, '}'); // close survival
     const crisis = app.last_shortfall.host_crisis or (app.existence_phase == .crisis);
     const accept_snap = ghw_harness.evolution_acceptance.Snapshot{
@@ -6618,6 +6691,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         } else |err| {
             std.debug.print("[ui] Auto-tick 启动失败: {t}\n", .{err});
         }
+    }
+
+    // System-0: zjev 端点拷入定长缓冲
+    {
+        const n = @min(app.zjev_endpoint_buf.len, args.zjev_endpoint.len);
+        @memcpy(app.zjev_endpoint_buf[0..n], args.zjev_endpoint[0..n]);
+        app.zjev_endpoint_len = n;
+        if (n > 0) std.debug.print("[ui] System-0 (zjev) 决策核启用: {s}\n", .{app.zjev_endpoint_buf[0..n]});
     }
 
     try runServer(alloc, io, &app, args.host, args.port);

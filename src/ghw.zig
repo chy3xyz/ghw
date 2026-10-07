@@ -183,6 +183,7 @@ comptime {
     _ = harness.user_channel;
     _ = harness.wechat.bot;
     _ = harness.human_symbiosis.chat_reply;
+    _ = harness.decision_bridge;
 }
 
 // 注意: test {} 块在每个子模块自身内部,这样可以保持测试代码本地化
