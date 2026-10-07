@@ -180,8 +180,20 @@ pub const SqliteDb = struct {
             \\  duration_ms INTEGER,
             \\  ts INTEGER NOT NULL
             \\);
+            \\CREATE TABLE IF NOT EXISTS decision0_log (
+            \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\  tick INTEGER NOT NULL,
+            \\  request_text TEXT NOT NULL,
+            \\  action TEXT NOT NULL,
+            \\  confidence REAL NOT NULL,
+            \\  abstention REAL NOT NULL,
+            \\  gate TEXT NOT NULL,
+            \\  outcome TEXT,
+            \\  ts INTEGER NOT NULL DEFAULT 0
+            \\);
         );
         try self.exec("CREATE INDEX IF NOT EXISTS idx_actions_tick ON actions(tick DESC);");
+        try self.exec("CREATE INDEX IF NOT EXISTS idx_decision0_pending ON decision0_log(id) WHERE outcome IS NULL;");
 
         // === evolved_adopted 表: 跟踪 L3/L4/L5 落盘文件是否已 adopt 进 ghw 源码 (按 hash 去重) ===
         try self.exec(
@@ -648,6 +660,57 @@ pub const SqliteDb = struct {
         _ = sqlite3_bind_text(stmt, 2, hash_str.ptr, @intCast(hash_str.len), null);
         const rc = sqlite3_step(stmt);
         return rc == 100; // SQLITE_ROW
+    }
+
+    /// System-0 (zjev) 咨询日志: 每次咨询落一行, outcome 延迟回填
+    /// (consult 后 16 tick 危机翻转 ⇒ resolved/persisted)
+    pub fn recordDecision0(
+        self: *const SqliteDb,
+        io: std.Io,
+        tick: i64,
+        request_text: []const u8,
+        action: []const u8,
+        confidence: f64,
+        abstention: f64,
+        gate: []const u8,
+    ) void {
+        const stmt = self.prepare(
+            \\INSERT INTO decision0_log (tick, request_text, action, confidence, abstention, gate, ts)
+            \\VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) catch return;
+        defer _ = sqlite3_finalize(stmt);
+        _ = sqlite3_bind_int64(stmt, 1, tick);
+        _ = sqlite3_bind_text(stmt, 2, request_text.ptr, @intCast(request_text.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_text(stmt, 3, action.ptr, @intCast(action.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_double(stmt, 4, confidence);
+        _ = sqlite3_bind_double(stmt, 5, abstention);
+        _ = sqlite3_bind_text(stmt, 6, gate.ptr, @intCast(gate.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_int64(stmt, 7, std.Io.Clock.real.now(io).toSeconds());
+        _ = sqlite3_step(stmt);
+    }
+
+    pub const Decision0Row = struct {
+        id: i64,
+        tick: i64,
+        outcome_buf: [16]u8 = std.mem.zeroes([16]u8),
+        outcome_len: usize = 0,
+        backfilled: bool = false,
+
+        fn outcomeSlice(self: *const Decision0Row) []const u8 {
+            return self.outcome_buf[0..self.outcome_len];
+        }
+    };
+
+    /// 回填 outcome: 最早的未回填且 tick <= max_tick 的记录 (每轮最多一条)
+    pub fn backfillDecision0(self: *const SqliteDb, outcome: []const u8, max_tick: i64) void {
+        const stmt = self.prepare(
+            \\UPDATE decision0_log SET outcome = ?
+            \\WHERE id = (SELECT id FROM decision0_log WHERE outcome IS NULL AND tick <= ? ORDER BY id LIMIT 1)
+        ) catch return;
+        defer _ = sqlite3_finalize(stmt);
+        _ = sqlite3_bind_text(stmt, 1, outcome.ptr, @intCast(outcome.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_int64(stmt, 2, max_tick);
+        _ = sqlite3_step(stmt);
     }
 
     /// 记录 adopt (idempotent via UNIQUE constraint)

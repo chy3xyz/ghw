@@ -305,6 +305,7 @@ const App = struct {
     decision0_consults: u32 = 0,
     decision0_gate_skips: u32 = 0,
     last_decision0_tick: u64 = 0,
+    last_decision0_handoff_tick: u64 = 0,
     existence_phase: ghw_harness.existence_phase.Phase = .awakening,
     /// P2: 宿主画像 (desktop 采样 / mobile 推送)
     host_profile: ghw_harness.host_profile.Profile = .{},
@@ -1852,8 +1853,8 @@ fn maybeWorldSensorTasks(app: *App) void {
     } else |err| {
         std.debug.print("[ui] survival_feedback 失败: {t}\n", .{err});
     }
-    // System-0 (P0): 危机动作先过决策核; abstain ⇒ 本轮等待下一采样
-    const gate0 = maybeConsultDecision0(app, snap);
+    // System-0: 消费最近一次咨询的 gate (咨询在 refreshLifecycle, 随每 cycle)
+    const gate0: ghw_harness.decision_bridge.GateAction = if (app.last_decision0.ok) app.last_decision0.gate else .above;
     if (gate0 == .abstain) {
         app.decision0_gate_skips += 1;
         std.debug.print("[decision0] gate=abstain, 本轮跳过生存任务入队 (skips={d})\n", .{app.decision0_gate_skips});
@@ -1868,20 +1869,22 @@ fn maybeWorldSensorTasks(app: *App) void {
             app.agent.tick, r.submitted, app.task_queue.pending_count,
         });
     }
-    // System-0 置信不足 ⇒ 追加人类移交 (纪律「破坏性动作人类移交」的类型化通道)
-    if (gate0 == .below) {
+    // System-0 置信不足 ⇒ 追加人类移交 (同一咨询周期至多一次)
+    if (gate0 == .below and app.agent.tick >= app.last_decision0_handoff_tick + ghw_harness.decision_bridge.CONSULT_INTERVAL_TICKS) {
+        app.last_decision0_handoff_tick = app.agent.tick;
         _ = app.task_queue.submitWithSource("[act] human: decision0 handoff", "System-0 置信不足, 请人工接管宿主危机", "human", 9, .material, 3, .human) catch {};
     }
 }
 
 /// System-0 (zjev) 咨询: 仅危机时 + 节流; 未启用/失败 ⇒ .above 直通
 /// (sidecar 不可用绝不阻塞求生)。返回 gate 决定本轮生存任务是否入队。
-fn maybeConsultDecision0(app: *App, snap: ghw_harness.system_collector.SystemSnapshot) ghw_harness.decision_bridge.GateAction {
+fn maybeConsultDecision0(app: *App) void {
     const db = ghw_harness.decision_bridge;
-    if (app.zjev_endpoint_len == 0) return .above;
-    if (!app.last_shortfall.host_crisis) return .above;
-    if (app.agent.tick < app.last_decision0_tick + db.CONSULT_INTERVAL_TICKS) return .above;
+    if (app.zjev_endpoint_len == 0) return;
+    if (!app.last_shortfall.host_crisis) return;
+    if (app.agent.tick < app.last_decision0_tick + db.CONSULT_INTERVAL_TICKS) return;
     app.last_decision0_tick = app.agent.tick;
+    const snap = app.sys_collector.last orelse return;
 
     const req = db.buildCrisisRequest(
         app.alloc,
@@ -1893,20 +1896,23 @@ fn maybeConsultDecision0(app: *App, snap: ghw_harness.system_collector.SystemSna
         snap.load_1m,
         snap.n_cpus,
         app.agent.ed.e(),
-    ) catch return .above;
+    ) catch return;
     defer app.alloc.free(req);
 
     var d0: db.Decision0 = .{};
     db.consult(app.alloc, app.io, app.zjev_endpoint_buf[0..app.zjev_endpoint_len], req, db.DEFAULT_THRESHOLD, &d0) catch |err| {
         std.debug.print("[decision0] 咨询失败, 直通: {t}\n", .{err});
-        return .above;
+        return;
     };
     app.last_decision0 = d0;
     app.decision0_consults += 1;
     std.debug.print("[decision0] action={s} conf={d:.3} abstain={d:.3} gate={s} ({d}us)\n", .{
         d0.action(), d0.confidence, d0.abstention, d0.gate.label(), d0.latency_us,
     });
-    return d0.gate;
+    // P1 校准资产: 咨询落库 (outcome 由 16 tick 后的 host-check 回填)
+    if (app.sqlite) |*sdb| {
+        sdb.recordDecision0(app.io, @intCast(app.agent.tick), req, d0.action(), d0.confidence, d0.abstention, d0.gate.label());
+    }
 }
 
 /// P8a: 生存类 pending/in_progress 时 ActionRunner 让路给 TaskExecutor
@@ -2013,6 +2019,16 @@ fn refreshLifecycle(app: *App) void {
         app.value_tracker.trend(),
         app.host_profile,
     );
+    // P1 System-0 校准回填: 咨询后 ≥16 tick 的记录按危机翻转定标签
+    if (app.sqlite) |*sdb| {
+        if (app.agent.tick >= 16) {
+            const outcome: []const u8 = if (app.last_shortfall.host_crisis) "persisted" else "resolved";
+            sdb.backfillDecision0(outcome, @as(i64, @intCast(app.agent.tick)) - 16);
+        }
+    }
+    // System-0 (P0/P1): 危机时咨询决策核 (此处 shortfall 是本轮新鲜值; 每 cycle
+    // 检查, 节流在 CONSULT_INTERVAL_TICKS)。gate 的行为应用在 maybeWorldSensorTasks。
+    maybeConsultDecision0(app);
     // P0-1/P1-3 供源回流: 宿主基底双向牵引 M, 象存量牵引 R —
     // 节流 BACKFLOW_INTERVAL_TICKS (refreshLifecycle 每 cycle 都跑, 不节流会打穿 M)
     if (app.agent.tick >= app.last_backflow_tick + ghw_harness.primordial_laws.SourceBackflow.BACKFLOW_INTERVAL_TICKS) {

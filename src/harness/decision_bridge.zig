@@ -135,6 +135,8 @@ pub fn parseDecision0(body: []const u8, threshold: F, out: *Decision0) !void {
         if (c == .string) out.calibration_len = copyBounded(&out.calibration_buf, c.string);
     }
 
+    // 模型显式弃权 (argmax 落在 __abstain__) ⇒ gate 直接 abstain
+    if (std.mem.eql(u8, out.action(), "__abstain__")) out.abstention = 1.0;
     out.gate = mapGate(out.confidence, out.abstention, threshold);
     out.ok = true;
 }
@@ -299,4 +301,14 @@ test "decision_bridge: consult 本地 mock server HTTP 往返" {
     try testing.expectEqual(@as(F, 0.9), d0.confidence);
     try testing.expectEqual(GateAction.above, d0.gate);
     try testing.expectEqual(@as(u64, 500), d0.latency_us);
+}
+
+test "decision_bridge: 显式 __abstain__ 归一为 abstain gate" {
+    const canned =
+        \\{"results":[{"id":"crisis_action","type":"choice","value":"__abstain__","probabilities":{},"uncertainty":{"confidence":0.30,"abstention":0.28}}],"calibration":"default"}
+    ;
+    var d0: Decision0 = .{};
+    try parseDecision0(canned, DEFAULT_THRESHOLD, &d0);
+    try testing.expectEqual(GateAction.abstain, d0.gate);
+    try testing.expectEqual(@as(F, 1.0), d0.abstention);
 }
