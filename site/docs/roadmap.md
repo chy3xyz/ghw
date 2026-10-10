@@ -1,24 +1,24 @@
-# 路线图
+# Roadmap
 
-这份路线图按“产品可用级”排序，而不是按研究趣味排序。
+This roadmap is ordered by production-grade readiness, not by research appeal.
 
-## 已完成
+## Completed
 
-- L1-L5 自演化链。
-- SelfEvolutionGuard / SelfEncoder / CompileVerifier。
-- 记忆、反思、目标提议、规则提议。
-- TaskQueue、人类反馈、HumanGSP、ValueTrendTracker。
-- ui_server provenance。
-- ProductEvolutionRuntime。
-- `ghw_product_*` C SDK。
-- `ui_server --product-intent` 产品运行时持久化与 HTTP API。
-- P19-P25 产品可用级主干：ProductAdapter、写接口鉴权、audit hash chain、ProductIntent manifest hash、审批台数据面、KPI HTTP feed、验收脚本。
+- L1-L5 self-evolution chain.
+- SelfEvolutionGuard / SelfEncoder / CompileVerifier.
+- Memory, reflection, goal proposal, rule proposal.
+- TaskQueue, human feedback, HumanGSP, ValueTrendTracker.
+- ui_server provenance.
+- ProductEvolutionRuntime.
+- `ghw_product_*` C SDK.
+- `ui_server --product-intent` product runtime persistence and HTTP API.
+- P19-P25 production-grade backbone: ProductAdapter, write-endpoint auth, audit hash chain, ProductIntent manifest hash, approval-desk data surface, KPI HTTP feed, acceptance script.
 
-## P19：ProductAdapter
+## P19: ProductAdapter
 
-状态：已完成最小执行面。
+Status: minimal execution surface completed.
 
-`ProductRuntime` 支持可选 adapter vtable：
+`ProductRuntime` supports an optional adapter vtable:
 
 ```text
 validate(change)
@@ -27,88 +27,88 @@ verify(change)
 rollback(change)
 ```
 
-当前内置 `FileConfigAdapter`：`--product-config PATH` 启用后，`applyApproved` 会写入宿主产品可读取/监听的 JSON 配置文件，`verify` 会读回 change id，`rollback` 会写回 `rolled_back` 状态。
+The built-in `FileConfigAdapter` today: once enabled via `--product-config PATH`, `applyApproved` writes a JSON config file that the host product can read or watch, `verify` reads back the change id, and `rollback` writes back a `rolled_back` state.
 
-后续可以继续扩展 feature flag adapter、workflow rule adapter、实验平台 adapter。
+Next, feature-flag adapters, workflow-rule adapters, and experiment-platform adapters can be added.
 
-## P20：HTTP 鉴权与权限
+## P20: HTTP Auth and Permissions
 
-状态：已完成 token 鉴权主干。
+Status: token-auth backbone completed.
 
-设置 `GHW_ADMIN_TOKEN` 后，产品写接口必须传 `X-GHW-Admin-Token`。未设置 token 时保持本地开发兼容。
+Once `GHW_ADMIN_TOKEN` is set, product write endpoints must pass `X-GHW-Admin-Token`. When the token is not set, local development compatibility is preserved.
 
-## P21：安全审计加强
+## P21: Security Audit Hardening
 
-状态：已完成 audit hash chain 主干。
+Status: audit hash-chain backbone completed.
 
-每条 `AuditEntry` 包含 `previous_hash` / `current_hash`，覆盖 id、时间、事件类型、change id、tenant、detail。apply/rollback adapter 失败也会进入 audit。
+Every `AuditEntry` includes `previous_hash` / `current_hash`, covering id, timestamp, event type, change id, tenant, and detail. Adapter apply/rollback failures also enter the audit.
 
-## P22：ProductIntent 治理
+## P22: ProductIntent Governance
 
-状态：已完成基础治理。
+Status: basic governance completed.
 
-`ProductIntent` 加载时验证 product_id/version/approved_by 非空、`update_epoch > 0`；`GET /api/product/intent` 返回 product_id、version、update_epoch、approved_by、manifest_hash、adapter 状态和最近 KPI feed 时间。
+`ProductIntent` validates product_id/version/approved_by non-empty and `update_epoch > 0` on load; `GET /api/product/intent` returns product_id, version, update_epoch, approved_by, manifest_hash, adapter status, and the most recent KPI feed time.
 
-## P23：产品审批台数据面
+## P23: Product Approval-Desk Data Surface
 
-状态：已完成轻量数据面。
+Status: lightweight data surface completed.
 
-`GET /api/product/approvals` 返回 pending/approved 变更，包含 tier、target、summary、expected_delta_k、affected_users、required_approvers。前端可以直接基于此接口做审批台。
+`GET /api/product/approvals` returns pending/approved changes with tier, target, summary, expected_delta_k, affected_users, and required_approvers. The frontend can build an approval desk directly on this endpoint.
 
-## P24：真实 KPI 数据入口
+## P24: Real KPI Data Ingest
 
-状态：已完成 HTTP feed 入口。
+Status: HTTP feed entry completed.
 
-`POST /api/product/kpi` 接收 CRM KPI 表单字段，写入 `ProductRuntime.feedKpi`，并返回是否刷新进 E。支持 `csat` / `incident_rate` 可选真实来源。
+`POST /api/product/kpi` accepts CRM KPI form fields, writes them via `ProductRuntime.feedKpi`, and returns whether they were refreshed into E. Optional real sources for `csat` / `incident_rate` are supported.
 
-## P25：长期可用性验证
+## P25: Long-Term Usability Verification
 
-状态：已完成可重复验收脚本。
+Status: repeatable acceptance script completed.
 
-`scripts/product_runtime_acceptance.sh` 会运行构建测试、启动 `ui_server --product-intent --product-config`，并走 propose → approve → apply → rollback，验证文件 adapter 与 audit hash 字段。
+`scripts/product_runtime_acceptance.sh` runs the build and tests, starts `ui_server --product-intent --product-config`, and walks propose → approve → apply → rollback, verifying the file adapter and audit hash fields.
 
-## P26：一产品一 GHW
+## P26: One Product, One GHW
 
-状态：已完成实例绑定契约。
+Status: instance-binding contract completed.
 
-- `ProductInstanceIdentity`：`product_id` + `instance_id` + `node_id` + `binding_mode=one_product_one_ghw`
-- `ProductRuntime` 持久化块嵌入 identity 字段；加载时校验 `product_id` 与当前 ProductIntent 一致
-- CLI：`--ghw-instance-id`（默认 `{product_id}@{node_id}`）、`--ghw-node-id`（默认 `--agent-id`）
-- API：`GET /api/product/identity`
+- `ProductInstanceIdentity`: `product_id` + `instance_id` + `node_id` + `binding_mode=one_product_one_ghw`
+- The `ProductRuntime` persistence block embeds the identity fields; on load, `product_id` is validated against the current ProductIntent.
+- CLI: `--ghw-instance-id` (default `{product_id}@{node_id}`), `--ghw-node-id` (default `--agent-id`)
+- API: `GET /api/product/identity`
 
-## P27：分布式 CrossLink
+## P27: Distributed CrossLink
 
-状态：已完成 ui_server 接线。
+Status: ui_server wiring completed.
 
-- `--cross-link-port` / `--cross-link-secret` / `--cross-link-peers` 启用 TCP+HMAC 跨主机 Link
-- GHW Link 扩展：`query_product_identity`、`query_product_evolution`、`share_evolution_insight`
+- `--cross-link-port` / `--cross-link-secret` / `--cross-link-peers` enable the TCP+HMAC cross-host Link
+- GHW Link extensions: `query_product_identity`, `query_product_evolution`, `share_evolution_insight`
 
-## P28：GHW 共同进化
+## P28: GHW Co-Evolution
 
-状态：已完成最小洞察交换闭环。
+Status: minimal insight-exchange loop completed.
 
-- `CoEvolutionRegistry`：接收/缓存 peer 的产品变更洞察（同 product_id 信任 1.0，同 product_type 0.55）
-- peer health 周期同步 `query_product_evolution`
-- API：`GET /api/product/co-evolution`；state.json `"co_evolution"` 块持久化
+- `CoEvolutionRegistry`: receives/caches peer product-change insights (trust 1.0 for the same product_id, 0.55 for the same product_type)
+- Periodic peer-health sync of `query_product_evolution`
+- API: `GET /api/product/co-evolution`; the state.json `"co_evolution"` block is persisted
 
-## 非目标
+## Non-Goals
 
-短期不做：
+Not in the short term:
 
-- 让 LLM 直接修改 ProductIntent。
-- 跳过 Consent 的自动产品改动。
-- 把产品运行时绑定到单一 SaaS。
-- 在主 Zig 工程中引入 Node/VitePress 依赖。
+- Letting the LLM modify ProductIntent directly.
+- Automated product changes that skip Consent.
+- Binding the product runtime to a single SaaS.
+- Introducing Node/VitePress dependencies into the main Zig project.
 
-## 觉醒 / 求存生命周期（并行轨）
+## Awakening / Survival Lifecycle (Parallel Track)
 
-产品 runtime 之外，机器宿主上的「安装 → 觉醒 → 求存 → 外界 → 社会 → 目标 → 进化 → 稳态」见仓库根目录：
+Beyond the product runtime, the machine-host lifecycle "install → awaken → survive → outside world → society → goals → evolution → steady state" lives at the repo root:
 
 `docs/AWAKENING_LIFECYCLE.md`
 
-状态：P0–P2c 已全部落地（Awaken 状态机、daemon 对齐 AutoCLI/world_bridge、HostShortfall 显式映射层、危机锁与 L1–L5 调度融合、手机 HostProfile、同伴 shortfall inbox 与 Link 交换、双写契约与验收面板）。验收：`scripts/awakening_lifecycle_acceptance.sh` 与 `scripts/peer_shortfall_link_acceptance.sh`。
+Status: P0–P2c all landed (Awaken state machine, daemon-aligned AutoCLI/world_bridge, HostShortfall explicit mapping layer, crisis lock fused with L1-L5 scheduling, mobile HostProfile, peer shortfall inbox and Link exchange, dual-write contract and acceptance panel). Acceptance: `scripts/awakening_lifecycle_acceptance.sh` and `scripts/peer_shortfall_link_acceptance.sh`.
 
-## 工程质量防线
+## Engineering Quality Guardrails
 
-- `scripts/check_dark_tests.sh`：普查全部声明的 test 块是否真的在运行（防 Zig 0.17 惰性测试发现导致新模块测试静默丢失），任一未运行即失败。
-- `scripts/product_runtime_acceptance.sh`：产品轨 propose → approve → apply → rollback + audit hash 链验收。
+- `scripts/check_dark_tests.sh`: audits whether all declared test blocks actually run (guards against Zig 0.17 lazy test discovery silently dropping new-module tests); any test not running fails the check.
+- `scripts/product_runtime_acceptance.sh`: product-track propose → approve → apply → rollback + audit hash-chain acceptance.

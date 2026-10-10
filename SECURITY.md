@@ -71,7 +71,8 @@ GHW is **not** designed for:
 
 **Do NOT file a public GitHub issue for security issues.**
 
-Email **security@ghw.knot3.dev** (placeholder) with:
+Use [GitHub private vulnerability reporting](https://github.com/chy3xyz/ghw/security/advisories/new)
+(Security → Report a vulnerability) with:
 
 - Description of the issue
 - Reproduction steps (or a PoC)

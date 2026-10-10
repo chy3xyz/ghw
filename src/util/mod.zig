@@ -1,6 +1,7 @@
 //! 工具模块聚合
 
 pub const math = @import("math.zig");
+pub const net_read = @import("net_read.zig");
 pub const F = math.F;
 pub const LCG = math.LCG;
 pub const idx2 = math.idx2;

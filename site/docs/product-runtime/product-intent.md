@@ -1,17 +1,17 @@
 # ProductIntent
 
-`ProductIntent` 是宿主产品交给 GHW 的“产品宪法”。它告诉数字生命：
+`ProductIntent` is the "product constitution" that the host product hands to GHW. It tells the digital life:
 
-- 它活在哪个产品里。
-- 产品为什么存在。
-- 哪些 KPI 最重要。
-- 哪些事情绝对不能做。
-- 变更需要什么审批。
-- 运行节奏和审计策略是什么。
+- Which product it lives in.
+- Why the product exists.
+- Which KPIs matter most.
+- Which things must never be done.
+- What approval a change requires.
+- What the operating cadence and audit policy are.
 
-## 最小示例
+## Minimal example
 
-完整示例见仓库根目录的 `product_intent.example.crm.json`。
+For a complete example, see `product_intent.example.crm.json` in the repository root.
 
 ```json
 {
@@ -34,28 +34,28 @@
 }
 ```
 
-## 谁能修改
+## Who can modify it
 
-GHW 不能直接修改 ProductIntent。它可以：
+GHW cannot modify ProductIntent directly. It can:
 
-- 发现 ProductIntent 与现实不匹配。
-- 提议一个变更。
-- 写入 audit。
-- 等待人类审批。
+- Discover that ProductIntent no longer matches reality.
+- Propose a change.
+- Write to the audit log.
+- Wait for human approval.
 
-真正写入 `product_intent.json` 的应该是 ops、产品负责人或部署流水线。
+What actually writes `product_intent.json` should be ops, the product owner, or the deployment pipeline.
 
-## 与 E 的关系
+## Relationship to E
 
-ProductIntent 不直接存进 `ExistenceDegree`，而是影响三条链路：
+ProductIntent is not stored directly in `ExistenceDegree`; instead it influences three pathways:
 
-- KPI 权重：决定 `K` 如何聚合。
-- Consent 策略：决定变更的审批门槛。
-- LLM 上下文：让目标/规则提议知道产品使命和红线。
+- KPI weights: determine how `K` is aggregated.
+- Consent policy: determines the approval threshold for changes.
+- LLM context: lets goal/rule proposals know the product mission and red lines.
 
-## 生产建议
+## Production recommendations
 
-- 把 ProductIntent 放在受控配置目录。
-- 用签名提交或配置中心版本号绑定 `update_epoch`。
-- 将每次变更写入审计系统。
-- 不要把 API key、客户数据样例、个人身份信息放进 ProductIntent。
+- Keep ProductIntent in a controlled configuration directory.
+- Bind `update_epoch` to signed commits or a config-center version number.
+- Write every change to the audit system.
+- Do not put API keys, customer data samples, or personally identifiable information into ProductIntent.

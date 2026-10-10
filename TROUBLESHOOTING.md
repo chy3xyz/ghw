@@ -103,11 +103,12 @@ If the binary is missing, re-run `./install.sh`.
 ### "Killed: 9" or "Segmentation fault" on startup
 
 The binary was compiled with a different Zig version than the one in
-your PATH. The codebase requires **Zig 0.17 dev** (≥ `0.17.0-dev.704`).
+your PATH. The codebase requires **Zig 0.17.0** release (or a 0.17 dev build
+≥ `0.17.0-dev.704`, e.g. `0.17.0-dev.2151`).
 
 ```bash
 zig version
-# Should be 0.17.0-dev.704 or later
+# Should be 0.17.0, or 0.17.0-dev.704 or later
 
 # If wrong version:
 # macOS (Homebrew)
@@ -511,7 +512,7 @@ These are **known issues** that we're tracking but haven't fixed yet:
 | No Docker image | Medium | Build from source |
 | LLM calls have no automatic backoff / retry | Low | Restart daemon if you hit a rate limit |
 | `bindText` is a stub (use `bindTextAlloc` instead) | Low | Don't extend SqliteDb without checking which one is the real one |
-| The 1 failing test (`harness.self_encoder.test.SelfEncoder: 提取代码引用`) is unrelated to recent work | Low | Ignored |
+| ~~The 1 failing test~~ (fixed — `zig build test` is now 396/396 green) | — | — |
 | L1–L5 can't be cleanly disabled | Low | Comment out the cycle-N triggers in `examples/ui_server.zig` |
 | No automatic state.json backup | Low | Add `cron` daily backup |
 

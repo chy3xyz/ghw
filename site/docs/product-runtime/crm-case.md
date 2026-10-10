@@ -1,27 +1,27 @@
-# CRM 场景
+# CRM Case
 
-CRM 是 GHW 获取产品存在度的第一个完整场景。它证明 GHW 可以把产品 KPI、变更提案、审批和审计接入同一条生命循环。
+CRM is GHW's first complete scenario for acquiring product existence degree (E). It proves that GHW can wire product KPIs, change proposals, approval, and audit into the same life cycle.
 
-## 场景目标
+## Scenario Goals
 
-让 CRM 产品中的数字生命关注：
+Let the digital life inside the CRM product focus on:
 
-- 客户留存是否变好。
-- 销售跟进是否更及时。
-- 成交率是否提升。
-- 事故率和客户满意度是否可接受。
+- Whether customer retention is improving.
+- Whether sales follow-up is more timely.
+- Whether the win rate is improving.
+- Whether the incident rate and customer satisfaction are acceptable.
 
-## 样板变更
+## Canonical Change
 
-当前内置 canonical proposal：
+The canonical proposal currently built in:
 
 ```text
 Tighten follow-up cadence from 7d to 5d
 ```
 
-对应目标是缩短销售跟进间隔，预期提升 win rate 和 NRR。
+The corresponding goal is to shorten the sales follow-up interval, with the expectation of improving win rate and NRR.
 
-## 运行方式
+## How to Run
 
 ```bash
 ./zig-out/bin/ui_server \
@@ -31,38 +31,38 @@ Tighten follow-up cadence from 7d to 5d
   --product-intent product_intent.example.crm.json
 ```
 
-提交提案：
+Submit a proposal:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/product/propose-crm-followup \
   -d 'tenant_id=acme&affected_users=30&expected_delta_k=0.04'
 ```
 
-查询完整状态：
+Query the full state:
 
 ```bash
 curl http://127.0.0.1:8765/api/product/runtime
 ```
 
-## 当前实现和旧 demo 的关系
+## Relationship Between the Current Implementation and the Old Demo
 
-早期 `docs/CASE_CRM.md` 描述的是 Python demo orchestrator。现在主线已经把核心产品 runtime 迁回 Zig：
+The earlier `docs/CASE_CRM.md` described a Python demo orchestrator. The mainline has now moved the core product runtime back to Zig:
 
 - `src/harness/product_runtime.zig`
 - `src/harness/crm_kpi.zig`
 - `src/harness/kpi_bridge.zig`
 - `src/harness/consent.zig`
-- `examples/ui_server.zig` 的 `/api/product/*`
-- `ghw.h` 的 `ghw_product_*` SDK
+- The `/api/product/*` routes in `examples/ui_server.zig`
+- The `ghw_product_*` SDK in `ghw.h`
 
-Python demo 可以继续作为解释性材料，但 Zig 模块是生产语义来源。
+The Python demo can continue to serve as explanatory material, but the Zig modules are the source of production semantics.
 
-## 下一步
+## Next Steps
 
-CRM 场景要达到真实产品可用，还需要接入：
+For the CRM scenario to reach real product readiness, it still needs to integrate:
 
-- 真实 CRM 数据源。
-- 真实 ProductAdapter。
-- 多租户权限和审批身份。
-- 指标异常告警。
-- 应用后验证，比如跟踪 7/14/30 天 KPI 是否改善。
+- Real CRM data sources.
+- A real ProductAdapter.
+- Multi-tenant permissions and approval identities.
+- Metric anomaly alerts.
+- Post-apply verification, e.g. tracking whether KPIs improve over 7/14/30 days.

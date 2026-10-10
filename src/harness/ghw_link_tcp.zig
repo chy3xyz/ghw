@@ -32,6 +32,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+const net_read = @import("../util/net_read.zig");
 
 /// 协议版本 (跟 GhwLink 区分, 走 cross-host)
 pub const PROTOCOL_VERSION = "ghw-link/0.2";
@@ -235,7 +236,7 @@ pub const CrossLink = struct {
         var buf: [65536]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = stream.read(self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
+            const n = net_read.readChunk(stream, self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
@@ -323,7 +324,7 @@ pub const CrossLink = struct {
         var buf: [65536]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = stream.read(self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
+            const n = net_read.readChunk(&stream, self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
@@ -353,7 +354,7 @@ pub const CrossLink = struct {
         var buf: [65536]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = stream.read(self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
+            const n = net_read.readChunk(stream, self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };

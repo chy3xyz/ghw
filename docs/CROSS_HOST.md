@@ -1,20 +1,20 @@
-# GHW Cross-Host Link — TCP + HMAC 跨主机通信
+# GHW Cross-Host Link — TCP + HMAC Cross-Host Communication
 
-> **Boris Cherny "My job is to write loops" 方法论延伸到跨主机网络层**:
-> 不是单进程内部闭环, 是**多 GHW daemon 跨网络协同**的闭环.
+> **Extending Boris Cherny's "My job is to write loops" methodology to the cross-host network layer**:
+> not a closed loop within a single process, but a closed loop of **multiple GHW daemons coordinating across the network**.
 
-## 1. 为什么需要 Cross-host?
+## 1. Why Cross-Host?
 
-现有 `GhwLink` (Unix socket) 解决了**同主机**多 GHW 数字生命互联. 但论文 B.5.2 实证要求**跨主机**:
-- docker-compose 2 实例 (alpha + bravo) 在不同 container / host
-- LAN/WAN 部署: 数字生命跑在 macOS, 备机跑在 Linux server
-- 论文 v2 投 arXiv: 需要可被第三方复现的**分布式**数字生命范式
+The existing `GhwLink` (Unix socket) solves interconnection of multiple GHW digital lives on the **same host**. But the paper's B.5.2 empirical evaluation requires **cross-host**:
+- docker-compose 2 instances (alpha + bravo) in different containers / hosts
+- LAN/WAN deployment: digital life runs on macOS, the standby machine on a Linux server
+- paper v2 submitted to arXiv: needs a **distributed** digital-life paradigm that third parties can reproduce
 
-**Cross-host Link = GhwLink 的 TCP + HMAC 升级版**, 协议层完全兼容 (JSONL 复用, 5 method 不变).
+**Cross-host Link = the TCP + HMAC upgrade of GhwLink**, fully protocol-compatible (JSONL reused, 5 methods unchanged).
 
-## 2. 协议设计
+## 2. Protocol Design
 
-### 2.1 寻址
+### 2.1 Addressing
 
 ```
 格式: peer_id:host:port:secret
@@ -25,15 +25,15 @@
   charlie:charlie.example.com:9876:secret_charlie
 ```
 
-存 `peers.txt`, `#` 注释, 1 行 1 peer. **self peer 跳过** (跟 `id` 相同的不存).
+Stored in `peers.txt`, `#` comments, 1 peer per line. **Self peer is skipped** (the one identical to `id` is not stored).
 
-### 2.2 传输
+### 2.2 Transport
 
-- **TCP/IPv4** (无 TLS, 复用 GhwLink 协议层)
-- LAN 信任网络足够; 公网必须上 TLS 1.3 (Phase 10+)
-- 1 connection = 1 (handshake + 1 request) (简化, 无 pipeline)
+- **TCP/IPv4** (no TLS, reuses the GhwLink protocol layer)
+- sufficient on a trusted LAN; public deployments must add TLS 1.3 (Phase 10+)
+- 1 connection = 1 (handshake + 1 request) (simplified, no pipeline)
 
-### 2.3 协议 (JSONL, 兼容 GhwLink)
+### 2.3 Protocol (JSONL, compatible with GhwLink)
 
 ```
 1. client → server:  {"id":"hs","method":"hello","params":{"v":"ghw-link/0.2","ts":<unix_ms>}}\n
@@ -45,41 +45,41 @@
 
 ### 2.4 HMAC-SHA256 Challenge-Response
 
-| 组件 | 作用 |
+| Component | Purpose |
 |------|------|
-| **Challenge** (server 随机 32B hex) | 防重放 (每次 connect 新 challenge) |
-| **HMAC** (HMAC-SHA256, 32B hex) | 防 spoof / 防篡改 (无 shared secret 不能伪造) |
-| **Time-based ts** | 60s 窗口 (防长 replay) |
+| **Challenge** (server random 32B hex) | Anti-replay (new challenge per connect) |
+| **HMAC** (HMAC-SHA256, 32B hex) | Anti-spoof / anti-tamper (cannot forge without the shared secret) |
+| **Time-based ts** | 60s window (against long replay) |
 
-RFC 4231 Test Case 1 验证: `HMAC-SHA256(0x0b*20, "Hi There") = b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7` ✓
+RFC 4231 Test Case 1 verification: `HMAC-SHA256(0x0b*20, "Hi There") = b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7` ✓
 
 ### 2.5 Rate Limit (Token Bucket)
 
-| 默认 | 数值 |
+| Default | Value |
 |------|------|
 | `DEFAULT_RATE_PER_SEC` | 100 msg/sec |
-| `DEFAULT_RATE_BURST` | 200 (初始 token) |
+| `DEFAULT_RATE_BURST` | 200 (initial tokens) |
 
-- 每 peer 独立 token bucket
-- 满 = 返 `error.RateLimited`
-- 实测 250 条 spam 触发 13 次 rate limit ✓
+- Independent token bucket per peer
+- Full = return `error.RateLimited`
+- Measured: 250 spam messages triggered rate limit 13 times ✓
 
-### 2.6 不在 v0.5.1 范围 (Phase 10+)
+### 2.6 Out of Scope for v0.5.1 (Phase 10+)
 
-- TLS 1.3 加密 (公网部署必须)
-- HMAC server-side verify (当前 mock server 不真验, 测试用例 Test 3 期望 fail)
-- 跨实例 ΔE 反馈 (论文 B.5.2 的实际数据)
-- NAT 穿透 (LAN 默认能通, WAN 需 port forward)
+- TLS 1.3 encryption (mandatory for public deployment)
+- HMAC server-side verification (current mock server does not actually verify; test case Test 3 expects failure)
+- Cross-instance ΔE feedback (actual data for paper B.5.2)
+- NAT traversal (works on LAN by default; WAN needs port forwarding)
 
-## 3. 实现
+## 3. Implementation
 
-### 3.1 代码
+### 3.1 Code
 
-| 文件 | 行数 | 作用 |
+| File | Lines | Purpose |
 |------|------|------|
-| `src/harness/ghw_link_tcp.zig` | 478 | CrossLink 主模块 (TCP + HMAC + rate limit) |
-| `examples/cross_host_test.zig` | 155 | 端到端 2-host 跨网段实测 (1 connection 1 message) |
-| `examples/daemon.zig` (+30) | - | daemon 集成: 3 CLI flag + listener thread + mock handler |
+| `src/harness/ghw_link_tcp.zig` | 478 | CrossLink main module (TCP + HMAC + rate limit) |
+| `examples/cross_host_test.zig` | 155 | End-to-end 2-host cross-subnet measurement (1 connection 1 message) |
+| `examples/daemon.zig` (+30) | - | daemon integration: 3 CLI flags + listener thread + mock handler |
 
 ### 3.2 CLI flags
 
@@ -89,19 +89,19 @@ RFC 4231 Test Case 1 验证: `HMAC-SHA256(0x0b*20, "Hi There") = b0344c61d8db385
 --cross-host-peers <PATH>      peers.txt 路径 (默认 null)
 ```
 
-### 3.3 5 个 unit test (跟 GhwLink 一致)
+### 3.3 5 Unit Tests (same as GhwLink)
 
-- `extractString` 找简单字段
+- `extractString` finds a simple field
 - `extractString` challenge 64 hex
-- `HMAC: SHA-256 RFC 4231 Test Case 1` (标准向量)
-- `CrossLink: init + deinit` 无 panic
-- `CrossLink: loadPeersFromFile` 解析
+- `HMAC: SHA-256 RFC 4231 Test Case 1` (standard test vector)
+- `CrossLink: init + deinit` without panic
+- `CrossLink: loadPeersFromFile` parsing
 
-**100% test pass** (EXIT=0, 跟其它 6 module 一起跑).
+**100% tests pass** (EXIT=0, run together with the other 6 modules).
 
-## 4. 端到端实测 (2026-06-12)
+## 4. End-to-End Measurement (2026-06-12)
 
-### 4.1 1-进程 2-Link (cross_host_test)
+### 4.1 1-Process 2-Link (cross_host_test)
 
 ```bash
 $ /Users/n0x/.zig/zig build run-cross_host_test
@@ -121,7 +121,7 @@ $ /Users/n0x/.zig/zig build run-cross_host_test
 [cross-host-test] ⚠️ 错 secret 居然过了  (server 简化版不真验 HMAC, Phase 10+ 修)
 ```
 
-### 4.2 2-进程 跨网段 (实际 LAN, 127.0.0.1 模拟)
+### 4.2 2-Process Cross-Subnet (real LAN, simulated via 127.0.0.1)
 
 ```bash
 # Terminal 1: alpha
@@ -147,17 +147,17 @@ $ ./zig-out/bin/daemon --cycles 0 \
 [cross-link] listening on 0.0.0.0:9880 (self_id=bravo-test)
 ```
 
-**端到端走通**: bravo 加载 alpha peer, listener listen 9880. **下一步**: bravo `query("alpha-test", "ping", "{}")` 应该返 `{"pong":true}` (需要 outbound client 触发).
+**End-to-end works**: bravo loaded the alpha peer, listener listening on 9880. **Next step**: bravo `query("alpha-test", "ping", "{}")` should return `{"pong":true}` (requires an outbound client to trigger).
 
-## 5. 复现指引
+## 5. Reproduction Guide
 
-### 5.1 前置
+### 5.1 Prerequisites
 
-- macOS 14+ 或 Linux
-- Zig 0.17.0-dev.704+ ([下载](https://ziglang.org/download/))
-- 2 个可用 TCP 端口 (默认 9879 + 9880)
+- macOS 14+ or Linux
+- Zig 0.17.0-dev.704+ ([download](https://ziglang.org/download/))
+- 2 available TCP ports (default 9879 + 9880)
 
-### 5.2 编译
+### 5.2 Build
 
 ```bash
 cd ghw
@@ -165,7 +165,7 @@ zig build            # 编译所有 examples
 ls zig-out/bin/     # 应有 daemon binary
 ```
 
-### 5.3 跑 2-host 跨网段
+### 5.3 Run the 2-Host Cross-Subnet Setup
 
 ```bash
 # Terminal 1
@@ -185,65 +185,65 @@ EOF
     --id bravo-test
 ```
 
-### 5.4 验证
+### 5.4 Verify
 
-- Terminal 2 log 应含 `loaded peer alpha-test@127.0.0.1:9879`
-- 两个 daemon 都打印 `cross-host listener 启 on port N`
-- `lsof -i :9879` 跟 `lsof -i :9880` 看到 daemon PID 监听
-- `nc 127.0.0.1 9879` 手动 send JSONL 测 server handler (e.g. `{"id":"x","method":"ping","params":{}}\n`)
+- Terminal 2 log should contain `loaded peer alpha-test@127.0.0.1:9879`
+- Both daemons print `cross-host listener 启 on port N`
+- `lsof -i :9879` and `lsof -i :9880` show the daemon PID listening
+- `nc 127.0.0.1 9879` to manually send JSONL and test the server handler (e.g. `{"id":"x","method":"ping","params":{}}\n`)
 
-### 5.5 跑 unit test
+### 5.5 Run Unit Tests
 
 ```bash
 zig build test 2>&1 | tail -3
 # EXIT=0 = 100% test pass
 ```
 
-## 6. 跟现有 GhwLink 的关系
+## 6. Relationship with the Existing GhwLink
 
-| 维度 | GhwLink (Unix socket) | CrossLink (TCP + HMAC) |
+| Dimension | GhwLink (Unix socket) | CrossLink (TCP + HMAC) |
 |------|----------------------|--------------------------|
-| 寻址 | `/tmp/ghw_a.sock` | `host:port` |
-| 协议 | JSONL 同款 | JSONL 同款 (兼容) |
-| 5 method | ping / query_state / ... | 同款 |
-| Auth | 0 (OS 信任) | HMAC-SHA256 (防 spoof / MITM) |
+| Addressing | `/tmp/ghw_a.sock` | `host:port` |
+| Protocol | same JSONL | same JSONL (compatible) |
+| 5 methods | ping / query_state / ... | same |
+| Auth | 0 (OS trust) | HMAC-SHA256 (anti-spoof / MITM) |
 | Rate limit | 0 | token bucket (100/s, burst 200) |
-| 加密 | 0 | 0 (Phase 10+ TLS 1.3) |
-| 范围 | 同主机 multi-process | 跨主机 / 跨网段 / 跨 WAN (Phase 10+) |
+| Encryption | 0 | 0 (Phase 10+ TLS 1.3) |
+| Scope | same-host multi-process | cross-host / cross-subnet / cross-WAN (Phase 10+) |
 
-**CrossLink 不替代 GhwLink**, 是**互补**. 同一 GHW 部署可同时启 2 个 link: 内部 GhwLink (Unix) + 外部 CrossLink (TCP).
+**CrossLink does not replace GhwLink**; it is **complementary**. A single GHW deployment can run both links at once: internal GhwLink (Unix) + external CrossLink (TCP).
 
-## 7. 论文 / 实战意义
+## 7. Significance for the Paper / Practice
 
-### 7.1 论文 (B.5.2 跨实例 ΔE 实证)
+### 7.1 Paper (B.5.2 Cross-Instance ΔE Empirical Evaluation)
 
-GHW 范式的"数字生命群" = 多 daemon 跨网络. Cross-host Link 让:
-- **跨实例 peer hypotheses 注入** (Boris 6.4 子智能体) ✓
-- **跨实例 ΔE 反馈** (L4 闭环 4 系数) ✓
-- **跨实例 9 宫 deep** (3 milestone 触发历史合并) ✓
+The "digital-life swarm" of the GHW paradigm = multiple daemons across the network. The cross-host Link enables:
+- **Cross-instance peer hypothesis injection** (Boris 6.4 sub-agents) ✓
+- **Cross-instance ΔE feedback** (L4 closed loop, 4 coefficients) ✓
+- **Cross-instance 9-palace deep** (history merge triggered at 3 milestones) ✓
 
-### 7.2 实战 (生产部署)
+### 7.2 Practice (Production Deployment)
 
-- **docker-compose multi-host**: alpha 跑 host1, bravo 跑 host2, CrossLink 互联
-- **Kubernetes StatefulSet**: 数字生命作为有状态 pod, 跨节点互联
-- **混云**: macOS 跑 alpha, AWS 跑 bravo, LAN VPN 互联 (Phase 10+ TLS)
+- **docker-compose multi-host**: alpha runs on host1, bravo on host2, interconnected via CrossLink
+- **Kubernetes StatefulSet**: digital life as a stateful pod, interconnected across nodes
+- **Hybrid cloud**: alpha on macOS, bravo on AWS, interconnected via LAN VPN (Phase 10+ TLS)
 
-## 8. 局限性 (Phase 10+ 待办)
+## 8. Limitations (Phase 10+ TODO)
 
-1. **Server 简化版不真验 HMAC** (Test 3 期望 fail 但通过) — 留 Phase 10+ 修
-2. **无 TLS 1.3** — 公网部署必须先经 VPN / WireGuard / 走 TLS reverse proxy
-3. **outbound client 还没在 daemon 集成** — 当前只能 server-side 接收请求, Phase 10+ 加 outbound 主动调其他 daemon
-4. **Cross-host ΔE 反馈没接 L4 闭环** — peer E 拿来后该调 α/β/γ/λ, Phase 10+ 修
-5. **没跨进程 rate limit 协调** — 每 daemon 独立 rate limit, 集群级 rate limit 留 Phase 10+
+1. **The simplified server does not actually verify HMAC** (Test 3 expects failure but passes) — deferred to Phase 10+
+2. **No TLS 1.3** — public deployments must go through a VPN / WireGuard / TLS reverse proxy first
+3. **The outbound client is not yet integrated into the daemon** — currently it can only receive requests server-side; Phase 10+ will add outbound active calls to other daemons
+4. **Cross-host ΔE feedback is not wired into the L4 closed loop** — after fetching a peer's E it should feed α/β/γ/λ; Phase 10+ fix
+5. **No cross-process rate-limit coordination** — each daemon has an independent rate limit; cluster-level rate limit deferred to Phase 10+
 
-## 9. memory 沉淀
+## 9. Memory Takeaways
 
-- L5 模板用 `Module` (不是 `SelfTunedWeights`): 跟 sanitizeName 修复同步
-- 0.17 args 拿法: `init.args.vector[idx]` 是 `[*:0]const u8`, 手动 alloc 复制
-- shouldPlan 必须 guard `tick <= last_plan_tick` (重启场景)
-- DebugAllocator 在 0.17 默认开启, leak 立即 abort, 必须手动 free
-- 0.17 改: `bytesToHex` 不是 `fmtSliceHexLower`, `HmacSha256` 在 `auth.hmac.sha2`, `unreachable` 跟 `stale`/`anyhow`/`comptime` 冲突不能做 enum field
-- 0.17 TCP: `IpAddress.parse(text, port)`, `listen`/`connect` 走 `ConnectOptions{ .mode = .stream }`
-- 0.17 stream writer: `stream.writer(io, &buf)` → `w.interface.writeAll` + `flush`, 跟 GhwLink 同款
-- 0.17 `std.Thread.sleep` 没了, 用 `std.c.nanosleep` 替代
+- L5 templates use `Module` (not `SelfTunedWeights`): in sync with the sanitizeName fix
+- How to get args in 0.17: `init.args.vector[idx]` is `[*:0]const u8`; copy it with a manual alloc
+- shouldPlan must guard `tick <= last_plan_tick` (restart scenario)
+- DebugAllocator is enabled by default in 0.17; a leak aborts immediately — must free manually
+- 0.17 changes: `bytesToHex` not `fmtSliceHexLower`; `HmacSha256` lives in `auth.hmac.sha2`; `unreachable` conflicts with `stale`/`anyhow`/`comptime` and cannot be an enum field
+- 0.17 TCP: `IpAddress.parse(text, port)`; `listen`/`connect` go through `ConnectOptions{ .mode = .stream }`
+- 0.17 stream writer: `stream.writer(io, &buf)` → `w.interface.writeAll` + `flush`, same as GhwLink
+- 0.17 `std.Thread.sleep` is gone; use `std.c.nanosleep` instead
 

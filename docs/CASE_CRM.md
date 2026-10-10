@@ -40,7 +40,7 @@ What gets verified:
 
 ```bash
 # Clone
-git clone https://github.com/Knot3-Labs/ghw.git
+git clone https://github.com/chy3xyz/ghw.git
 cd ghw
 git checkout feature/week4-consent-and-demo
 

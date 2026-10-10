@@ -6,11 +6,11 @@
 > in a single neural network. **LLM is fuel, not the brain.** The framework writes,
 > tests, and rewrites its own code (L1–L5), reflects on its own existence formula
 > (E formula), and converges toward a 9-palace "三源合恰" balanced state — all in
-> Zig 0.17 dev with **zero external crate dependencies**.
+> Zig 0.17.0 with **zero external crate dependencies**.
 
-[![Zig](https://img.shields.io/badge/zig-0.17_dev-orange)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-orange)](https://ziglang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-139%2F140-green)]()
+[![Tests](https://img.shields.io/badge/tests-396%2F396-green)]()
 [![Daemon](https://img.shields.io/badge/daemon-22h_RSS_8MB-green)]()
 [![SDK](https://img.shields.io/badge/C%20ABI-v0.3-blue)]()
 
@@ -105,7 +105,7 @@ thing that proposes). The result is:
 | Multi-GHW peer protocol (JSONL over Unix socket) | ✅ | `src/harness/gsp_*.zig` |
 | C ABI SDK v0.3 (15 functions, libghw.a + ghw.h) | ✅ | `SDK.md` |
 | HTMX + Alpine.js UI (8 tabs: state / capabilities / L1–L5 trend / ...) | ✅ | `ui/index.html`, `ui/app.js` |
-| **150/150 unit tests pass** | ✅ | `zig build test` |
+| **396/396 unit tests pass** | ✅ | `zig build test` |
 | Long-running daemon (13h+ tested, RSS 4.5 MB) | ✅ | `examples/daemon.zig` |
 | AutoCLI 4 sources (Wikipedia / HN / ArXiv / RSS) | ✅ | `src/harness/autocli.zig` |
 | launchd / systemd deployment | ✅ | `install.sh` |
@@ -119,7 +119,7 @@ thing that proposes). The result is:
 
 ### Prerequisites
 
-- **Zig 0.17 dev** (≥ `0.17.0-dev.704`) — see [Zig installation](https://ziglang.org/download/)
+- **Zig 0.17.0** release (also works on `0.17.0-dev.2151+`; ≥ `0.17.0-dev.704`) — see [Zig installation](https://ziglang.org/download/)
 - **macOS or Linux** (Windows untested; use WSL2)
 - **Optional**: `wasmtime` 33.0.0+ for WASM sandbox; LLM API key for
   reflection / propose / enhance features
@@ -127,10 +127,10 @@ thing that proposes). The result is:
 ### Build
 
 ```bash
-git clone https://github.com/yourname/ghw.git
+git clone https://github.com/chy3xyz/ghw.git
 cd ghw
 zig build                              # builds libghw.a + all examples
-zig build test                         # runs 139/140 unit tests
+zig build test                         # runs 396/396 unit tests
 ```
 
 ### Run the daemon (long-running)
@@ -310,13 +310,11 @@ Phases 1–3 complete:
 - ✅ **Phase 4–8.7**: L1–L5 self-evolution (real compiled output), 9-relation GoalGraph, 9-palace deep dive, L4 closed-loop
 - ✅ **Phase 9**: 9-palace milestone persistence + 3-milestone tracking (E var / M/R/N var / strong)
 
-Phase 3 priorities (production hardening):
+Phase 10+ priorities (production hardening):
 
-- ⏳ **Graceful shutdown + WAL rotation** — half-day
+- ⏳ **GitHub Actions CI** — run `zig build test` + acceptance scripts on every PR
 - ⏳ **DEEPSEEK_API_KEY via macOS Keychain** — 2h
-- ⏳ **Docker image** — half-day
-- ⏳ **Prometheus `/api/metrics` endpoint** — 1h
-- ⏳ **GitHub Actions CI** — 1h
+- ⏳ **TLS 1.3 cross-host link** (public-network peers, see `docs/CROSS_HOST.md`)
 
 ## Contributing
 
@@ -325,14 +323,13 @@ contribute:
 
 1. Read [`AGENTS.md`](AGENTS.md) for the AI agent guidelines.
 2. Read [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) to understand known issues.
-3. Run `zig build test` before submitting — must be 139/140 (1 known fail in
-   `harness.self_encoder.test.SelfEncoder: 提取代码引用` is unrelated).
+3. Run `zig build test` before submitting — must be green (396/396).
 4. Don't change the E formula or the SelfEvolutionGuard 17-blacklist. The
    digital life's existence formula is invariant.
 
 ## License
 
-MIT (see `LICENSE` — TBD if you want to change to Apache 2.0 / GPLv3).
+[MIT](LICENSE).
 
 ---
 
@@ -340,4 +337,4 @@ MIT (see `LICENSE` — TBD if you want to change to Apache 2.0 / GPLv3).
 self-evolution, weak on docs and operational hardening. See
 [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the prioritized work list.
 
-**Verified on macOS 15.x, Zig 0.17.0-dev.704+, sqlite 3.49.2, wasmtime 33.0.0.**
+**Verified on macOS 15.x, Zig 0.17.0 release (also on 0.17.0-dev.2151+), sqlite 3.49.2, wasmtime 33.0.0.**

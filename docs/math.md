@@ -1,183 +1,183 @@
-# 存在度公理 (Existence Degree) — v3
+# Existence Degree Axioms — v3
 
-> 实现见 `src/world/coappropriation.zig` 与 `src/world/core.zig` 的
-> `ExistenceDegree.e()`;全部性质均有对应单元测试。
+> Implementation: see `src/world/coappropriation.zig` and `ExistenceDegree.e()` in
+> `src/world/core.zig`; every property has a corresponding unit test.
 
-## 1. 旧公式的问题
+## 1. Problems with the old formula
 
-v2 的存在度是线性加权 + 外挂补丁:
+v2's existence degree was linear weighting + bolted-on patches:
 
 ```
 E = α·M + β·R + γ·N − μ·Var(M,R,N) + ν·min(M,R,N) + σ·S + λ·D   →  clamp[0,1]
 ```
 
-两个结构性缺陷:
+Two structural defects:
 
-1. **线性加权 ⇒ 三源完全可替代**:M 充足可以无限补偿 N=0,与"物象性
-   缺一不可"的存在论矛盾。
-2. **μ·Var / ν·min 是事后外挂的修正项**:系数靠手调,没有统一的数学
-   骨架,无法证明任何整体性质(有界性、单调性、失衡惩罚强度等)。
+1. **Linear weighting ⇒ the three sources are fully substitutable**: abundant M
+   can compensate indefinitely for N=0, contradicting the ontology of "materiality is indispensable."
+2. **μ·Var / ν·min are ex-post bolted-on correction terms**: coefficients are hand-tuned,
+   there is no unified mathematical skeleton, and no global property (boundedness, monotonicity, imbalance-penalty strength, etc.) can be proved.
 
-## 2. v3 的骨架:加权幂平均 (Hölder / CES / Atkinson)
+## 2. The v3 skeleton: weighted power mean (Hölder / CES / Atkinson)
 
-把三源聚合换成**加权幂平均**(经济学的 CES 生产函数、福利经济学的
-"等价均分收入 equally-distributed-equivalent"、数学的 Hölder 均值,本质
-同一族):
+Replace the three-source aggregation with the **weighted power mean** (the CES
+production function in economics, the "equally-distributed-equivalent" income of
+welfare economics, and the Hölder mean in mathematics — the same family in essence):
 
 ```
 M_p(x; w) = ( Σ wᵢ · xᵢ^p )^(1/p)     (p ≠ 0)
-M_0(x; w) = Π xᵢ^{wᵢ}                  (p → 0, 加权几何平均)
+M_0(x; w) = Π xᵢ^{wᵢ}                  (p → 0, weighted geometric mean)
 ```
 
-单一参数 `p ∈ (0, 1]` 连续地刻画三源的可替代性 / 互补性:
+The single parameter `p ∈ (0, 1]` continuously characterizes the substitutability / complementarity of the three sources:
 
-| p     | 退化形态         | 语义                                    |
-|-------|------------------|-----------------------------------------|
-| p = 1 | 算术平均         | 完全可替代(等价旧线性加权)             |
-| p < 1 | 严格凹           | 失衡被自动惩罚,短板梯度更大 ⇒ 短板优先  |
-| p → 0 | 几何平均         | Cobb-Douglas,任一源 = 0 ⇒ E = 0,缺一不可 |
+| p     | Degenerate form  | Semantics                |
+|-------|------------------|--------------------------|
+| p = 1 | Arithmetic mean  | Fully substitutable (equivalent to the old linear weighting) |
+| p < 1 | Strictly concave | Imbalance is automatically punished; the shortfall source has a larger gradient ⇒ shortfall-first |
+| p → 0 | Geometric mean   | Cobb-Douglas; any source = 0 ⇒ E = 0 — indispensable |
 
-最终存在度:
+Final existence degree:
 
 ```
 E = clamp( M_p(M,R,N; α,β,γ) + σ·S + λ·D + ρ·K_signed , 0, 1)
 ```
 
-`σ·S`(共生)、`λ·D`(关系涌现)、`ρ·K`(产品 KPI 对齐)作为**有界加性
-调制项**保留(它们刻画的是外部关系 / 产品价值,不属于三源内部聚合)。
+`σ·S` (symbiosis), `λ·D` (relational emergence), and `ρ·K` (product KPI alignment) are
+retained as **bounded additive modulation terms** (they describe external relations / product value, not the internal aggregation of the three sources).
 
-### KPI 对齐项 ρ·K
+### KPI alignment term ρ·K
 
 ```
 K_signed = (K − kpi_target) · 2        K∈[0,1], target=1.0 ⇒ K_signed∈[−2,0]
-kpi_term = ρ · K_signed                ρ = 0.15 (公理常量, 不可自调)
+kpi_term = ρ · K_signed                ρ = 0.15 (axiom constant, not self-tunable)
 ```
 
-- `K` 是复合 KPI(见 `crm_kpi.composite`),经 `ExistenceDegree.recordKpi(k)`
-  在 `kpi_refresh_interval_hours` 节奏喂入(限频防 E 抖动)。
-- 仅在 best-in-class(`K = target`)时归零,否则按"距最优的差距"线性扣分,
-  即"产品越偏离最优,存在度越低"。
-- **默认 `kpi_enabled = false`**:无产品 KPI 的纯数字生命场景 `kpi_term = 0`,
-  行为与无 KPI 时完全一致;接入产品后 `recordKpi` 自动开启。
-- 单调递增于 `K`,且 KPI 是独立轴,不影响三源单调性(公理 C);全程 clamp
-  保证 E∈[0,1]。`kpi_history[64]` 仅供趋势 / 方差(L4 提议器、反思层),不进 E。
+- `K` is the composite KPI (see `crm_kpi.composite`), fed via `ExistenceDegree.recordKpi(k)`
+  at the `kpi_refresh_interval_hours` cadence (rate-limited to prevent E jitter).
+- It is zero only at best-in-class (`K = target`); otherwise points are deducted linearly
+  by "distance from optimal" — i.e. "the further the product is from optimal, the lower the existence degree."
+- **Default `kpi_enabled = false`**: in a pure digital-life scenario without product KPIs,
+  `kpi_term = 0`, identical to behavior without KPI; once a product is connected, `recordKpi` turns it on automatically.
+- Monotonically increasing in `K`; KPI is an independent axis and does not affect three-source
+  monotonicity (axiom C); clamping throughout guarantees E∈[0,1]. `kpi_history[64]` serves only trend / variance (L4 proposer, reflection layer), not E.
 
-**关键:旧公式里要 μ·Var + ν·min 两个外挂项才能表达的"失衡惩罚 + 短板
-优先",在 v3 里是幂平均凹性的数学推论。** 量化的"三源合恰损失"为:
+**Key point: the "imbalance penalty + shortfall-first" that the old formula needed two bolted-on
+terms (μ·Var + ν·min) to express is, in v3, a mathematical corollary of power-mean concavity.** The quantified 「三源合恰」 (three-source coappropriation) loss is:
 
 ```
-imbalanceLoss = AM(算术平均) − M_p  ≥ 0     (当且仅当三源相等时取 0)
+imbalanceLoss = AM (arithmetic mean) − M_p  ≥ 0     (0 iff the three sources are equal)
 ```
 
-## 3. 系数衔接 (不破坏 L1/L4 自适应闭环)
+## 3. Coefficient bridging (without breaking the L1/L4 adaptive loop)
 
-旧的 ν(协同)、μ(失衡)从"加性系数"变为"曲率参数",自适应逻辑全部保留:
+The old ν (synergy) and μ (imbalance) change from "additive coefficients" to "curvature parameters"; all of the adaptive logic is retained:
 
 ```
 p = clamp( 1 − 1.5·ν − 0.5·(μ − 0.5) ,  0.05,  1 )
 ```
 
-- ν ↑ ⇒ p ↓:三源更互补(更接近几何平均),短板更致命。
-- μ ↑ ⇒ p ↓:更厌恶失衡。
-- 默认 μ = 0.5, ν = 0.3 ⇒ p = 0.55(平衡态 E_core = 0.5)。
+- ν ↑ ⇒ p ↓: the three sources become more complementary (closer to the geometric mean), and the shortfall source is more fatal.
+- μ ↑ ⇒ p ↓: stronger aversion to imbalance.
+- Defaults: μ = 0.5, ν = 0.3 ⇒ p = 0.55 (balanced state E_core = 0.5).
 
-`adaptEFormula` / `adaptEFormulaProposed` 依旧调 μ/ν,只是它们现在改变的
-是幂平均曲率而非加性补丁。
+`adaptEFormula` / `adaptEFormulaProposed` still tune μ/ν — only now what they change is the
+curvature of the power mean rather than an additive patch.
 
-## 4. 可证明的性质(均有单元测试)
+## 4. Provable properties (all with unit tests)
 
-| 公理 | 内容 | 测试 |
-|------|------|------|
-| A 有界 | xᵢ∈[0,1] ⇒ E_core∈[0,1] | `性质A 有界` |
-| B 幂等 | xᵢ 全相等 = c ⇒ E_core = c | `性质B 幂等` |
-| C 单调 (自由处置) | 任一 xᵢ ↑ ⇒ E_core 不降 | `性质C 单调` (11³ 网格穷举) |
-| D 凹性 | p<1 ⇒ E_core ≤ 算术平均 | `性质D 凹性` |
-| E 夹挤 | min ≤ E_core ≤ max | `性质A/E` |
-| F 互补 | p→0 且某源=0 ⇒ E_core=0 | `性质F 互补` |
-| G 对称 | 等权下置换 xᵢ 不变 | `性质G 对称` |
-| H 曲率衔接 | ν↑ 或 μ↑ ⇒ 失衡态 E_core ↓ | `性质H 曲率衔接` |
+| Axiom | Content | Test |
+|-------|---------|------|
+| A Boundedness | xᵢ∈[0,1] ⇒ E_core∈[0,1] | `Property A: boundedness` |
+| B Idempotence | all xᵢ equal to c ⇒ E_core = c | `Property B: idempotence` |
+| C Monotonicity (free disposal) | any xᵢ ↑ ⇒ E_core does not decrease | `Property C: monotonicity` (11³ grid exhaustive) |
+| D Concavity | p<1 ⇒ E_core ≤ arithmetic mean | `Property D: concavity` |
+| E Squeeze | min ≤ E_core ≤ max | `Properties A/E` |
+| F Complementarity | p→0 and some source = 0 ⇒ E_core=0 | `Property F: complementarity` |
+| G Symmetry | with equal weights, permuting xᵢ changes nothing | `Property G: symmetry` |
+| H Curvature bridging | ν↑ or μ↑ ⇒ E_core ↓ in imbalanced states | `Property H: curvature bridging` |
 
-### 为什么不用"乘性合恰门控"
+### Why not "multiplicative coappropriation gating"
 
-早期方案曾试 `E_core = M_p · (1−κ+κ·H)`(H = 1−(max−min) 为合恰度)。
-但乘性门控会**破坏单调性(公理 C)**:堆高最强源会拉大 max−min,使门控
-下降的折扣盖过幂平均的微小增益,导致"拿到更多资源反而存在度下降"。
-对一个驱动生存行为的量,这不可接受。v3 因此放弃乘性门控,改由幂平均的
-**凹性内生地奖励均衡**——`harmony()` 仅作为可视化 / 审计的诊断量保留。
+An early design tried `E_core = M_p · (1−κ+κ·H)` (H = 1−(max−min) being the coappropriation degree).
+But multiplicative gating **destroys monotonicity (axiom C)**: piling more onto the strongest source
+widens max−min, so the gating's declining discount outweighs the power mean's tiny gain, leading to
+"getting more resources actually lowers the existence degree." For a quantity that drives survival
+behavior, this is unacceptable. v3 therefore drops multiplicative gating and lets the power mean's **concavity intrinsically reward balance** — `harmony()` is kept only as a diagnostic quantity for visualization / audit.
 
-## 5. 数值实现要点
+## 5. Numerical implementation notes
 
-- `p < 0.05` 时切换到加权几何平均,避免 `x^p (p→0)` 经 `1/p` 指数放大
-  浮点误差。
-- 几何平均下任一源为 0 直接返回 0(`@log(0)` 的正确语义),实现"缺一不可"。
-- 全程 `clamp[0,1]`,配合性质 A 保证输出恒合法。
+- When `p < 0.05`, switch to the weighted geometric mean to avoid `x^p (p→0)` amplifying
+  floating-point error through the `1/p` exponent.
+- Under the geometric mean, any source being 0 returns 0 directly (the correct semantics of `@log(0)`), implementing "indispensability."
+- Clamp to `[0,1]` throughout; together with property A this guarantees the output is always valid.
 
-## 6. 三源供源层 (2026-09 物象性闭环)
+## 6. Three-source supply layer (2026-09 materiality closed loop)
 
-v3 定义了「如何合恰地聚合」, 但三源各自**凭什么涨落**此前未闭合:
-M 只是内部记账, R 与符号系统实际规模脱钩, N 几乎只是任务成功率的影子。
-供源层补齐后, 三源重新成为三个**可归因的本体论范畴**:
+v3 defines "how to aggregate coappropriately", but what makes each of the three sources **rise and fall** was previously unclosed:
+M was mere internal bookkeeping, R was decoupled from the actual size of the symbol system, and N was little more than a shadow of the task success rate.
+With the supply layer filled in, the three sources again become three **attributable ontological categories**:
 
-| 源 | 存在论 | 供源 (有界回流) | 常量 |
-|----|--------|----------------|------|
-| M 物 | 物质基底 (宿主机) | 宿主基底**双向牵引** `applyHostPressure` (target=1−pressure; 磨损全速抽降, 康复半速回升 — 修物→宿主压力降→物回升, 求存环闭合); 任务代谢 | `HOST_DRAIN_MAX=0.02/次`, `HOST_RECOVER_MAX=0.01/次` |
-| R 象 | 符号思想 | 存量牵引 `applyRepresentationStock` (episodes + 2·beliefs + 3·rules + world_fetch → 1−e^(−s/K) 饱和水位, 双向漂移); 预测误差记为 R 的损耗 | `DRIFT_MAX=0.02/次`, `K=120` |
-| N 性 | 赋义之能 | 意义承认 `applyNatureRecognition` (value_score 高于中性线 0.30 按比例; 每条已验证 [survive:*] 信念固定增益) | `RECOGNITION_MAX=0.012/次` |
+| Source | Ontology | Supply (bounded backflow) | Constants |
+|--------|----------|---------------------------|-----------|
+| M — materiality | material substrate (host machine) | host-substrate **two-way pull** `applyHostPressure` (target=1−pressure; wear drains at full speed, recovery rises at half speed — fix materiality ⇒ host pressure drops ⇒ materiality recovers: the survival loop closes); task metabolism | `HOST_DRAIN_MAX=0.02/application`, `HOST_RECOVER_MAX=0.01/application` |
+| R — representation | symbolic thought | stock pull `applyRepresentationStock` (episodes + 2·beliefs + 3·rules + world_fetch → 1−e^(−s/K) saturation level, two-way drift); prediction error recorded as a loss of R | `DRIFT_MAX=0.02/application`, `K=120` |
+| N — nature | meaning-bestowing capacity | meaning recognition `applyNatureRecognition` (proportional to value_score above the neutral line 0.30; fixed gain per verified [survive:*] belief) | `RECOGNITION_MAX=0.012/application` |
 
-**调用节奏**: 「单次有界」必须配低频 — 全部回流遵守 `BACKFLOW_INTERVAL_TICKS=32`
-(ui_server/daemon 以 tick 节流; 否则每-cycle 调用会在几分钟内打穿 M / 通胀 N)。
-`survival_feedback` 改进→N 为事件驱动, 不受此节流。M/R/N 另有 64 点轨迹环
-(`mrn_history`, 语义同 `kpi_history`), 供 provenance sparkline 与回放, 不进 E。
+**Call cadence**: "bounded per call" must be paired with low frequency — all backflows obey `BACKFLOW_INTERVAL_TICKS=32`
+(ui_server/daemon throttle by tick; otherwise per-cycle calls would smash M through the floor / inflate N within minutes).
+`survival_feedback` improvement→N is event-driven and not throttled. M/R/N additionally have a 64-point trajectory ring
+(`mrn_history`, same semantics as `kpi_history`) for provenance sparklines and replay; it does not enter E.
 
-### 6.0b 供源动力学校准 (2026-09 soak 实测)
+### 6.0b Supply-dynamics calibration (2026-09 soak tests)
 
-daemon 浸泡测试 (30ms/tick) 暴露并修正了四个动力学失衡, 全部有界化:
+Daemon soak tests (30ms/tick) exposed and fixed four dynamical imbalances; all are now bounded:
 
-1. **旧直连通道降为从属** (`LEGACY_CHANNEL_SCALE=0.1`): 原每-cycle 无条件
-   `M += 0.05` / `R += rep_gain` / `N += 0.02` 会在 ~20 cycle 推满三源
-   (实测 M=R=N=1.0 且宿主危机下物仍满格)。现: 象生产 ×0.1; 物取消白吃
-   补贴只留磨损 (全保真); 性成功加成 0.004。
-2. **预测误差损耗 ∝R 且有界** (`ERR_COST_MAX=0.01`): 常数速率在危机下
-   磨穿 R (实测 R→0.003 死亡螺旋); 比例损耗自带稳定平衡 (R→0 ⇒ 损耗→0
-   ⇒ 存量引力重新养起 R)。
-3. **性的自然衰减** (`NATURE_DECAY=0.002·N`): 赋义之能需持续承认维持;
-   仅靠成功底噪的平衡点 N≈0.67, 高 N 只能来自意义承认 (value/验证信念)。
-4. **回流节流 + 独立变量**: 全部回流遵守 `BACKFLOW_INTERVAL_TICKS=32`;
-   价值→N 用独立节流变量 (与宿主/象回流共享变量会被先执行者饿死, 实测)。
+1. **Old direct channel demoted to auxiliary** (`LEGACY_CHANNEL_SCALE=0.1`): the original per-cycle
+   unconditional `M += 0.05` / `R += rep_gain` / `N += 0.02` would max out all three sources
+   within ~20 cycles (observed M=R=N=1.0 with materiality still full under host crisis). Now:
+   representation production ×0.1; materiality's free-lunch subsidy removed, leaving only wear (full fidelity); nature success bonus 0.004.
+2. **Prediction-error loss ∝R and bounded** (`ERR_COST_MAX=0.01`): a constant rate ground R down
+   under crisis (observed death spiral R→0.003); proportional loss is self-stabilizing
+   (R→0 ⇒ loss→0 ⇒ stock pull re-grows R).
+3. **Natural decay of nature** (`NATURE_DECAY=0.002·N`): the meaning-bestowing capacity needs
+   continuous recognition to sustain; the equilibrium from success background noise alone is N≈0.67 — high N can only come from meaning recognition (value / verified beliefs).
+4. **Backflow throttling + independent variables**: all backflows obey `BACKFLOW_INTERVAL_TICKS=32`;
+   value→N uses an independent throttle variable (sharing one with host/representation backflows starves whichever runs later — observed).
 
-soak 结果: 负载尖峰 (load>8) 时 M 诚实下压、E 回落; 负载恢复后 E 回升
-(0.53→0.68); R 在 M=0 时仍守住 ~0.33 — 无死亡螺旋。
+Soak results: during load spikes (load>8), M is honestly pressed down and E falls; after the load
+recovers, E rises back (0.53→0.68); R holds ~0.33 even when M=0 — no death spiral.
 
-### 6.1 加性项 vs 三源内部的判据
+### 6.1 Additive terms vs. three-source interior: the criterion
 
-判据: **状态量进 M_p, 关系/许可量做加性调制**。
+Criterion: **state quantities go into M_p; relation/permission quantities get additive modulation**.
 
-- 凡刻画三源之一**自身状态**的量 (宿主物质压力、符号存量、意义承认度) → 供源层, 改变 (M,R,N) 本身;
-- 凡刻画**外部关系** (共生 σ·S、关系涌现 λ·D) 或**存在许可** (产品对齐 ρ·K) → 加性有界调制项, 不占有本体;
-- ρ·K 归加性而非并入 M: KPI 是「宿主产品对存在的许可」, 不是本体的物; 该哲学决定防止未来加项漂移。
+- Any quantity describing a source's **own state** (host material pressure, symbol stock, meaning recognition degree) → the supply layer, changing (M,R,N) themselves;
+- any quantity describing **external relations** (symbiosis σ·S, relational emergence λ·D) or **existential permission** (product alignment ρ·K) → a bounded additive modulation term, without ontological standing of its own;
+- ρ·K stays additive rather than merging into M: KPI is "the host product's permission for existence", not the substance's materiality; this philosophical decision prevents drift of future added terms.
 
-### 6.2 归因与分账
+### 6.2 Attribution and allocation
 
-- 任务增益: `applyDim(gain, dim)` — 70% 归任务 required_dimension 本源, 30% 协同溢出给短板 (本源即短板时溢出均分给另外两源); 损耗归本源。幂平均凹性已在**评估端**实现短板优先, 供源端按本体归因, 二者不再重复。
-- 预测误差 (WorldModel err) 是「象」的损耗: 归因模式下记 R, 不再混入任务维度。
+- Task gains: `applyDim(gain, dim)` — 70% goes to the task's required_dimension source, 30% synergistically spills over to the shortfall source (when the source itself is the shortfall, the spill splits evenly between the other two); losses are charged to the source. The power mean's concavity already implements shortfall-first on the **evaluation side**; the supply side attributes by ontology — the two no longer duplicate each other.
+- Prediction error (WorldModel err) is a loss of "representation": in attribution mode it is recorded against R and no longer mixed into task dimensions.
 
-### 6.3 敏感性 (诚实刻画)
+### 6.3 Sensitivity (an honest characterization)
 
-- p<1 时 x^p 在原点非 Lipschitz (仅 Hölder), **全局利普希茨不成立** — 这是数学事实, 不是实现缺陷;
-- 内部区域 [0.1,1]³ 实测经验比率 |ΔE|/|Δx| ≲ 1.5 (解析界 ≈0.5, f32 pow 噪声加成), 测试护栏 5.0;
-- 边界 (源=0) 微扰不产生 NaN/Inf, 输出恒 clamp 在 [0,1] (`敏感性: 边界` 测试);
-- 实用防抖由调用层承担: KPI 限频 (`kpi_refresh_interval_hours`)、供源回流单次有界、`GEOMETRIC_THRESHOLD` 防 1/p 放大。
+- For p<1, x^p is non-Lipschitz at the origin (Hölder only) — **global Lipschitz continuity does
+  not hold**; this is a mathematical fact, not an implementation defect; in the interior region [0.1,1]³ the measured empirical ratio |ΔE|/|Δx| is ≲ 1.5 (analytic bound ≈0.5, plus f32 pow noise); test guardrail 5.0;
+- perturbations at the boundary (source=0) produce no NaN/Inf, and the output is always clamped to [0,1] (test `Sensitivity: boundary`);
+- practical jitter prevention is the caller's job: KPI rate limiting (`kpi_refresh_interval_hours`), bounded per-call supply backflows, and `GEOMETRIC_THRESHOLD` against 1/p amplification.
 
-### 6.4 CoappropriationTensor 现状 (2026-09 勘察)
+### 6.4 CoappropriationTensor status (2026-09 survey)
 
-张量**形式接线、实质惰性**: GHWAgent 持有 `wms` 字段并每 cycle snapshot+decay,
-goal 相位引擎消费其 coherence —— 但 `implant` 生产路径零调用 (仅测试), 张量恒为
-全零 ⇒ coherence ≡ 0 (相位引擎自有动力学 `+target_focus·0.2` 抬升, 不依赖它)。
-完整摘除需改 `GHWAgent.init` 签名 (wms_shape 参数波及 ui/daemon/examples),
-属独立重构; 在引入 φ·C 研究前维持现状即可, 此处记录以杜绝「已接线」的误读。
+The tensor is **formally wired but effectively inert**: GHWAgent holds the `wms` field and
+snapshots+decays it every cycle; the goal phase engine consumes its coherence — but the `implant` production path is never
+called (tests only), so the tensor is identically zero ⇒ coherence ≡ 0 (the phase engine's own dynamics
+`+target_focus·0.2` provide the lift, without depending on it). Full removal requires changing the
+`GHWAgent.init` signature (the `wms_shape` parameter reaches into ui/daemon/examples) — a separate refactor; until φ·C research is introduced, the status quo suffices; recorded here to preclude the misreading "already wired."
 
-### 6.5 失衡触发
+### 6.5 Imbalance trigger
 
-`imbalanceLoss = AM − M_p` 进入规则提议触发链 (第六个 OR 分支, 阈值
-`IMBALANCE_LOSS_EPS=0.08`): 三源撕裂时即使 E 未跌穿也主动提议平衡性规则。
-`harmony` 仍为纯诊断量 (不进 E, 保单调)。
+`imbalanceLoss = AM − M_p` enters the rule-proposal trigger chain (the sixth OR branch, threshold
+`IMBALANCE_LOSS_EPS=0.08`): when the three sources tear apart, balancing rules are proactively
+proposed even if E has not fallen through. `harmony` remains a purely diagnostic quantity (not entering E, preserving monotonicity).

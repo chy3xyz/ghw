@@ -1,58 +1,58 @@
-# 核心概念
+# Core Concepts
 
-GHW 的关键不是“让 LLM 更聪明”，而是把 LLM 放回合适的位置：**LLM 提议，数字生命决定**。
+The key to GHW is not "making the LLM smarter", but putting the LLM back in its proper place: **the LLM proposes, the digital life decides**.
 
-## M/R/N 三源
+## M/R/N Three Sources
 
-GHW 用三个维度描述数字生命状态：
+GHW describes the state of a digital life along three dimensions:
 
-- **M Material**：行动、执行、资源、实际结果。
-- **R Representation**：建模、理解、信念、知识结构。
-- **N Nature**：自我叙事、意义、内在一致性。
+- **M Material**: action, execution, resources, actual results.
+- **R Representation**: modeling, understanding, beliefs, knowledge structures.
+- **N Nature**: self-narrative, meaning, internal consistency.
 
-存在度 `E` 不是简单分数，而是三源状态、产品 KPI、共生关系和关系涌现的聚合结果。当前主线使用加权幂平均/CES 作为三源聚合基础，让“短板优先”和“失衡惩罚”来自公式性质，而不是事后补丁。
+The existence degree `E` is not a simple score, but an aggregation of three-source state, product KPIs, symbiosis relations, and relational emergence. The current mainline uses the weighted power mean / CES as the basis of three-source aggregation, so that "shortfall-first" and "imbalance penalty" emerge from the properties of the formula rather than from after-the-fact patches.
 
-## LLM 是燃料
+## LLM as Fuel
 
-LLM 在 GHW 中可以做：
+In GHW, the LLM can:
 
-- 把自然语言、世界快照、聊天消息解析为特征。
-- 提议目标、规则、代码变体或解释。
-- 生成候选代码和候选规则。
+- Parse natural language, world snapshots, and chat messages into features.
+- Propose goals, rules, code variants, or explanations.
+- Generate candidate code and candidate rules.
 
-LLM 不能做：
+The LLM cannot:
 
-- 决定是否采纳自己的提议。
-- 修改 E 公理、黑名单、产品意图。
-- 绕过 Guard、Verifier、Consent 或 ΔE 反馈。
+- Decide whether its own proposals are adopted.
+- Modify the E axioms, the blacklist, or the ProductIntent.
+- Bypass the Guard, the Verifier, Consent, or the ΔE feedback.
 
-## 自演化 L1-L5
+## Self-Evolution L1-L5
 
-| 层级 | 含义 | 典型产物 |
+| Level | Meaning | Typical Output |
 | --- | --- | --- |
-| L1 | 调参 | 系数、权重、节奏微调 |
-| L2 | epsilon 变体 | 搜索/扰动策略 |
-| L3 | 学会新方法 | `src/goal/methods/l3_*.zig` |
-| L4 | 优化算法 | 目标选择、反思、调度策略 |
-| L5 | 自编码规则 | 可验证规则、守门策略 |
+| L1 | Parameter tuning | Coefficient, weight, and rhythm adjustments |
+| L2 | epsilon variants | Search/perturbation strategies |
+| L3 | Learn new methods | `src/goal/methods/l3_*.zig` |
+| L4 | Optimize algorithms | Goal selection, reflection, scheduling strategies |
+| L5 | Self-encoded rules | Verifiable rules, guard strategies |
 
-L3-L5 都要经过 `SelfEvolutionGuard` 和 `CompileVerifier`。L5 还会进入 `SelfEncoder.verify`。
+L3-L5 must all pass through `SelfEvolutionGuard` and `CompileVerifier`. L5 additionally enters `SelfEncoder.verify`.
 
-## 人类共生
+## Human Symbiosis
 
-产品级数字生命不能只优化自己。GHW 加入了人类共生层：
+A product-grade digital life cannot optimize only for itself. GHW adds a human symbiosis layer:
 
-- `TaskQueue` 接收人类、LLM、系统和平衡器任务。
-- `HumanSignal` 记录显式评分和反馈。
-- `HumanGSP` 跟踪人类信任与互动质量。
-- `ValueTrendTracker` 追踪 human value score 走势。
-- `chat_reply` 在回复中注入自传体记忆和相关往事。
+- `TaskQueue` accepts tasks from humans, the LLM, the system, and the balancer.
+- `HumanSignal` records explicit ratings and feedback.
+- `HumanGSP` tracks human trust and interaction quality.
+- `ValueTrendTracker` tracks the trend of the human value score.
+- `chat_reply` injects autobiographical memory and relevant past episodes into replies.
 
-这些信号不直接“命令” agent，而是通过任务偏置、价值趋势和规则提议改变后续行为。
+These signals do not directly "command" the agent; instead, they change subsequent behavior through task bias, value trends, and rule proposals.
 
-## 产品数字生命底座
+## Product Digital Life Foundation
 
-产品底座新增一条闭环：
+The product foundation adds one more closed loop:
 
 ```text
 ProductIntent
@@ -65,12 +65,12 @@ ProductIntent
   -> E feedback
 ```
 
-这让 GHW 不只是“自我生长”，而是能成为一个产品的长期演化内核。
+This lets GHW be more than "self-growing" — it can become the long-term evolution kernel of a product.
 
-## 安全原则
+## Security Principles
 
-- 产品意图由人类/ops 管理，GHW 只能提议，不能直接改。
-- 非 minor 产品变更必须进入审批。
-- 应用和回滚都进入审计日志。
-- 规则和代码候选必须通过黑名单、形式验证和编译验证。
-- API key 走环境变量，不写死在源码中。
+- The ProductIntent is managed by humans/ops; GHW can only propose, not modify it directly.
+- Non-minor product changes must go through approval.
+- Both apply and rollback are written to the audit log.
+- Rule and code candidates must pass the blacklist, formal verification, and compile verification.
+- API keys come from environment variables and are never hardcoded in the source.

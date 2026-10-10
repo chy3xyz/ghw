@@ -1,8 +1,8 @@
-# 架构总览
+# Architecture Overview
 
-GHW 分成四层：World、Goal、Harness、Agent。产品运行时和人类共生层位于 Harness/Agent 之间，负责把外部价值和人类反馈纳入循环。
+GHW is divided into four layers: World, Goal, Harness, and Agent. The product runtime and the human symbiosis layer sit between Harness and Agent, responsible for bringing external value and human feedback into the loop.
 
-## 四层结构
+## Four-Layer Structure
 
 ```text
 External World
@@ -22,41 +22,41 @@ Agent: cycle loop, reflection, migration, persistence
 
 ## World
 
-World 层负责计算存在度：
+The World layer is responsible for computing the existence degree:
 
-- `src/world/core.zig`：存在度、M/R/N、KPI 项、关系项。
-- `src/world/coappropriation.zig`：三源合恰数学模型。
-- `docs/math.md`：公式推导和性质证明。
+- `src/world/core.zig`: existence degree, M/R/N, KPI term, relation term.
+- `src/world/coappropriation.zig`: the 「三源合恰」 (three-source coappropriation) mathematical model.
+- `docs/math.md`: formula derivation and property proofs.
 
-当前 E 的核心来源包括：
+Current core sources of E include:
 
-- 三源聚合：M/R/N 的加权幂平均。
-- `σ·S`：共生关系。
-- `λ·D`：关系涌现。
-- `ρ·K`：产品 KPI 对齐项。
+- Three-source aggregation: weighted power mean of M/R/N.
+- `σ·S`: symbiosis.
+- `λ·D`: relational emergence.
+- `ρ·K`: product KPI alignment term.
 
 ## Goal
 
-Goal 层负责注意力和目标结构：
+The Goal layer is responsible for attention and goal structure:
 
-- `AttentionEngine` 选择当前最值得追求的目标。
-- `GoalGraph` 维护目标之间的关系。
-- RuleBias 和 TaskBias 可以重排已有目标，但不会凭空创造目标或绕过 E。
+- `AttentionEngine` selects the goal most worth pursuing right now.
+- `GoalGraph` maintains the relationships between goals.
+- RuleBias and TaskBias can reorder existing goals, but they do not create goals out of thin air or bypass E.
 
 ## Harness
 
-Harness 是执行和治理层：
+Harness is the execution and governance layer:
 
-- `ActionRunner` 执行观察、WASM、peer query、自演化等动作。
-- `SelfEvolutionGuard` 拒绝危险构造和越界文件。
-- `CompileVerifier` 对候选 Zig 代码做真实编译。
-- `Memory` 提供自传体记忆、信念和相关往事检索。
-- `TaskQueue` 和 `HumanSignal` 接入人类任务与反馈。
-- `ProductEvolutionRuntime` 接入产品变更、审批和审计。
+- `ActionRunner` executes actions such as observation, WASM, peer query, and self-evolution.
+- `SelfEvolutionGuard` rejects dangerous constructs and out-of-scope files.
+- `CompileVerifier` performs real compilation of candidate Zig code.
+- `Memory` provides autobiographical memory, beliefs, and retrieval of relevant past episodes.
+- `TaskQueue` and `HumanSignal` bring in human tasks and feedback.
+- `ProductEvolutionRuntime` brings in product changes, approvals, and audit.
 
 ## Agent
 
-Agent 是循环本体：
+Agent is the loop itself:
 
 ```text
 collect world
@@ -71,15 +71,15 @@ collect world
   -> save state
 ```
 
-典型节奏：
+Typical cadence:
 
-- 高频：感知和行动。
-- 中频：反思、任务执行、人类价值采样。
-- 低频：目标提议、规则提议、自演化、产品变更。
+- High frequency: perception and action.
+- Medium frequency: reflection, task execution, human value sampling.
+- Low frequency: goal proposals, rule proposals, self-evolution, product changes.
 
-## 状态持久化
+## State Persistence
 
-`ui_server` 和 daemon 使用 JSON snapshot 保存关键状态：
+`ui_server` and the daemon use JSON snapshots to persist key state:
 
 - `memory`
 - `task_queue`
@@ -88,11 +88,11 @@ collect world
 - `value_tracker`
 - `product_runtime`
 
-SQLite 用于 episodes、beliefs、proposed goals 等操作型记忆。JSON snapshot 用于跨重启恢复当前生命状态。
+SQLite is used for operational memory such as episodes, beliefs, and proposed goals. JSON snapshots are used to restore the current life state across restarts.
 
-## 与已有深文档的关系
+## Relationship to Existing In-Depth Docs
 
-这页是当前实现的入口说明。更详细的底层说明仍保留在仓库根文档：
+This page is the entry-level description of the current implementation. More detailed low-level documentation remains in the repo root docs:
 
 - `ARCHITECTURE.md`
 - `docs/math.md`

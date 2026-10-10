@@ -1,68 +1,68 @@
-# 安全边界
+# Security Boundaries
 
-GHW 的安全模型建立在一句话上：**LLM 可以提议，但不能越权应用。**
+GHW's security model rests on one principle: **the LLM may propose, but it must never apply changes beyond its authority.**
 
-## 核心边界
+## Core Boundaries
 
-| 边界 | 机制 |
+| Boundary | Mechanism |
 | --- | --- |
-| 代码生成 | `SelfEvolutionGuard` + `CompileVerifier` |
-| 规则采纳 | `SelfEncoder.verify` |
-| 产品变更 | `Consent` + `Audit` |
-| 产品意图 | 人类/ops 管理，GHW 不能直接写 |
-| API key | 环境变量，不写入源码 |
-| 状态恢复 | JSON block 解析，缺块不报错 |
+| Code generation | `SelfEvolutionGuard` + `CompileVerifier` |
+| Rule adoption | `SelfEncoder.verify` |
+| Product changes | `Consent` + `Audit` |
+| ProductIntent | Managed by humans/ops; GHW cannot write to it directly |
+| API keys | Environment variables; never written into source code |
+| State recovery | JSON block parsing; missing blocks are not an error |
 
-## LLM 红线
+## LLM Red Lines
 
-LLM 输出不能绕过：
+LLM output cannot bypass:
 
-- 危险构造黑名单。
-- 文件路径白名单。
-- E 公式公理。
-- ProductIntent。
-- Consent。
+- The dangerous-construct blacklist.
+- The file-path whitelist.
+- The existence formula (E) axioms.
+- ProductIntent.
+- Consent.
 
-含 `@panic`、`unreachable`、内核修改、人类伤害等构造会被拒绝。
+Constructs such as `@panic`, `unreachable`, kernel modifications, and harm to humans are rejected.
 
-## 产品变更红线
+## Product Change Red Lines
 
-生产接入时，以下必须保留：
+When integrating into production, the following must be preserved:
 
-- 非 minor 变更进入审批。
-- apply 和 rollback 都写 audit。
-- 产品 runtime 的 audit 同步到外部审计系统。
-- ProductIntent 由人类或受控配置流程更新。
+- Non-minor changes go through approval.
+- Both apply and rollback write an audit entry.
+- The product runtime's audit is synced to an external audit system.
+- ProductIntent is updated by humans or through a controlled configuration process.
 
 ## HTTP API
 
-当前内置 HTTP server 适合本地和内网调试。生产建议：
+The built-in HTTP server is suitable for local and intranet debugging. For production:
 
-- 加反向代理认证。
-- 限制 `/api/product/*` 的写接口。
-- 对 `POST /api/chat`、`POST /api/tasks` 做速率限制。
-- 不把 state 和 memory 暴露给公网。
+- Add reverse-proxy authentication.
+- Restrict the write endpoints under `/api/product/*`.
+- Apply rate limiting to `POST /api/chat` and `POST /api/tasks`.
+- Do not expose state and memory to the public internet.
 
-## 状态文件
+## State Files
 
-state 和 SQLite 可能包含：
+state and SQLite may contain:
 
-- 自我叙事。
-- 业务上下文。
-- 人类反馈。
-- 产品变更审计。
+- Self-narrative.
+- Business context.
+- Human feedback.
+- Product change audit records.
 
-建议权限：
+Recommended permissions:
 
 ```bash
 chmod 700 /var/lib/ghw
 chmod 600 /var/lib/ghw/state.json
 ```
 
-## 下一阶段安全工作
+## Upcoming Security Work
 
-- ProductIntent 签名校验。
-- Audit hash chain。
-- 角色权限模型。
-- ProductAdapter 幂等和回滚校验。
-- 多租户数据隔离。
+- ProductIntent signature verification.
+- Audit hash chain.
+- Role-based permission model.
+- ProductAdapter idempotency and rollback verification.
+- Multi-tenant data isolation.

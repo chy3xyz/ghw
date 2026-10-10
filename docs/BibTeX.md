@@ -1,6 +1,6 @@
-# IEEE Transactions on Artificial Intelligence 可直接提交 LaTeX 模板
-**对应论文**：后AI时代的存在论革命：GHW数字生命范式与碳硅共生文明  
-**格式完全符合** IEEE 2026 年最新期刊投稿规范，支持 PDFLaTeX/XeLaTeX 直接编译，包含所有必要宏包、定理环境、参考文献格式与双栏排版。
+# IEEE Transactions on Artificial Intelligence: Directly Submittable LaTeX Template
+**Corresponding paper**: Ontological Revolution in the Post-AI Era: The GHW Digital Life Paradigm and Carbon-Silicon Symbiotic Civilization  
+**Fully compliant with** the IEEE's latest 2026 journal submission guidelines; compiles directly with PDFLaTeX/XeLaTeX and includes all required packages, theorem environments, bibliography formatting, and two-column typesetting.
 
 ```latex
 % !TeX program = pdflatex
@@ -486,12 +486,12 @@ The Minimum Viable GHW system code proposed in this paper is open-sourced at:
 
 ---
 
-## 使用说明与提交注意事项
-1. **编译方式**：使用 PDFLaTeX 或 XeLaTeX 连续编译 3 次（确保参考文献和交叉引用正确生成）
-2. **作者信息**：替换 `\author{}` 块中的姓名、单位和邮箱，多作者按 IEEE 格式添加 `\and` 分隔
-3. **基金项目**：如有基金支持，在 `\IEEEpubid{}` 后添加 `\thanks{This work was supported by ...}`
-4. **图表插入**：使用 `\begin{figure}[!t]` 环境插入图片，IEEE 要求图表标题在图下方、表上方
-5. **参考文献**：如需使用 BibTeX，将 `thebibliography` 替换为 `\bibliographystyle{IEEEtran}\bibliography{references}` 并创建 `references.bib` 文件
-6. **格式检查**：提交前使用 IEEE PDF eXpress 工具检查格式合规性，确保无字体嵌入、边距、页码等问题
+## Usage Instructions and Submission Notes
+1. **Compilation**: Compile with PDFLaTeX or XeLaTeX three times in succession (to ensure that references and cross-references are generated correctly)
+2. **Author information**: Replace the names, affiliations, and email addresses in the `\author{}` block; for multiple authors, add `\and` separators in IEEE format
+3. **Funding**: If the work is supported by a grant, add `\thanks{This work was supported by ...}` after `\IEEEpubid{}`
+4. **Figures and tables**: Insert images using the `\begin{figure}[!t]` environment; IEEE requires figure captions below figures and table captions above tables
+5. **References**: To use BibTeX, replace `thebibliography` with `\bibliographystyle{IEEEtran}\bibliography{references}` and create a `references.bib` file
+6. **Format check**: Before submission, use the IEEE PDF eXpress tool to check format compliance, ensuring there are no font-embedding, margin, or page-numbering issues
 
-需要我帮你把之前的**实验结果模拟数据**转换成 IEEE 标准三线表格式，并插入到论文的实验验证部分吗？
+Would you like me to convert the previously generated **simulated experimental-results data** into the IEEE standard three-line table format and insert it into the experimental validation section of the paper?

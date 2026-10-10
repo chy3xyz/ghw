@@ -46,12 +46,12 @@ pub fn build(b: *std.Build) void {
     // 0.17 addTest 不会自动扫子 module 顶层 test 块. 必须显式给每个 module 加 addTest.
     // 实测: 之前 140 total 锁死, 加 11 个 test 没变化. 修法: 给所有含 test 的 module 显式 addTest.
     // 限制: 只跑不跨目录 @import 的 module (只用 std), 跨目录的走 ghw.zig root (触发整链).
-    // 不跨目录的: util/math.zig, sandbox/sqlite_db.zig, harness/ghw_link.zig, harness/config_loader.zig, harness/loop_engine.zig
-    // 跨目录的 (只在 ghw.zig root 跑): agent/core.zig, world/core.zig, goal/core.zig, harness/self_encoder.zig
+    // 不跨目录的: util/math.zig, sandbox/sqlite_db.zig, harness/config_loader.zig, harness/loop_engine.zig
+    // 跨目录的 (只在 ghw.zig root 跑): agent/core.zig, world/core.zig, goal/core.zig, harness/self_encoder.zig,
+    //   harness/ghw_link.zig (2026-10 起经 util/net_read.zig 跨目录)
     const test_files_independent = [_][]const u8{
         "src/ghw.zig", // root, 触发整链 (含跨目录的)
         "src/harness/loop_engine.zig",
-        "src/harness/ghw_link.zig",
         "src/harness/config_loader.zig",
         "src/harness/product_instance.zig",
         "src/harness/co_evolution.zig",

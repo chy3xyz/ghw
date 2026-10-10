@@ -5509,7 +5509,7 @@ fn readHttpRequest(alloc: Allocator, stream: *std.Io.net.Stream, io: std.Io) !Ht
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = try stream.read(io, @constCast(&[_][]u8{buf[total..]}));
+        const n = try ghw.util.net_read.readChunk(stream, io, @constCast(&[_][]u8{buf[total..]}));
         if (n == 0) break;
         total += n;
         // 找 header 结束

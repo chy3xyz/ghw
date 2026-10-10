@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/chy3xyz/ghw/discussions
+    about: Usage questions, ideas, show-and-tell — preferred over issues for open-ended topics
+  - name: Security issue
+    url: https://github.com/chy3xyz/ghw/security/policy
+    about: Report vulnerabilities privately — do NOT open a public issue

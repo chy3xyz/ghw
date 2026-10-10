@@ -130,7 +130,7 @@ Boris 6 组件 GHW 全部落地: 调度 / 隔离工作区 / 外置记忆 (`loop_
 ### 前置要求
 
 - macOS 14+ 或 Linux
-- Zig 0.17.0-dev.704+ ([下载](https://ziglang.org/download/))
+- Zig 0.17.0 正式版（亦兼容 `0.17.0-dev.2151+`，最低 `0.17.0-dev.704`）([下载](https://ziglang.org/download/))
 - (可选) Docker (multi-GHW 部署)
 - (可选) 1 个 LLM API key (DeepSeek / Anthropic / OpenAI)
 

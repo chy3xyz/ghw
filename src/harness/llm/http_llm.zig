@@ -32,6 +32,7 @@ const ChatRequest = llm_mod.ChatRequest;
 const ChatResponse = llm_mod.ChatResponse;
 const LLMRequest = llm_mod.LLMRequest;
 const LLMResponse = llm_mod.LLMResponse;
+const net_read = @import("../../util/net_read.zig");
 
 pub const ProviderKind = enum {
     anthropic,
@@ -531,7 +532,7 @@ const MockServerCtx = struct {
                 }
             }
             if (header_end > 0 and ctx.received_len >= header_end + content_len) break;
-            const n = try stream.read(ctx.io, @constCast(&[_][]u8{ctx.received[ctx.received_len..]}));
+            const n = try net_read.readChunk(&stream, ctx.io, @constCast(&[_][]u8{ctx.received[ctx.received_len..]}));
             if (n == 0) break;
             ctx.received_len += n;
         }

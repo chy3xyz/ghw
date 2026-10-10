@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const F = @import("../util/math.zig").F;
+const net_read = @import("../util/net_read.zig");
 
 /// 弃权概率 ≥ 此值 ⇒ gate=.abstain (等待下一采样)
 pub const ABSTAIN_EPS: F = 0.30;
@@ -241,7 +242,7 @@ const MockServerCtx = struct {
                 }
             }
             if (header_end > 0 and total >= header_end + content_len) break;
-            const n = try stream.read(ctx.io, @constCast(&[_][]u8{buf[total..]}));
+            const n = try net_read.readChunk(&stream, ctx.io, @constCast(&[_][]u8{buf[total..]}));
             if (n == 0) break;
             total += n;
         }

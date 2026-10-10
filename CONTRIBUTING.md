@@ -4,10 +4,10 @@
 
 ## Project overview
 
-GHW (Goal-Harness-World) is a digital life paradigm implemented in **Zig 0.17 dev** with **zero external dependencies** (besides Zig stdlib + optional `wasmtime` / `sqlite3` for the sandbox). The codebase aims to be:
+GHW (Goal-Harness-World) is a digital life paradigm implemented in **Zig 0.17.0** with **zero external dependencies** (besides Zig stdlib + optional `wasmtime` / `sqlite3` for the sandbox). The codebase aims to be:
 
 - **Readable** — the E formula (`E = α·M + β·R + γ·N − μ·Var + ν·min + σ·S + λ·D`) is documented in 5 places; the 9-palace state machine is one switch.
-- **Tested** — `zig build test` runs 150+ tests with 100% pass.
+- **Tested** — `zig build test` runs 396 tests with 100% pass.
 - **Reproducible** — `zig build` produces a 5.9 MB statically-linked `daemon` binary that runs forever.
 - **Educational** — every module has a top-of-file comment explaining the WHY before the WHAT.
 
@@ -114,4 +114,4 @@ Open a GitHub Discussion (preferred) or file an issue with the `question` label.
 
 ---
 
-> Maintained by [Knot3 Labs](https://github.com/Knot3-Labs) and the open-source community. GHW is independent research, not affiliated with any LLM vendor.
+> Maintained by [Knot3 Labs](https://github.com/chy3xyz/ghw) and the open-source community. GHW is independent research, not affiliated with any LLM vendor.

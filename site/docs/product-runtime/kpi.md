@@ -1,34 +1,34 @@
-# KPI 与存在度 E
+# KPI and Existence Degree E
 
-产品可用级 GHW 必须能从真实产品获得存在度。KPI 是产品场景进入 E 的主要通道。
+A production-grade GHW must be able to derive its existence degree from the real product. KPI is the main channel through which product scenarios enter E.
 
-## ρ·K 项
+## The ρ·K Term
 
-GHW 的产品对齐项记为 `ρ·K`：
+GHW's product alignment term is denoted `ρ·K`:
 
-- `K` 是产品 KPI composite，范围 `[0, 1]`。
-- `ρ` 是不可由 LLM 自调的公理常量。
-- `ProductIntent.value_weights` 决定不同 KPI 轴的权重。
+- `K` is the product KPI composite, in the range `[0, 1]`.
+- `ρ` is an axiomatic constant that the LLM cannot tune by itself.
+- `ProductIntent.value_weights` determines the weight of each KPI axis.
 
-这意味着：产品变好会提高数字生命的存在度，产品变差会让它感到“存在度下降”，从而触发目标、任务或规则提议。
+This means: when the product improves, the digital life's existence degree rises; when it worsens, the digital life "feels" the existence degree dropping, which triggers goal, task, or rule proposals.
 
-## CRM 默认 KPI
+## CRM Default KPIs
 
-CRM 示例使用四个输入：
+The CRM example uses four inputs:
 
-| 字段 | 含义 | 趋势 |
+| Field | Meaning | Trend |
 | --- | --- | --- |
-| `nrr_quarterly` | 净收入留存 | 越高越好 |
-| `deal_win_rate` | 成交率 | 越高越好 |
-| `sales_cycle_days_p50` | 销售周期中位数 | 越低越好 |
-| `weekly_active_sales_pct` | 周活跃销售占比 | 越高越好 |
+| `nrr_quarterly` | Net revenue retention | Higher is better |
+| `deal_win_rate` | Deal win rate | Higher is better |
+| `sales_cycle_days_p50` | Median sales cycle | Lower is better |
+| `weekly_active_sales_pct` | Weekly active sales percentage | Higher is better |
 
-可选输入：
+Optional inputs:
 
-- `csat`：客户满意度，`NaN` 表示无来源。
-- `incident_rate`：事故率，`NaN` 表示无来源。
+- `csat`: customer satisfaction; `NaN` means no source.
+- `incident_rate`: incident rate; `NaN` means no source.
 
-## SDK 喂入
+## Feeding via SDK
 
 ```c
 int updated = ghw_product_kpi_feed(
@@ -43,16 +43,16 @@ int updated = ghw_product_kpi_feed(
 );
 ```
 
-返回值：
+Return value:
 
-- `1`：本次写入 E，并生成 `kpi_refreshed` audit。
-- `0`：被 refresh interval 限频，没有写 E。
-- `-1`：未配置 runtime 或输入失败。
+- `1`: E was written this time, and a `kpi_refreshed` audit was generated.
+- `0`: throttled by the refresh interval; E was not written.
+- `-1`: runtime not configured or input failure.
 
-## HTTP/API 场景
+## HTTP/API Scenarios
 
-`ui_server` 目前提供产品 runtime 审计查询和变更操作。KPI 喂入仍优先走 SDK 或宿主进程内调用；后续可补 `POST /api/product/kpi` 作为外部数据管道入口。
+`ui_server` currently provides product runtime audit queries and change operations. KPI feeding should still go through the SDK or in-process host calls first; a `POST /api/product/kpi` can be added later as an entry point for external data pipelines.
 
-## 防抖原则
+## Debounce Principle
 
-KPI 不应按 cycle 高频写入 E。`KpiBridge` 会根据 ProductIntent rhythm 限频，避免数字生命追逐短期噪声。
+KPI should not be written into E at high frequency on every cycle. `KpiBridge` throttles writes according to the ProductIntent rhythm, so the digital life does not chase short-term noise.

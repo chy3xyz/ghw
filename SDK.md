@@ -1,6 +1,6 @@
 # GHW SDK (Phase 3)
 
-让任何 C/C++/Rust/Go 产品把 GHW 当数字生命内核用.
+Lets any C/C++/Rust/Go product use GHW as a digital life kernel.
 
 > **Looking for general docs?** See [`README.md`](README.md) (overview),
 > [`ARCHITECTURE.md`](ARCHITECTURE.md) (4-layer + L1–L5 + 9-palace),
@@ -11,13 +11,13 @@
 > The HTTP API (15+ endpoints exposed by `ui_server`) is documented in
 > [`ARCHITECTURE.md#http-api`](ARCHITECTURE.md#http-api).
 
-## 装 SDK
+## Install the SDK
 
 ```bash
-zig build install-sdk          # 生成 zig-out/include/ghw.h + zig-out/lib/libghw.a
+zig build install-sdk          # generates zig-out/include/ghw.h + zig-out/lib/libghw.a
 ```
 
-## C 客户端用法 (v0.3 完整 pipeline)
+## C client usage (v0.3 full pipeline)
 
 ```c
 #include "ghw.h"
@@ -25,32 +25,32 @@ zig build install-sdk          # 生成 zig-out/include/ghw.h + zig-out/lib/libg
 int main() {
     GhW* g = ghw_init("my-agent", 42);
 
-    // 1. 配 LLM (用 env var 拿 key, 源码零密钥)
+    // 1. Configure the LLM (read the key from an env var; zero keys in source)
     ghw_setup_llm(g, "deepseek", "DEEPSEEK_API_KEY", "deepseek-chat");
 
-    // 2. 开 sqlite 记忆 + ActionRunner
+    // 2. Open sqlite memory + ActionRunner
     ghw_open_memory(g, "/tmp/my-agent.db");
 
-    // 3. 设世界 (C 客户端自己格式化)
+    // 3. Set the world (the C client formats it itself)
     ghw_world_set(g, "top_procs: claude 12%, node 8%\n...");
 
-    // 4. 跑 cycle (会触发 LLM 提议 + 自动行动)
+    // 4. Run cycles (triggers LLM proposals + automatic actions)
     for (int i = 0; i < 5; i++) {
         char* report = ghw_step(g, "{}");
         printf("%s\n", report);
         ghw_free_string(report);
     }
 
-    // 5. LLM 提议 + 行动 + 反思 (可分步调)
-    int n = ghw_propose(g);          // LLM 提议 N 个 goals
-    char* ar = ghw_action_run(g);   // 跑 1 个 action (WASM/Claude/peer)
-    ghw_reflect(g);                  // LLM 写 self_narrative
+    // 5. LLM proposal + action + reflection (can be stepped individually)
+    int n = ghw_propose(g);          // LLM proposes N goals
+    char* ar = ghw_action_run(g);   // run 1 action (WASM/Claude/peer)
+    ghw_reflect(g);                  // LLM writes self_narrative
 
     ghw_deinit(g);
 }
 ```
 
-## 编译 (用户视角)
+## Compiling (from the user's perspective)
 
 ```bash
 cc -O2 -I zig-out/include -L zig-out/lib -L /opt/homebrew/Cellar/sqlite/3.49.2/lib \
@@ -58,37 +58,38 @@ cc -O2 -I zig-out/include -L zig-out/lib -L /opt/homebrew/Cellar/sqlite/3.49.2/l
 ./my_app
 ```
 
-> 注: libghw.a 已 bundle libsqlite3 (静态链接), 用户 link 时也加 `-lsqlite3` 是为了满足
-> libsqlite3 自带的 dynamic fallback. 实际产物是 0 运行时依赖.
+> Note: libghw.a already bundles libsqlite3 (statically linked); the reason users
+> also add `-lsqlite3` when linking is to satisfy libsqlite3's own dynamic fallback.
+> The actual artifact has 0 runtime dependencies.
 
-## C ABI 接口 (v0.3 — 15 个 func)
+## C ABI interface (v0.3 — 15 functions)
 
-| 分类 | 函数 | 作用 |
+| Category | Function | Purpose |
 |------|------|------|
-| Lifecycle | `ghw_init(agent_id, seed)` / `ghw_deinit(g)` | 创建/释放 |
-| Core | `ghw_step(g, world_json)` / `ghw_get_state(g)` | 跑 cycle / 取 state |
-| Accessor | `ghw_get_tick` / `ghw_get_E` / `ghw_version` | 廉价查询 |
-| Memory | `ghw_free_string(s)` / `ghw_increment_self_evolved(g)` | 释放 / 外部行动钩子 |
-| LLM | `ghw_setup_llm(g, provider, api_key_env, model)` | 配 LLM, key 走 env var |
-| Memory | `ghw_open_memory(g, path)` | 开 sqlite + ActionRunner |
-| Action | `ghw_action_run(g)` | 跑 1 个 top unadopted goal |
-| Link | `ghw_link_listen` / `ghw_link_query` / `ghw_link_stop` | 多 GHW 互联 (Phase 1) |
-| World | `ghw_world_set(g, world_text)` | 设世界描述 |
-| Propose | `ghw_propose(g)` | LLM 提议 goals (返 # 提议) |
-| Reflect | `ghw_reflect(g)` | LLM 写 self_narrative |
+| Lifecycle | `ghw_init(agent_id, seed)` / `ghw_deinit(g)` | Create / release |
+| Core | `ghw_step(g, world_json)` / `ghw_get_state(g)` | Run a cycle / get state |
+| Accessor | `ghw_get_tick` / `ghw_get_E` / `ghw_version` | Cheap queries |
+| Memory | `ghw_free_string(s)` / `ghw_increment_self_evolved(g)` | Free / external action hook |
+| LLM | `ghw_setup_llm(g, provider, api_key_env, model)` | Configure LLM; key comes from an env var |
+| Memory | `ghw_open_memory(g, path)` | Open sqlite + ActionRunner |
+| Action | `ghw_action_run(g)` | Run 1 top unadopted goal |
+| Link | `ghw_link_listen` / `ghw_link_query` / `ghw_link_stop` | Multi-GHW interconnection (Phase 1) |
+| World | `ghw_world_set(g, world_text)` | Set the world description |
+| Propose | `ghw_propose(g)` | LLM proposes goals (returns # proposed) |
+| Reflect | `ghw_reflect(g)` | LLM writes self_narrative |
 
-## 设计原则
+## Design principles
 
-- **Opaque pointer** (`struct GhW`) — 内部实现自由演进, ABI 稳定
-- **JSON 优先** — world/cycle report 走 JSON, 跨语言零摩擦
-- **错误返回 -1** (类似 POSIX), 不抛异常
-- **字符串所有权清晰** — ghw_* 返回的 caller 用 ghw_free_string 释放
-- **零硬编码密钥** — `ghw_setup_llm(provider, api_key_env, model)` 全走 env
-- **零运行时依赖** — libghw.a bundle libsqlite3 静态链接, 用户无运行时库要求
+- **Opaque pointer** (`struct GhW`) — the internal implementation can evolve freely; the ABI stays stable
+- **JSON-first** — world/cycle reports go through JSON; zero friction across languages
+- **Errors return -1** (POSIX-style); no exceptions thrown
+- **Clear string ownership** — the caller frees strings returned by ghw_* with ghw_free_string
+- **Zero hard-coded keys** — `ghw_setup_llm(provider, api_key_env, model)` goes entirely through env vars
+- **Zero runtime dependencies** — libghw.a bundles libsqlite3 via static linking; users have no runtime library requirements
 
-## 端到端 demo
+## End-to-end demo
 
-`examples/embed_demo_v3.c` — 130 行 C, 跑 5 cycle + LLM propose + action + reflect.
+`examples/embed_demo_v3.c` — 130 lines of C; runs 5 cycles + LLM propose + action + reflect.
 
 ```bash
 cc -O2 -I zig-out/include -L zig-out/lib -L /opt/homebrew/Cellar/sqlite/3.49.2/lib \
@@ -108,21 +109,21 @@ DEEPSEEK_API_KEY=sk-xxx ./embed_demo_v3
 # [9] Final: E=0.502, self_evolved_total=6
 ```
 
-无 LLM 也跑得通 (no-LLM 模式, propose/reflect 返 0/无变化).
+Works without an LLM too (no-LLM mode: propose/reflect return 0 / no-op).
 
-## 当前限制 (v0.3)
+## Current limitations (v0.3)
 
-- ghw_reflect 只更新 self_narrative, beliefs 数组解析留 v0.4
-- ghw_link_listen 启动后 handler 是默认 (query_state), 自定义 callback API 留 v0.5
-- LLM 错误信息不暴露 C ABI (Zig log 走 stderr)
+- ghw_reflect only updates self_narrative; parsing the beliefs array is left to v0.4
+- after ghw_link_listen starts, the handler is the default (query_state); a custom callback API is left to v0.5
+- LLM error messages are not exposed via the C ABI (Zig logs go to stderr)
 
-## 路线图 (GHW 三阶段)
+## Roadmap (GHW's three phases)
 
-- ✅ **Phase 1**: 多 GHW 互联协议 (JSONL over Unix socket, 5 method)
-- ✅ **Phase 2**: Claude Code 桥 (ActionRunner `claude_code` preset)
+- ✅ **Phase 1**: multi-GHW interconnection protocol (JSONL over Unix socket, 5 methods)
+- ✅ **Phase 2**: Claude Code bridge (ActionRunner `claude_code` preset)
 - ✅ **Phase 3**: GHW-as-kernel SDK (C ABI, libghw.a + ghw.h, 15 func)
   - ✅ v0.1: 8 func (init/step/state)
   - ✅ v0.2: +5 func (LLM/memory/action/link)
   - ✅ v0.3: +3 func (world/propose/reflect)
 
-详见 `readme.md` §16.
+See `readme.md` §16 for details.

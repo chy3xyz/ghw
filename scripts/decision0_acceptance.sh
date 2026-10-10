@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-ZIG="${ZIG:-$HOME/.local/share/zigup/0.17.0-dev.2151+2ec5523d5/files/zig}"
+ZIG="${ZIG:-zig}"
 [ -x "$ZIG" ] || ZIG="zig"
 
 ZJEV_SERVE="$ROOT/../zjev/zig-out/bin/zjev-serve"

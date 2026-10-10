@@ -1,8 +1,8 @@
-# 变更、审批与审计
+# Change, Approval, and Audit
 
-产品运行时的核心是把“想改产品”变成一条可治理的状态机。
+The core of the product runtime is turning "I want to change the product" into a governable state machine.
 
-## 状态机
+## State Machine
 
 ```text
 proposed / pending_consent
@@ -14,14 +14,14 @@ pending_consent
   -> denied
 ```
 
-minor 变更可以直接进入 `approved`，非 minor 变更默认进入 `pending_consent`。
+Minor changes can go directly to `approved`; non-minor changes enter `pending_consent` by default.
 
-## 提案字段
+## Proposal Fields
 
-`ChangeProposal` 保存：
+`ChangeProposal` stores:
 
 - `tenant_id`
-- `kind`：`config`、`workflow`、`feature_flag`、`code_patch`、`experiment`
+- `kind`: `config`, `workflow`, `feature_flag`, `code_patch`, `experiment`
 - `target`
 - `summary`
 - `rationale`
@@ -32,48 +32,48 @@ minor 变更可以直接进入 `approved`，非 minor 变更默认进入 `pendin
 - `risk`
 - `status`
 - `created_at`
-- 审批人和审批备注
+- approver and approval note
 
-## HTTP 操作
+## HTTP Operations
 
-提交 CRM 样板提案：
+Submit the CRM sample proposal:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/product/propose-crm-followup \
   -d 'tenant_id=acme&affected_users=30&expected_delta_k=0.04'
 ```
 
-审批：
+Approval:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/product/approve \
   -d 'change_id=1&approver=sales_manager&note=approved'
 ```
 
-应用：
+Apply:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/product/apply \
   -d 'change_id=1'
 ```
 
-回滚：
+Rollback:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/api/product/rollback \
   -d 'change_id=1'
 ```
 
-查询：
+Query:
 
 ```bash
 curl http://127.0.0.1:8765/api/product/runtime
 curl http://127.0.0.1:8765/api/product/audit
 ```
 
-## 审计事件
+## Audit Events
 
-审计日志包括：
+The audit log includes:
 
 - `kpi_refreshed`
 - `change_proposed`
@@ -81,11 +81,11 @@ curl http://127.0.0.1:8765/api/product/audit
 - `change_applied`
 - `change_rolled_back`
 
-每条记录包含时间、tenant、change id 和 detail。
+Each record contains the timestamp, tenant, change id, and detail.
 
-## 当前边界
+## Current Boundaries
 
-`applyApproved` 当前只改变 GHW 内部状态并写 audit。生产中必须接入 ProductAdapter：
+`applyApproved` currently only changes GHW internal state and writes an audit entry. In production a ProductAdapter must be wired in:
 
 ```text
 ChangeProposal
@@ -95,4 +95,4 @@ ChangeProposal
   -> Audit
 ```
 
-这能防止“审计说已应用，但宿主产品没有真的变化”的错位。
+This prevents the mismatch where "the audit says applied, but the host product did not actually change."

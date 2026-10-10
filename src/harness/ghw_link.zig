@@ -23,6 +23,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const net_read = @import("../util/net_read.zig");
 
 /// 协议版本 (不兼容时 bump)
 pub const PROTOCOL_VERSION = "ghw-link/0.1";
@@ -113,7 +114,7 @@ pub const Link = struct {
         var buf: [65536]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = stream.read(self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
+            const n = net_read.readChunk(stream, self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
@@ -168,7 +169,7 @@ pub const Link = struct {
         var buf: [65536]u8 = undefined;
         var total: usize = 0;
         while (total < buf.len) {
-            const n = stream.read(self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
+            const n = net_read.readChunk(&stream, self.io, @constCast(&[_][]u8{buf[total..]})) catch |err| {
                 if (err == error.EndOfStream) break;
                 return err;
             };
