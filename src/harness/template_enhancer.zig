@@ -218,7 +218,10 @@ pub const TemplateEnhancer = struct {
         var latest_name: ?[]u8 = null;
         var latest_tick: i64 = -1;
         while (std.c.readdir(dir_ptr)) |raw| {
-            const name_slice = raw.name[0..raw.namlen];
+            // d_name 在两个平台都是 NUL 结尾; Linux dirent 没有 d_namlen
+            // 字段 (BSD/Darwin 才有), 统一走 strlen。
+            const name_z: [*:0]const u8 = @ptrCast(&raw.name);
+            const name_slice = std.mem.span(name_z);
             // 必须以 l3_/l4_/l5_ 开头, .zig 结尾
             if (!std.mem.endsWith(u8, name_slice, ".zig")) continue;
             const is_target = std.mem.startsWith(u8, name_slice, "l3_") or

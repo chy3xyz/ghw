@@ -6546,7 +6546,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (std.c.opendir(dz.ptr)) |dir_ptr| {
                 defer _ = std.c.closedir(dir_ptr);
                 while (std.c.readdir(dir_ptr)) |raw_entry| {
-                    const name_slice = raw_entry.name[0..raw_entry.namlen];
+                    // d_name 在两个平台都是 NUL 结尾; Linux dirent 没有 d_namlen
+                    // 字段 (BSD/Darwin 才有), 统一走 strlen。
+                    const name_z: [*:0]const u8 = @ptrCast(&raw_entry.name);
+                    const name_slice = std.mem.span(name_z);
                     if (std.mem.startsWith(u8, name_slice, "l3_") and std.mem.endsWith(u8, name_slice, ".zig")) {
                         l3_count_disk += 1;
                     } else if (std.mem.startsWith(u8, name_slice, "l4_") and std.mem.endsWith(u8, name_slice, ".zig")) {
