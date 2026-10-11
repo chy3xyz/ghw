@@ -89,7 +89,9 @@ test "net_read: readChunk 本地 TCP 往返" {
     for (0..100) |_| {
         stream = address.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
             error.ConnectionRefused => {
-                std.Thread.sleep(20 * std.time.ns_per_ms);
+                // 0.17 std.Thread.sleep 没了, 用 nanosleep (仓库既有写法)
+                const req = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&req, null);
                 continue;
             },
             else => return err,
