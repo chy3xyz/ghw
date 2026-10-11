@@ -84,13 +84,25 @@ test "net_read: readChunk 本地 TCP 往返" {
     const thread = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
 
     const address = try std.Io.net.IpAddress.parse("127.0.0.1", port.?);
-    var stream = try address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
+    // server 线程可能还没走到 listen (慢核/CI 上必现竞态): 连接重试而非直接失败
+    var stream: ?std.Io.net.Stream = null;
+    for (0..100) |_| {
+        stream = address.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+            error.ConnectionRefused => {
+                std.Thread.sleep(20 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        break;
+    }
+    var conn = stream orelse return error.ConnectionRefused;
+    defer conn.close(io);
 
     var buf: [64]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = try readChunk(&stream, io, @constCast(&[_][]u8{buf[total..]}));
+        const n = try readChunk(&conn, io, @constCast(&[_][]u8{buf[total..]}));
         if (n == 0) break;
         total += n;
         if (std.mem.indexOfScalar(u8, buf[0..total], '\n') != null) break;
