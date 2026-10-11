@@ -56,6 +56,7 @@ cimport_test.o
 
 # Research papers / draft notes / dev-only docs (not shipped in v0.5.1)
 /dev/
+/paper/
 /docs/GHW数字生命范式/
 /docs/implementation_audit.md
 /docs/l6_paper.md

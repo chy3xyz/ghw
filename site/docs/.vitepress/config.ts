@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  base: '/ghw/', // GitHub Pages project site (chy3xyz.github.io/ghw/)
   lang: 'en-US',
   title: 'GHW',
   description: 'Goal-Harness-World digital life framework and product runtime',
