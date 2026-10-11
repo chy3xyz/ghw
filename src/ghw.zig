@@ -162,6 +162,7 @@ comptime {
     _ = harness.existence_phase;
     _ = harness.state_contract;
     _ = harness.evolution_acceptance;
+    _ = harness.self_evolution_bench;
     _ = harness.task_executor;
     _ = harness.crm_kpi;
     _ = harness.product_intent;

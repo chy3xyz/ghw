@@ -2,6 +2,7 @@
 
 pub const core = @import("core.zig");
 pub const self_evolution = @import("self_evolution_guard.zig");
+pub const self_evolution_bench = @import("self_evolution_bench.zig");
 pub const self_evolver = @import("self_evolver.zig");
 pub const self_encoder = @import("self_encoder.zig");
 pub const rule_proposer = @import("rule_proposer.zig");

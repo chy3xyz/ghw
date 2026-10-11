@@ -105,7 +105,7 @@ thing that proposes). The result is:
 | Multi-GHW peer protocol (JSONL over Unix socket) | ✅ | `src/harness/gsp_*.zig` |
 | C ABI SDK v0.3 (15 functions, libghw.a + ghw.h) | ✅ | `SDK.md` |
 | HTMX + Alpine.js UI (8 tabs: state / capabilities / L1–L5 trend / ...) | ✅ | `ui/index.html`, `ui/app.js` |
-| **396/396 unit tests pass** | ✅ | `zig build test` |
+| **400/400 unit tests pass** | ✅ | `zig build test` |
 | Long-running daemon (13h+ tested, RSS 4.5 MB) | ✅ | `examples/daemon.zig` |
 | AutoCLI 4 sources (Wikipedia / HN / ArXiv / RSS) | ✅ | `src/harness/autocli.zig` |
 | launchd / systemd deployment | ✅ | `install.sh` |
@@ -114,6 +114,7 @@ thing that proposes). The result is:
 | Prometheus /metrics endpoint (25+ series) | ✅ | `examples/ui_server.zig` |
 | Cross-host TCP + HMAC multi-GHW link | ✅ | `src/harness/ghw_link_tcp.zig` |
 | Loop Engineering (Boris Cherny 6 components) | ✅ | `src/harness/loop_engine.zig` |
+| Reproducible self-evolution benchmark (A/B, deterministic) | ✅ | `src/harness/self_evolution_bench.zig` |
 
 ## Quick start
 
@@ -130,7 +131,7 @@ thing that proposes). The result is:
 git clone https://github.com/chy3xyz/ghw.git
 cd ghw
 zig build                              # builds libghw.a + all examples
-zig build test                         # runs 396/396 unit tests
+zig build test                         # runs 400/400 unit tests
 ```
 
 ### Run the daemon (long-running)
@@ -296,6 +297,7 @@ Highlights:
 - [`readme.zh-CN.md`](readme.zh-CN.md) — Chinese translation of this README
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — GHW Link protocol spec (5 methods, JSONL)
 - [`docs/CROSS_HOST.md`](docs/CROSS_HOST.md) — Cross-host TCP+HMAC protocol spec
+- [`docs/BENCHMARK.md`](docs/BENCHMARK.md) — reproducible A/B benchmark: self-evolution raises E
 - [`AGENTS.md`](AGENTS.md) — for AI agents working on this codebase
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute
 - [`CHANGELOG.md`](CHANGELOG.md) — version history
@@ -323,7 +325,7 @@ contribute:
 
 1. Read [`AGENTS.md`](AGENTS.md) for the AI agent guidelines.
 2. Read [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) to understand known issues.
-3. Run `zig build test` before submitting — must be green (396/396).
+3. Run `zig build test` before submitting — must be green (400/400).
 4. Don't change the E formula or the SelfEvolutionGuard 17-blacklist. The
    digital life's existence formula is invariant.
 

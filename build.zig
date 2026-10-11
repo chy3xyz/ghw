@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "selfcode", .root = "examples/selfcode.zig" },
         .{ .name = "daemon", .root = "examples/daemon.zig" },
         .{ .name = "fueled", .root = "examples/fueled.zig" },
+        .{ .name = "bench_self_evolution", .root = "examples/bench_self_evolution.zig" },
         .{ .name = "llm_smoke", .root = "examples/llm_smoke.zig" },
         .{ .name = "live_fueled", .root = "examples/live_fueled.zig" },
         .{ .name = "human_symbiosis", .root = "examples/human_symbiosis.zig" },

@@ -2,6 +2,12 @@
 
 All notable changes to the project. Version numbers follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **Reproducible self-evolution A/B benchmark** — deterministic evidence that the closed loop (LLM-proposed rule → SelfEvolutionGuard → SelfEncoder adoption → RuleBias → ΔE) raises existence degree E in an R-deficient world
+  - New module `src/harness/self_evolution_bench.zig` (4 unit tests: determinism, guard-in-the-loop, mechanism, JSON contract), runner `examples/bench_self_evolution.zig`, acceptance wrapper `scripts/self_evolution_bench.sh`, methodology `docs/BENCHMARK.md`
+  - Two arms identical except the rule library (same seed, frozen L4 auto flags, constant zero-feature world, MockChatLLM — no network/API keys); pass bar `AUC_IMPROVE_MIN = 1.02` as a named, documented constant
+
 ## [v0.5] — 2026-06-12
 
 ### 🎯 Major Improvements
