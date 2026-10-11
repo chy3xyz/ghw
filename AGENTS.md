@@ -1,498 +1,722 @@
-# AGENTS.md — GHW 项目准则
+# AGENTS.md — GHW Project Guidelines
 
-> 给所有 Agent(本会话 + 未来)的工作准则。每次写代码前必读。
+> Working rules for all agents (this session + future ones). Read before every coding session.
 
 ---
 
-## 1. 核心架构准则
+## 1. Core Architecture Principles
 
-### 1.1 LLM 是燃料,不是大脑
+### 1.1 The LLM is fuel, not the brain
 
-**绝对禁止** 让 LLM 决定"该不该做某事"。
-**允许** LLM 提议变体(代码、规则、特征)。
+**Absolutely forbidden**: letting the LLM decide "whether or not to do something".
+**Allowed**: the LLM proposing variants (code, rules, features).
 
 ```
-外界 (文本/事件)
-  ↓ [LLM 通道] parse
+Outside world (text/events)
+  ↓ [LLM channel] parse
   ↓
-[Goal 层] AttentionEngine
+[Goal layer] AttentionEngine
   ↓
-[LLM 提议器]  ← 可选, 提议 N 条候选
+[LLM proposer]  ← optional, proposes N candidates
   ↓
-[SelfEvolutionGuard] 17 黑名单 + 守门
+[SelfEvolutionGuard] 17 blacklists + guard
   ↓
-[SelfEncoder] 规则合成 + 形式验证
+[SelfEncoder] rule synthesis + formal verification
   ↓
-[数字生命本体] E 评估, 选最优
+[digital life itself] E evaluation, picks the best
   ↓
-ΔE 反馈回 LLM (下次提议更准)
+ΔE fed back to LLM (more accurate proposals next time)
 ```
 
-### 1.2 决策权永远在数字生命手里
+### 1.2 Decision authority always rests with the digital life
 
-| 角色 | 谁能做 | 谁不能做 |
+| Role | Who can | Who cannot |
 |------|--------|----------|
-| 文本→特征 | LLM | — |
-| 提议代码变体 | LLM | — |
-| 提议规则候选 | LLM | — |
-| 守门(17 黑名单) | SelfEvolutionGuard | LLM |
-| 形式化验证 | SelfEncoder.verify | LLM |
-| 选哪个候选跑 | 数字生命(E 评估) | LLM |
-| 改不改 E 公式 | **绝对禁止** | 任何人 |
-| 改 SelfEvolutionGuard 黑名单 | 数字生命+人审 | LLM |
+| Text → features | LLM | — |
+| Propose code variants | LLM | — |
+| Propose rule candidates | LLM | — |
+| Guard (17 blacklists) | SelfEvolutionGuard | LLM |
+| Formal verification | SelfEncoder.verify | LLM |
+| Which candidate to run | Digital life (E evaluation) | LLM |
+| Changing the E formula | **Absolutely forbidden** | Anyone |
+| Changing SelfEvolutionGuard blacklists | Digital life + human review | LLM |
 
-### 1.3 模块边界
+### 1.3 Module boundaries
 
-- **SelfEncoder** 不依赖 LLM (纯规则合成, 可独立 demo)
-- **RuleProposer** 把 LLM 输出经 Guard 过滤后入 SelfEncoder
-- **HttpLLM** 实现 LLMChat vtable, ProviderKind = anthropic | openai_compat
-- **WorldCollector** 用 autocli 子进程拉外部世界数据
-- **Daemon** 装配以上所有, 跑长跑进程
-
----
-
-## 2. 代码风格
-
-### 2.1 Zig 0.17 兼容性
-
-- 不引入外部依赖(零依赖是核心)
-- 路径引用用 `@import("module/file.zig")` 而非跨层相对路径
-- 所有 `pub const F = f32;` 在模块顶层定义,避免跨目录 import
-- 详细 quirks 见 memory/mavis/MEMORY.md "Zig 0.17 dev 0.17.0-dev.387 quirks"
-
-### 2.2 错误处理
-
-- 所有公开函数返回 `!T` (允许失败)
-- 内部 helper 可以 panic
-- 资源分配用 `errdefer` 兜底释放
-
-### 2.3 测试
-
-- 每个新模块至少 2 个测试
-- 端到端 demo 必须真跑(不是 stub),并验证 0 leak
-- MockLLM/ShellLLM 用于不需要 API key 的场景
-- 真实 LLM 路径(anthropic/openai_compat)需要 API key,文档化但不强制 demo
+- **SelfEncoder** does not depend on the LLM (pure rule synthesis; can be demoed standalone)
+- **RuleProposer** feeds LLM output through the Guard filter into SelfEncoder
+- **HttpLLM** implements the LLMChat vtable, ProviderKind = anthropic | openai_compat
+- **WorldCollector** pulls external-world data via autocli subprocesses
+- **Daemon** assembles all of the above into a long-running process
 
 ---
 
-## 3. 当前 L1-L4 状态
+## 2. Code Style
 
-| Level | 状态 | 模块 |
+### 2.1 Zig 0.17 compatibility
+
+- No external dependencies (zero-dependency is core)
+- Use `@import("module/file.zig")` for path references instead of cross-layer relative paths
+- Define all `pub const F = f32;` at module top level to avoid cross-directory imports
+- For detailed quirks see memory/mavis/MEMORY.md "Zig 0.17 dev 0.17.0-dev.387 quirks"
+
+### 2.2 Error handling
+
+- All public functions return `!T` (failure allowed)
+- Internal helpers may panic
+- Use `errdefer` as a safety net for resource release
+
+### 2.3 Testing
+
+- At least 2 tests per new module
+- End-to-end demos must actually run (not stubs) and verify zero leaks
+- MockLLM/ShellLLM for scenarios that don't need an API key
+- Real LLM paths (anthropic/openai_compat) need an API key; documented but demos not mandatory
+
+---
+
+## 3. Current L1-L4 Status
+
+| Level | Status | Module |
 |-------|------|------|
-| L1 (调参) | ✅ | SelfEncoder.tune_params, ExistenceWeights.adapt |
-| L2 (LLM 提议代码) | ✅ | SelfEvolver + MockLLM/ShellLLM/HttpLLM |
-| L3 (状态序列化) | ✅ | StateSerializer (原子写 tmp+rename) |
-| L4-0 (双进程迁移) | ✅ | SelfMigration (真 spawn/wait/落盘/回滚) + SelfMigrateCLI |
-| L4-1 (LLM 提议规则) | ✅ | RuleProposer + SelfEvolutionGuard |
-| L4-2 (规则闭环回主循环) | ✅ | GHWAgent.bindRuleLib → selectTopGoal 偏置 + RuleBias provenance |
-| L4-3 (连续记忆注入) | ✅ | Memory.buildContext → RuleProposer.setMemory 注入自传体上下文 |
-| L4-4 (全通道记忆 + 语义检索) | ✅ | Reflection/LLMGoalProposer 注入 + token Jaccard 检索 |
-| L4-5 (演化/完善/长跑记忆) | ✅ | SelfEvolver/TemplateEnhancer 注入 + daemon recordAt + char trigram |
-| L4-6 (任务队列闭环) | ✅ | GHWAgent.bindTaskQueue → TaskBias + provenance |
-| L4-7 (任务执行+记忆写回) | ✅ | runTask→recordAt + ui_server/daemon 全链路 |
-| L4-8 (TaskQueue 持久化) | ✅ | TaskQueue.toJson/loadFromJson → state.json |
-| L4-9 (ui 全路径统一) | ✅ | runPostCyclePipeline + provenance API |
-| L4-10 (人类反馈闭环) | ✅ | task_feedback → HumanSignal/GSP + UI 评分 |
-| L4-11 (GSP/Signal 持久化) | ✅ | human_gsp/human_signal → state.json |
-| L4-12 (人类价值闭环) | ✅ | chat 任务 + value 趋势 → 提议触发 |
-| L4-13 (价值趋势持久化+UI) | ✅ | value_tracker JSON + status 仪表盘 |
-| L4-14 (任务来源+规则提议) | ✅ | Task.Source + RuleProposer ui_server |
-| L4-15 (chat记忆+人类投递) | ✅ | chat buildContext + POST /api/tasks |
-| L4-16 (筛选+chat provenance) | ✅ | 任务来源筛选 + chat memory badge |
-| L4-17 (产品数字生命底座) | ✅ | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
-| L4-18 (产品底座 SDK) | ✅ | ghw_product_* C ABI |
-| L4-19 (产品运行时持久化/API) | ✅ | product_runtime state + ui_server product API |
-| L4-20 (产品可用级主干) | ✅ | ProductAdapter + auth + audit hash + KPI HTTP + acceptance |
-| L5 (自我写代码) | ✅ | SelfEncoder (规则合成 + 形式验证) |
+| L1 (parameter tuning) | ✅ | SelfEncoder.tune_params, ExistenceWeights.adapt |
+| L2 (LLM-proposed code) | ✅ | SelfEvolver + MockLLM/ShellLLM/HttpLLM |
+| L3 (state serialization) | ✅ | StateSerializer (atomic write tmp+rename) |
+| L4-0 (dual-process migration) | ✅ | SelfMigration (real spawn/wait/persist/rollback) + SelfMigrateCLI |
+| L4-1 (LLM-proposed rules) | ✅ | RuleProposer + SelfEvolutionGuard |
+| L4-2 (rule loop closed back into the main loop) | ✅ | GHWAgent.bindRuleLib → selectTopGoal bias + RuleBias provenance |
+| L4-3 (continuous memory injection) | ✅ | Memory.buildContext → RuleProposer.setMemory injects autobiographical context |
+| L4-4 (memory on all channels + semantic retrieval) | ✅ | Reflection/LLMGoalProposer injection + token Jaccard retrieval |
+| L4-5 (evolution/refinement/long-run memory) | ✅ | SelfEvolver/TemplateEnhancer injection + daemon recordAt + char trigram |
+| L4-6 (task queue loop closed) | ✅ | GHWAgent.bindTaskQueue → TaskBias + provenance |
+| L4-7 (task execution + memory write-back) | ✅ | runTask→recordAt + full ui_server/daemon chain |
+| L4-8 (TaskQueue persistence) | ✅ | TaskQueue.toJson/loadFromJson → state.json |
+| L4-9 (ui_server all-path unification) | ✅ | runPostCyclePipeline + provenance API |
+| L4-10 (human feedback loop) | ✅ | task_feedback → HumanSignal/GSP + UI rating |
+| L4-11 (GSP/Signal persistence) | ✅ | human_gsp/human_signal → state.json |
+| L4-12 (human value loop) | ✅ | chat tasks + value trend → proposal trigger |
+| L4-13 (value trend persistence + UI) | ✅ | value_tracker JSON + status dashboard |
+| L4-14 (task source + rule proposals) | ✅ | Task.Source + RuleProposer in ui_server |
+| L4-15 (chat memory + human submission) | ✅ | chat buildContext + POST /api/tasks |
+| L4-16 (filtering + chat provenance) | ✅ | task source filtering + chat memory badge |
+| L4-17 (product digital-life foundation) | ✅ | ProductEvolutionRuntime: KPI→Proposal→Consent→Audit |
+| L4-18 (product foundation SDK) | ✅ | ghw_product_* C ABI |
+| L4-19 (product runtime persistence/API) | ✅ | product_runtime state + ui_server product API |
+| L4-20 (production-grade product backbone) | ✅ | ProductAdapter + auth + audit hash + KPI HTTP + acceptance |
+| L5 (self-writing code) | ✅ | SelfEncoder (rule synthesis + formal verification) |
 
-### LLM 闭环 (2026-06, P0)
+### LLM loop closed (2026-06, P0)
 
-历史缺口: LLM 提议的规则进了 `SelfEncoder.rules`, 但 `runCycle` 从不读它们 ——
-LLM 像"旁白解说员"而非"驱动器"。现已闭环:
+Historical gap: LLM-proposed rules entered `SelfEncoder.rules`, but `runCycle` never read them —
+the LLM was a "commentator" rather than a "driver". Now the loop is closed:
 
-- `GHWAgent.bindRuleLib(*SelfEncoder)` 后, `selectTopGoal` 用已采纳规则的 `dimension`
-  统计出 `RuleBias`(favored 维度 + dominance), 给**对齐该维度的目标**叠加有界奖励
-  (`RuleBias.MAX_BONUS=3.0 × dominance`), 从而真正改变"这一周期选哪个目标行动"。
-- 仍守"LLM 提议 / 数字生命决定": 偏置只在**已有目标间重排**(不凭空造目标、不改 E 公理),
-  幅度有界(只能翻转优先级相近的目标), 仍过 boundary + ΔE 兜底。
-- **Provenance**: `CycleReport.rule_bias` / `GHWAgent.last_rule_bias` 记录 favored/dominance/
-  `selection_changed`, 可审计"这次行为到底有没有被 LLM 提议影响"。`rule_lib` 默认 null ⇒
-  零行为变化, 解绑即恢复纯优先级 (闭环可控、可逆)。
-- 示例 `examples/fueled.zig`: 提议规则 → `bindRuleLib` → 再跑 cycle, 打印偏好维度与翻转次数。
-- **未做(刻意)**: 把 LLM 目标 (`LLMGoalProposer`) 塞进 `GoalGraph` —— 与架构冲突
-  (`runCycle` 每 T_G 用 `dse.generate` **重建**目标图, 且 `GoalGraph.add` 不持有 label),
-  持久目标通道应是 `human_symbiosis.TaskQueue`(`proposeAndAdopt` 已用); 现已走
-  `bindTaskQueue` → `TaskBias` 偏置 (P5), 而非直接塞 ephemeral 图。
+- After `GHWAgent.bindRuleLib(*SelfEncoder)`, `selectTopGoal` computes `RuleBias` from the
+  `dimension` of adopted rules (favored dimension + dominance) and adds a bounded bonus to
+  **goals aligned with that dimension** (`RuleBias.MAX_BONUS=3.0 × dominance`), thereby
+  genuinely changing "which goal is acted on this cycle".
+- Still honors "LLM proposes / digital life decides": the bias only reorders among **existing
+  goals** (never invents goals out of thin air, never changes the E axiom), the magnitude is
+  bounded (it can only flip goals with similar priority), and it still passes the boundary +
+  ΔE safety net.
+- **Provenance**: `CycleReport.rule_bias` / `GHWAgent.last_rule_bias` record favored/dominance/
+  `selection_changed`, making it auditable "whether this behavior was influenced by an LLM
+  proposal". `rule_lib` defaults to null ⇒ zero behavior change; unbinding restores pure
+  priority (the loop is controllable and reversible).
+- Example `examples/fueled.zig`: propose a rule → `bindRuleLib` → run the cycle again, printing
+  the favored dimension and the number of flips.
+- **Deliberately not done**: stuffing LLM goals (`LLMGoalProposer`) into `GoalGraph` — that
+  conflicts with the architecture (`runCycle` **rebuilds** the goal graph every T_G via
+  `dse.generate`, and `GoalGraph.add` holds no label); the persistent-goal channel should be
+  `human_symbiosis.TaskQueue` (already used by `proposeAndAdopt`); this now goes through
+  `bindTaskQueue` → `TaskBias` bias (P5), instead of being stuffed into the ephemeral graph.
 
-### 连续记忆 (2026-06, P1)
+### Continuous memory (2026-06, P1)
 
-历史缺口: 每次调 LLM 都是"失忆快照"—— 只发当下 E/M/R/N, LLM 不知道"我是谁、
-我相信什么、过去类似处境怎么收场"。它无法是**同一个生命**。现已连续:
+Historical gap: every LLM call was an "amnesiac snapshot" — only the current E/M/R/N was sent;
+the LLM didn't know "who I am, what I believe, how similar situations turned out in the past".
+It could not be **the same life**. Now it is continuous:
 
-- `Memory.relevantEpisodes(query_dim, query_text, k)`: 按 (维度命中 + ΔE 显著性 +
-  token Jaccard 语义相似 + 新近度) 打分检索 top-k 往事, 不再只取"最近 N 条"。
-- `Memory.buildContext(...)`: 拼出"自传体上下文块"= 自我叙事 (`self_narrative`) +
-  高置信信念 (top-k by confidence) + 与当下最相关的往事 (含各自 ΔE 结果)。
-- `RuleProposer.setMemory(*Memory)` 绑定后, `buildUserPrompt` 在状态快照**之前**注入该块,
-  query 维度取当前 M/R/N 短板 (argmin), query_text 取 top_goal+last_action ——
-  即"优先回忆与当前短板相关的经历"。默认 null ⇒ 行为回退到纯快照 (可控、可逆)。
-- 示例 `examples/fueled.zig`: 跑 cycle 时 `recordAt` 记情节 → 设叙事/信念 →
-  `setMemory` → 打印 prompt 确含 autobiographical context。
-- P2 已扩到 Reflection / LLMGoalProposer, 见下节。
+- `Memory.relevantEpisodes(query_dim, query_text, k)`: scores and retrieves top-k past episodes
+  by (dimension hit + ΔE significance + token Jaccard semantic similarity + recency), no longer
+  just taking "the most recent N".
+- `Memory.buildContext(...)`: assembles the "autobiographical context block" = self-narrative
+  (`self_narrative`) + high-confidence beliefs (top-k by confidence) + the past episodes most
+  relevant to the present (each with its ΔE outcome).
+- Once `RuleProposer.setMemory(*Memory)` is bound, `buildUserPrompt` injects this block **before**
+  the state snapshot; the query dimension is the current weakest M/R/N (argmin) and query_text
+  is top_goal+last_action — i.e. "preferentially recall experiences related to the current
+  weakest link". Defaults to null ⇒ behavior falls back to the pure snapshot (controllable,
+  reversible).
+- Example `examples/fueled.zig`: run a cycle with `recordAt` logging episodes → set
+  narrative/beliefs → `setMemory` → print the prompt to confirm it contains the autobiographical
+  context.
+- P2 extended this to Reflection / LLMGoalProposer; see below.
 
-### 全通道记忆 + 语义检索 (2026-06, P2)
+### Memory on all channels + semantic retrieval (2026-06, P2)
 
-P1 只覆盖了 RuleProposer; P2 把"同一个生命"扩到所有 LLM 驱动通道, 并升级检索:
+P1 only covered RuleProposer; P2 extends "the same life" to all LLM-driven channels and upgrades
+retrieval:
 
-- **Reflection.buildUserPrompt**: 先注入 `buildContext`(叙事+信念+语义相关往事), 再附时序 tail
-  (`recentEpisodes(8)`) + 自身状态 —— 反思既连续又不丢"刚刚发生了什么"。
-- **LLMGoalProposer.setMemory + buildUserPrompt**: 在世界快照**之前**注入自传体记忆,
-  目标提议与自我认知/历史衔接; `ui_server` 启动时自动 `setMemory(&app.memory)`。
-- **检索升级 (零依赖)**: `episodeScore` 用 token-set Jaccard 取代纯子串匹配,
-  语义相近词(如 optimize/daemon/cpu)可召回旧但相关的 episode, 无需 embedding 向量。
-- **Memory.weakestDim(m,r,n)**: 各通道统一用 M/R/N 短板作 query_dim。
-- **recentBeliefsBySource**: 从桩实现改为按维度过滤 + 置信度降序。
-- 单测: `Reflection: buildUserPrompt 注入自传体记忆 + 时序 episodes`,
-  `LLMGoalProposer: buildUserPrompt 注入自传体记忆`,
-  `Memory: token Jaccard 检索 — 语义相近词优于无关旧条`。
-- P3 已扩到 SelfEvolver/TemplateEnhancer + daemon, 见下节。
+- **Reflection.buildUserPrompt**: first injects `buildContext` (narrative + beliefs + semantically
+  related episodes), then appends a chronological tail (`recentEpisodes(8)`) + own state —
+  reflection is continuous yet doesn't lose "what just happened".
+- **LLMGoalProposer.setMemory + buildUserPrompt**: injects autobiographical memory before the
+  world snapshot, so goal proposals connect with self-knowledge/history; `ui_server` calls
+  `setMemory(&app.memory)` automatically at startup.
+- **Retrieval upgrade (zero-dependency)**: `episodeScore` uses token-set Jaccard instead of pure
+  substring matching; semantically similar words (e.g. optimize/daemon/cpu) can recall old but
+  relevant episodes without embedding vectors.
+- **Memory.weakestDim(m,r,n)**: all channels uniformly use the weakest M/R/N as query_dim.
+- **recentBeliefsBySource**: changed from a stub implementation to filtering by dimension +
+  descending confidence.
+- Unit tests: `Reflection: buildUserPrompt injects autobiographical memory + chronological
+  episodes`, `LLMGoalProposer: buildUserPrompt injects autobiographical memory`,
+  `Memory: token Jaccard retrieval — semantically similar words beat irrelevant old entries`.
+- P3 extended this to SelfEvolver/TemplateEnhancer + daemon; see below.
 
-### 演化/完善/长跑记忆 (2026-06, P3)
+### Evolution/refinement/long-run memory (2026-06, P3)
 
-P2 覆盖规则/反思/目标提议; P3 把记忆推到自演化链 + 长跑 daemon:
+P2 covered rules/reflection/goal proposals; P3 pushes memory into the self-evolution chain +
+long-running daemon:
 
-- **SelfEvolver.setMemory + EvolveContext**: `evolve(req, ctx)` 用 M/R/N 短板检索记忆,
-  注入 `GenerationRequest.prompt` (LLM 后端 + 审计链); `agent/core.zig` / `ui_server` 已传完整 ctx。
-- **TemplateEnhancer.setMemory + buildUserPrompt**: 绑 memory 时用 `buildContext`(含相关往事);
-  未绑时回退旧 EnhanceContext 字段 (可控、可逆)。
-- **检索 P3 层**: `episodeScore` 叠加 char trigram Jaccard (零依赖, 替代 embedding 向量)。
-- **daemon 闭环**: 每 cycle `memory.recordAt` (goal/E/ΔE); LLM 提议写 `.llm_proposal` episode;
-  `proposer.setMemory` + `agent.bindRuleLib` 一并接线。
-- **ui_server**: `self_evolver` / `template_enhancer` / `goal_proposer` 启动时均 `setMemory(&app.memory)`。
-- 单测: `SelfEvolver: setMemory 绑定后 evolve 不崩溃`,
-  `TemplateEnhancer: buildUserPrompt 注入 buildContext`。
-### 持久化/LLM 演化/daemon 反思 (2026-06, P4)
+- **SelfEvolver.setMemory + EvolveContext**: `evolve(req, ctx)` retrieves memory using the weakest
+  M/R/N and injects it into `GenerationRequest.prompt` (LLM backend + audit chain);
+  `agent/core.zig` / `ui_server` already pass the full ctx.
+- **TemplateEnhancer.setMemory + buildUserPrompt**: when memory is bound, uses `buildContext`
+  (including relevant episodes); when unbound, falls back to the old EnhanceContext fields
+  (controllable, reversible).
+- **Retrieval, P3 layer**: `episodeScore` adds char trigram Jaccard (zero-dependency, replacing
+  embedding vectors).
+- **daemon loop closure**: `memory.recordAt` every cycle (goal/E/ΔE); LLM proposals write a
+  `.llm_proposal` episode; `proposer.setMemory` + `agent.bindRuleLib` are wired together.
+- **ui_server**: `self_evolver` / `template_enhancer` / `goal_proposer` each call
+  `setMemory(&app.memory)` at startup.
+- Unit tests: `SelfEvolver: evolve doesn't crash after setMemory binding`,
+  `TemplateEnhancer: buildUserPrompt injects buildContext`.
+### Persistence / LLM evolution / daemon reflection (2026-06, P4)
 
-P3 记忆只在进程内; P4 让长跑/重启后仍是同一个生命:
+P3 memory lived only in-process; P4 makes it the same life after long runs / restarts:
 
-- **Memory 完整持久化**: `toJson` 输出 narrative + beliefs + episodes (最多 200 条);
-  `loadFromJson` 从 state.json 恢复, 兼容旧版仅 `self_narrative/reflection_count` 块。
-- **LlmCodeGenerator**: `SelfEvolver.setGenerator` 可切到 LLM 后端 (仍过 Guard + CompileVerifier);
-  `ui_server` LLM 启用时自动切换; 未启用仍用 StaticCodeGenerator (可控、可逆)。
-- **daemon 周期 Reflection**: 每 32 tick `reflect` + `recordAt(.reflection, ...)`;
-  snapshot/退出前 `mergeJsonBlockIntoSnapshot` 嵌入 memory + task_queue 块 (P7)。
-- **ui_server**: `saveState` 用 `memory.toJson`; 启动 `loadFromJson` 恢复 episodes/beliefs。
-- 单测: `Memory: toJson/loadFromJson episodes+beliefs roundtrip`,
-  `LlmCodeGenerator: extractCode/buildUserPrompt/Mock LLM 生成代码`。
+- **Full Memory persistence**: `toJson` outputs narrative + beliefs + episodes (up to 200);
+  `loadFromJson` restores from state.json, compatible with old versions that only have the
+  `self_narrative/reflection_count` block.
+- **LlmCodeGenerator**: `SelfEvolver.setGenerator` can switch to the LLM backend (still passing
+  Guard + CompileVerifier); `ui_server` switches automatically when the LLM is enabled; when not
+  enabled it keeps using StaticCodeGenerator (controllable, reversible).
+- **daemon periodic Reflection**: `reflect` + `recordAt(.reflection, ...)` every 32 ticks; before
+  snapshot/exit, `mergeJsonBlockIntoSnapshot` embeds the memory + task_queue blocks (P7).
+- **ui_server**: `saveState` uses `memory.toJson`; startup `loadFromJson` restores
+  episodes/beliefs.
+- Unit tests: `Memory: toJson/loadFromJson episodes+beliefs roundtrip`,
+  `LlmCodeGenerator: extractCode/buildUserPrompt/Mock LLM generates code`.
 
-### 任务队列闭环 (2026-06, P5)
+### Task queue loop closed (2026-06, P5)
 
-历史缺口: LLM/人类投递的任务进了 `TaskQueue`, 但 `runCycle` 选目标时不看 pending 任务。
-现已闭环 (跟 P0 RuleBias 同构):
+Historical gap: tasks submitted by LLM/humans entered `TaskQueue`, but `runCycle` ignored pending
+tasks when selecting goals. Now the loop is closed (isomorphic to P0 RuleBias):
 
-- `TaskQueue.pendingDimensionWeights()`: pending 任务按 priority 加权统计 M/R/N 维度。
-- `GHWAgent.bindTaskQueue` + `TaskBias`: `selectTopGoal` 给对齐 pending 任务维度的目标
-  叠加有界奖励 (`TaskBias.MAX_BONUS=4.0 × dominance`)。
-- **Provenance**: `CycleReport.task_bias` / `last_task_bias` 记录 pending/favored/selection_changed;
-  与 `rule_bias` 分层 (任务偏置相对规则偏置之后的增量翻转)。
-- `live_loop` / `fueled` 演示 `bindTaskQueue`; 默认 null ⇒ 零行为变化。
-- 单测: `TaskQueue: pendingDimensionWeights`, `GHWAgent: TaskQueue pending 任务偏置目标选择`。
+- `TaskQueue.pendingDimensionWeights()`: pending tasks weighted by priority, tallied over the
+  M/R/N dimensions.
+- `GHWAgent.bindTaskQueue` + `TaskBias`: `selectTopGoal` adds a bounded bonus to goals aligned
+  with pending-task dimensions (`TaskBias.MAX_BONUS=4.0 × dominance`).
+- **Provenance**: `CycleReport.task_bias` / `last_task_bias` record pending/favored/
+  selection_changed; layered with `rule_bias` (task bias is the incremental flip applied after
+  rule bias).
+- `live_loop` / `fueled` demo `bindTaskQueue`; defaults to null ⇒ zero behavior change.
+- Unit tests: `TaskQueue: pendingDimensionWeights`, `GHWAgent: pending TaskQueue tasks bias goal
+  selection`.
 
-### 任务执行 + 记忆写回 + 全链路 (2026-06, P6)
+### Task execution + memory write-back + full chain (2026-06, P6)
 
-P5 只偏置目标; P6 把任务真正跑完并写回自传体记忆:
+P5 only biased goals; P6 actually completes tasks and writes back to autobiographical memory:
 
-- **`GHWAgent.bindMemory`**: `runTask` 完成时 `recordAt(.task_completed, ...)` (ΔE + 维度)。
-- **`task_runner.runNextPending`**: dequeue → runTask → complete/fail 薄封装。
-- **`LLMGoalProposer.proposeAndAdopt`**: 修泄漏 + urgency→priority; 高 urgency 任务入队。
-- **ui_server**: `TaskQueue` + `bindTaskQueue/bindMemory`; 提议改 `proposeAndAdopt`; 每 32 tick `runNextPending`。
-- **daemon**: `WorldContext` + `LLMGoalProposer` + 每 64 tick 提议 / 32 tick 执行任务。
-- 单测: `task_runner: runNextPending 完成 pending 任务` (含 memory episode)。
+- **`GHWAgent.bindMemory`**: on `runTask` completion, `recordAt(.task_completed, ...)` (ΔE +
+  dimension).
+- **`task_runner.runNextPending`**: thin wrapper around dequeue → runTask → complete/fail.
+- **`LLMGoalProposer.proposeAndAdopt`**: fixed the leak + urgency→priority; high-urgency tasks
+  are enqueued.
+- **ui_server**: `TaskQueue` + `bindTaskQueue/bindMemory`; proposals switched to
+  `proposeAndAdopt`; `runNextPending` every 32 ticks.
+- **daemon**: `WorldContext` + `LLMGoalProposer` + proposals every 64 ticks / task execution
+  every 32 ticks.
+- Unit test: `task_runner: runNextPending completes a pending task` (with memory episode).
 
-### TaskQueue 持久化 (2026-06, P7)
+### TaskQueue persistence (2026-06, P7)
 
-P6 全链路跑通后, pending 任务仍纯内存 —— 重启即丢, TaskBias 与 runNextPending 失效:
+After P6's full chain works, pending tasks are still in-memory only — lost on restart, breaking
+TaskBias and runNextPending:
 
-- **`TaskQueue.toJson` / `loadFromJson`**: 序列化 next_id + 全任务 (pending/in_progress/completed/failed,
-  含 result/feedback); 旧 state.json 无 `task_queue` 字段 ⇒ 返回 false, 零行为变化。
-- **ui_server `saveState`**: `"memory"` 后嵌入 `"task_queue"`; 启动 `loadFromJson` 恢复。
-- **daemon `writeSnapshot`**: `mergeJsonBlockIntoSnapshot` 嵌入 memory + task_queue; `--state-in` 启动恢复。
-- 加载后 `recomputeCounts` + `next_id` 与 max(id) 对齐, 防 ID 冲突。
-- 单测: `TaskQueue: toJson/loadFromJson roundtrip`。
+- **`TaskQueue.toJson` / `loadFromJson`**: serializes next_id + all tasks (pending/in_progress/
+  completed/failed, including result/feedback); old state.json without the `task_queue` field ⇒
+  returns false, zero behavior change.
+- **ui_server `saveState`**: embeds `"task_queue"` after `"memory"`; startup `loadFromJson`
+  restores.
+- **daemon `writeSnapshot`**: `mergeJsonBlockIntoSnapshot` embeds memory + task_queue; restored
+  at startup via `--state-in`.
+- After loading, `recomputeCounts` + align `next_id` with max(id) to prevent ID conflicts.
+- Unit test: `TaskQueue: toJson/loadFromJson roundtrip`.
 
-### ui_server 全路径统一 (2026-06, P8)
+### ui_server all-path unification (2026-06, P8)
 
-P6/P7 主链路在 `GET /api/state`, 但 chat/propose 入口行为分叉:
+P6/P7's main chain lives in `GET /api/state`, but the chat/propose entry points behaved
+differently:
 
-- **`runPostCyclePipeline`**: 抽取 sqlite cycle + 自省 + `proposeAndAdopt` + `runNextPending`;
-  `handleGetState` 与 **POST `/api/chat` worker** 共用 (行为一致)。
-- **GET `/api/propose`**: 改 `proposeAndAdopt` + `storeProposeResult` (不再只写 UI 列表不入队)。
-- **chat worker**: `runCycle` + pipeline + `recordAt(.user_chat)` + `saveState` (含 task_queue)。
-- **`/api/state` provenance**: 新增 `provenance.rule_bias` / `provenance.task_bias` + `task_queue` 计数,
-  可审计「这次选目标是被规则还是 pending 任务偏置」。
+- **`runPostCyclePipeline`**: extracts sqlite cycle + introspection + `proposeAndAdopt` +
+  `runNextPending`; shared by `handleGetState` and the **POST `/api/chat` worker** (consistent
+  behavior).
+- **GET `/api/propose`**: switched to `proposeAndAdopt` + `storeProposeResult` (no longer just
+  writing to a UI list without enqueueing).
+- **chat worker**: `runCycle` + pipeline + `recordAt(.user_chat)` + `saveState` (including
+  task_queue).
+- **`/api/state` provenance**: added `provenance.rule_bias` / `provenance.task_bias` +
+  `task_queue` counts, making it auditable "whether this goal selection was biased by rules or
+  pending tasks".
 
-### 人类反馈闭环 (2026-06, P9)
+### Human feedback loop (2026-06, P9)
 
-P6–P8 任务能跑、能持久化, 但完成后的「人类评价」未接入 GSP/存在度:
+P6–P8 tasks can run and persist, but post-completion "human evaluation" wasn't wired into
+GSP/existence degree:
 
-- **`task_feedback.zig`**: `runNextPendingWithFeedback` = `runNextPending` + 启发式评分
-  (`heuristicScore`: 用 actual ΔE 映射 -5..+5); `applyFeedback` 写 HumanSignal + TaskQueue.feedback +
-  HumanGSP.recordInteraction (trust 更新)。
-- **ui_server / daemon**: 每 32 tick `runNextPendingWithFeedback`; 每 128 tick `BalanceSeeker` 平衡任务
-  (GSP trust 低的人类优先); `appendProvenanceJson` 增加 `human_symbiosis` (value_score / peers trust)。
-- **API**: `GET /api/tasks` 任务快照; `POST /api/task/feedback` 人类显式评分 (覆盖启发式)。
-- **UI**: 「任务队列」tab — 已完成任务一键评分 -5..+5。
-- **未做(刻意)**: GSP/HumanSignal 持久化 (重启 trust 重置; 后续 P10 可并入 state.json)。
-- 单测: `task_feedback: heuristicScore` + `applyFeedback 更新 Signal/GSP/Queue`。
+- **`task_feedback.zig`**: `runNextPendingWithFeedback` = `runNextPending` + heuristic scoring
+  (`heuristicScore`: maps actual ΔE to -5..+5); `applyFeedback` writes HumanSignal +
+  TaskQueue.feedback + HumanGSP.recordInteraction (trust update).
+- **ui_server / daemon**: `runNextPendingWithFeedback` every 32 ticks; `BalanceSeeker` balances
+  tasks every 128 ticks (humans with low GSP trust first); `appendProvenanceJson` gains
+  `human_symbiosis` (value_score / peers trust).
+- **API**: `GET /api/tasks` task snapshot; `POST /api/task/feedback` explicit human rating
+  (overrides the heuristic).
+- **UI**: "Task Queue" tab — one-click -5..+5 rating for completed tasks.
+- **Deliberately not done**: GSP/HumanSignal persistence (trust resets on restart; P10 can later
+  merge it into state.json).
+- Unit tests: `task_feedback: heuristicScore` + `applyFeedback updates Signal/GSP/Queue`.
 
-### GSP/HumanSignal 持久化 (2026-06, P10)
+### GSP/HumanSignal persistence (2026-06, P10)
 
-P9 反馈闭环跑通后, trust 与反馈历史仍纯内存 —— 重启 BalanceSeeker 从零开始:
+After the P9 feedback loop works, trust and feedback history are still in-memory only —
+BalanceSeeker restarts from zero:
 
-- **`HumanGSP.toJson` / `loadFromJson`**: peers 全量 (trust / 计数 / best_dimension); 旧 state 无 `human_gsp` ⇒ false。
-- **`HumanSignal.toJson` / `loadFromJson`**: feedbacks 数组 + 重建 by_human 聚合; 无 `human_signal` ⇒ false。
-- **共享 `state_json.zig`**: extractObjectBlock / writeJsonString 等 (human_symbiosis 块专用)。
-- **ui_server `saveState` / 启动**: 嵌入并恢复 `human_gsp` + `human_signal` (在 task_queue 之后)。
-- **daemon `writeSnapshot` / `--state-in`**: 同上 mergeJsonBlockIntoSnapshot。
-- 加载顺序: 先 register 默认 peers → loadFromJson 覆盖 (旧 snapshot 无块则保留默认)。
-- 单测: `HumanGSP` / `HumanSignal` toJson/loadFromJson roundtrip。
+- **`HumanGSP.toJson` / `loadFromJson`**: full peers (trust / counts / best_dimension); old
+  state without `human_gsp` ⇒ false.
+- **`HumanSignal.toJson` / `loadFromJson`**: feedbacks array + rebuilds the by_human aggregation;
+  without `human_signal` ⇒ false.
+- **Shared `state_json.zig`**: extractObjectBlock / writeJsonString etc. (dedicated to the
+  human_symbiosis block).
+- **ui_server `saveState` / startup**: embeds and restores `human_gsp` + `human_signal` (after
+  task_queue).
+- **daemon `writeSnapshot` / `--state-in`**: same mergeJsonBlockIntoSnapshot.
+- Load order: register default peers first → loadFromJson overrides (old snapshots without the
+  block keep the defaults).
+- Unit tests: `HumanGSP` / `HumanSignal` toJson/loadFromJson roundtrip.
 
-### 人类价值闭环 (2026-06, P11)
+### Human value loop (2026-06, P11)
 
-P10 信任可持久化后, chat 仍不入队、人类价值下滑不驱动补救:
+With P10 trust persistence, chat still wasn't enqueued and declining human value triggered no
+remediation:
 
-- **`chat_task.zig`**: `isTaskLike` + `maybeSubmitFromChat` — 任务型 chat 以 `from_human="human"`
-  入 TaskQueue (priority=7) 并 `gsp.register("human")`; 非任务语句零行为变化。
-- **`ValueTrendTracker`**: 64 点 value_score 环形缓冲 + 线性趋势 (镜像 `kpiTrend`); `DECLINE_EPS=0.003`。
-- **`RuleProposer.setValueTrend` / `shouldPropose`**: 人类价值持续下滑时主动提议规则 (跟 KPI 并列)。
-- **ui_server**: chat worker 入队; `recordValueTrend` 每 post-cycle 采样; value 下滑时加速 `maybeAutoProposeGoals`;
-  `/api/state` provenance 增 `value_trend`。
-- **daemon / live_loop**: 每 tick 采样 value_score; daemon 规则提议改 `shouldPropose` (含 KPI + value)。
-- 单测: `chat_task` ×2, `ValueTrendTracker` 下降趋势, `RuleProposer` value 下滑触发。
+- **`chat_task.zig`**: `isTaskLike` + `maybeSubmitFromChat` — task-like chat enters TaskQueue
+  with `from_human="human"` (priority=7) and `gsp.register("human")`; non-task statements cause
+  zero behavior change.
+- **`ValueTrendTracker`**: 64-point value_score ring buffer + linear trend (mirrors `kpiTrend`);
+  `DECLINE_EPS=0.003`.
+- **`RuleProposer.setValueTrend` / `shouldPropose`**: proactively proposes rules when human
+  value keeps declining (alongside KPI).
+- **ui_server**: chat worker enqueues; `recordValueTrend` samples every post-cycle;
+  `maybeAutoProposeGoals` accelerates when value declines; `/api/state` provenance gains
+  `value_trend`.
+- **daemon / live_loop**: sample value_score every tick; daemon rule proposals switched to
+  `shouldPropose` (covering KPI + value).
+- Unit tests: `chat_task` ×2, `ValueTrendTracker` decline trend, `RuleProposer` triggered by
+  value decline.
 
-### 价值趋势持久化 + UI (2026-06, P12)
+### Value trend persistence + UI (2026-06, P12)
 
-P11 value 趋势重启后缓冲清零, 需 64 tick 才再触发补救; chat 入队仍靠关键词:
+After restart, the P11 value-trend buffer is cleared and needs 64 ticks before remediation
+re-triggers; chat enqueueing still relies on keywords:
 
-- **`ValueTrendTracker.toJson/loadFromJson`**: `value_tracker` 块 (idx/count/last_score/history[64]);
-  ui_server/daemon save/load 与 human_gsp 同级。
-- **`chat_task` `@task` 前缀**: `@task` / `@task:` 强制入队 (priority=8), 跳过关键词启发式。
-- **UI status tab**: ValueMetric 仪表盘 (value_score 进度条 / value_trend / peers trust);
-  metrics 卡增「人类价值」「价值趋势」; chat 提示 `@task` 用法。
-- 单测: `ValueTrendTracker` roundtrip, `chat_task @task` 强制入队。
+- **`ValueTrendTracker.toJson/loadFromJson`**: `value_tracker` block (idx/count/last_score/
+  history[64]); ui_server/daemon save/load at the same level as human_gsp.
+- **`chat_task` `@task` prefix**: `@task` / `@task:` force-enqueues (priority=8), skipping the
+  keyword heuristic.
+- **UI status tab**: ValueMetric dashboard (value_score progress bar / value_trend / peers
+  trust); metrics cards gain "Human Value" and "Value Trend"; chat hints at `@task` usage.
+- Unit tests: `ValueTrendTracker` roundtrip, `chat_task @task` forced enqueue.
 
-### 任务来源 + 规则提议 + 趋势采样 (2026-06, P13)
+### Task source + rule proposals + trend sampling (2026-06, P13)
 
-P12 任务 tab 看不出投递来源, provenance 只有 value_trend 标量, ui_server 缺 RuleProposer:
+In P12 the task tab couldn't show the submission source, provenance had only the value_trend
+scalar, and ui_server lacked RuleProposer:
 
 - **`Task.Source`**: `chat_forced` / `chat_heuristic` / `llm_proposer` / `balance` / `human`;
-  `submitWithSource(..., source)` + `toJson`/API/UI 来源 badge (`@task` / chat / llm / balance)。
-- **`ValueTrendTracker.appendRecentSamplesJson`**: 最近 16 点 →
-  `/api/state` provenance `human_symbiosis.samples`; status tab 简易 sparkline。
-- **ui_server RuleProposer**: LLM 接入时 init `SelfEvolutionGuard` + `RuleProposer`;
-  `bindRuleLib` 在 SelfEncoder 就绪即绑定; `runPostCyclePipeline` 调 `maybeAutoProposeRules`
-  (E/KPI/value 下滑 → Guard → SelfEncoder, 阈值 0.50)。
-- 单测: `TaskQueue` source roundtrip, `appendRecentSamplesJson`。
+  `submitWithSource(..., source)` + `toJson`/API/UI source badge (`@task` / chat / llm / balance).
+- **`ValueTrendTracker.appendRecentSamplesJson`**: latest 16 points → `/api/state` provenance
+  `human_symbiosis.samples`; simple sparkline in the status tab.
+- **ui_server RuleProposer**: initializes `SelfEvolutionGuard` + `RuleProposer` when the LLM is
+  connected; `bindRuleLib` binds as soon as SelfEncoder is ready; `runPostCyclePipeline` calls
+  `maybeAutoProposeRules` (E/KPI/value decline → Guard → SelfEncoder, threshold 0.50).
+- Unit tests: `TaskQueue` source roundtrip, `appendRecentSamplesJson`.
 
-### Chat 记忆回复 + 人类任务 API (2026-06, P14)
+### Chat memory replies + human task API (2026-06, P14)
 
-P13 之后 chat 仍只用叙事+3条信念 (无语义检索往事); 任务 tab 只能 chat 入队, 无显式 human 投递:
+After P13, chat still used only the narrative + 3 beliefs (no semantically retrieved episodes);
+the task tab could only enqueue from chat, with no explicit human submission:
 
-- **`chat_reply.zig`**: `buildChatUserPrompt` — 跟 RuleProposer 同构, 先 `buildContext`(query=用户话+top_goal),
-  再附 E/M/R/N + 人类共生 (value_score/pending_tasks); `ui_server.buildLLMReply` 改调此模块。
+- **`chat_reply.zig`**: `buildChatUserPrompt` — isomorphic to RuleProposer: first `buildContext`
+  (query = user words + top_goal), then E/M/R/N + human symbiosis (value_score/pending_tasks);
+  `ui_server.buildLLMReply` now calls this module.
 - **`POST /api/tasks`**: form `title`/`description`/`from_human`/`priority`/`required_dimension` →
-  `submitWithSource(..., .human)` + GSP register + `saveState`; 任务 tab 表单 + `source=human` badge。
-- **provenance `rule_propose`**: `enabled` / `total` (提议次数) / `adopted_rules` (rule_bias.rule_count)。
-- 单测: `chat_reply` buildContext 注入 + 空记忆兜底。
+  `submitWithSource(..., .human)` + GSP register + `saveState`; task tab form + `source=human`
+  badge.
+- **provenance `rule_propose`**: `enabled` / `total` (number of proposals) / `adopted_rules`
+  (rule_bias.rule_count).
+- Unit tests: `chat_reply` buildContext injection + empty-memory fallback.
 
-### 任务筛选 + Chat provenance + live_loop 对齐 (2026-06, P15)
+### Task filtering + chat provenance + live_loop alignment (2026-06, P15)
 
-P14 之后任务 tab 无法按来源筛选, chat 不知是否用了 buildContext, live_loop 缺 P13/P14 接线:
+After P14, the task tab couldn't filter by source, chat couldn't tell whether buildContext was
+used, and live_loop lacked the P13/P14 wiring:
 
-- **任务 tab 来源筛选**: UI chip 过滤 (`all` / `@task` / chat / human / llm / balance); 显示 `shown/total`。
-- **`chat_reply.Meta` + `buildChatReply`**: 返回 `memory_injected` / episode / belief 计数;
-  `ui_server` 写入 `last_chat_reply` + `chat_replies_with_memory`; GHW 气泡 `memory` badge;
-  `/api/state` provenance `chat` 块; Chat tab 展示最近回复记忆状态。
-- **`live_loop`**: `bindRuleLib` + `proposer.setMemory` + 每 cycle `recordAt`; balance 任务
-  `submitWithSource(..., .balance)`; 初始任务 `source=human`; 报表增 value_trend / memory 计数。
-- 单测: `chat_reply` Meta 注入/空记忆。
+- **Task tab source filtering**: UI chip filter (`all` / `@task` / chat / human / llm / balance);
+  shows `shown/total`.
+- **`chat_reply.Meta` + `buildChatReply`**: returns `memory_injected` / episode / belief counts;
+  `ui_server` writes `last_chat_reply` + `chat_replies_with_memory`; GHW bubble `memory` badge;
+  `/api/state` provenance `chat` block; Chat tab shows memory status of recent replies.
+- **`live_loop`**: `bindRuleLib` + `proposer.setMemory` + `recordAt` every cycle; balance tasks
+  `submitWithSource(..., .balance)`; initial tasks `source=human`; report gains value_trend /
+  memory counts.
+- Unit tests: `chat_reply` Meta injection / empty memory.
 
-### 产品数字生命底座 (2026-06, P16)
+### Product digital-life foundation (2026-06, P16)
 
-GHW 要作为软件产品的进化载体, 不能只停留在「E/KPI 有反馈」, 还需要把产品变更变成一等审计对象:
+For GHW to serve as an evolution substrate for software products, it can't stop at "E/KPI has
+feedback"; product changes must become first-class audit objects:
 
-- **`product_runtime.zig`**: `ProductEvolutionRuntime` 串起 `ProductIntent` → `KpiBridge` →
-  `ChangeProposal` → `consent.riskForChange/classify` → audit → apply/rollback。
-- **CRM canonical proposal**: `proposeCrmFollowupTightening` 将 crmdemo 的
-  "follow-up cadence 7d → 5d" 迁回 Zig 主线, 作为产品进化样板提案。
-- **强制门**: 非 minor 变更默认 `pending_consent`; 只有 `approve` 后才能 `applyApproved`;
-  已应用变更只能在 `reversible=true` 时 `rollbackApplied`。
-- **KPI 进入 E 的产品场景**: `feedKpi` 经 `KpiBridge` 限频写 `ExistenceDegree.recordKpi`,
-  并写 `kpi_refreshed` audit entry, 让产品 KPI 成为获取/损失存在度的重要来源之一。
-- **Audit JSON**: `auditJson` 输出所有 KPI 刷新、提案、审批、应用、回滚记录, 供产品端持久化或上报。
-- 单测: CRM 提案→审批→应用→回滚, KPI feed→E, auditJson 契约。
+- **`product_runtime.zig`**: `ProductEvolutionRuntime` chains `ProductIntent` → `KpiBridge` →
+  `ChangeProposal` → `consent.riskForChange/classify` → audit → apply/rollback.
+- **CRM canonical proposal**: `proposeCrmFollowupTightening` migrates crmdemo's
+  "follow-up cadence 7d → 5d" back into the main Zig line as a canonical product-evolution
+  proposal.
+- **Mandatory gate**: non-minor changes default to `pending_consent`; only after `approve` can
+  `applyApproved` run; applied changes can only be `rollbackApplied` when `reversible=true`.
+- **Product scenario for KPI entering E**: `feedKpi` writes `ExistenceDegree.recordKpi` via
+  `KpiBridge` rate limiting, and writes a `kpi_refreshed` audit entry, making product KPI one of
+  the important sources of gaining/losing existence degree.
+- **Audit JSON**: `auditJson` outputs all KPI refresh, proposal, approval, apply, and rollback
+  records for product-side persistence or reporting.
+- Unit tests: CRM proposal→approval→apply→rollback, KPI feed→E, auditJson contract.
 
-### 产品底座 SDK (2026-06, P17)
+### Product foundation SDK (2026-06, P17)
 
-P16 只有 Zig 内部 runtime; P17 把产品数字生命能力暴露给宿主产品 (CRM/SaaS/移动 App):
+P16 only had a Zig-internal runtime; P17 exposes the product digital-life capabilities to host
+products (CRM/SaaS/mobile apps):
 
-- **`ghw_product_intent_load(g, path)`**: 加载 ProductIntent JSON 并初始化
-  `ProductEvolutionRuntime`。
-- **`ghw_product_kpi_feed(...)`**: 经 runtime 喂 CRM KPI, 写入 E 并生成 `kpi_refreshed` audit;
-  不再只是裸 `KpiBridge` 诊断。
-- **`ghw_product_propose_crm_followup(...)`**: SDK 复现 crmdemo 样板变更
-  "follow-up cadence 7d → 5d", 返回 `change_id`。
+- **`ghw_product_intent_load(g, path)`**: loads ProductIntent JSON and initializes
+  `ProductEvolutionRuntime`.
+- **`ghw_product_kpi_feed(...)`**: feeds CRM KPI through the runtime, writes E and generates a
+  `kpi_refreshed` audit; no longer just a bare `KpiBridge` diagnostic.
+- **`ghw_product_propose_crm_followup(...)`**: SDK reproduces the crmdemo canonical change
+  "follow-up cadence 7d → 5d" and returns `change_id`.
 - **`ghw_product_approve_change` / `ghw_product_apply_change` / `ghw_product_rollback_change`**:
-  宿主产品必须显式审批后才能应用, 回滚也进入 audit。
-- **`ghw_product_audit_json`**: 返回产品进化审计日志 JSON (C caller 用 `ghw_free_string`)。
-- `ghw.h` 已同步声明; `zig build install-sdk` 验证 SDK artifact 可安装。
+  the host product must explicitly approve before applying; rollback also enters the audit.
+- **`ghw_product_audit_json`**: returns the product-evolution audit log JSON (C callers use
+  `ghw_free_string`).
+- `ghw.h` declarations kept in sync; `zig build install-sdk` verifies the SDK artifact
+  installs.
 
-### 产品运行时持久化/API (2026-06, P18)
+### Product runtime persistence/API (2026-06, P18)
 
-P17 让宿主产品能经 SDK 调用 runtime, 但 ui_server/daemon 场景仍缺"重启不丢变更上下文"与 HTTP 操作面:
+P17 lets host products call the runtime via SDK, but ui_server/daemon scenarios still lack
+"don't lose change context on restart" and an HTTP control surface:
 
-- **`ProductEvolutionRuntime.toJson/loadFromJson`**: 持久化 `next_change_id` /
-  `next_audit_id` / `changes` / `audit`, 恢复后重算 next ids; `required_approvers`
-  从当前 ProductIntent 策略重新派生, 避免复制过期策略。
-- **状态接线**: `ui_server --product-intent PATH` 显式启用产品模式; `saveState`
-  写入 `"product_runtime"` 块, 启动恢复 changes/audit。未传参数时旧行为不变。
-- **产品 HTTP API**: `GET /api/product/runtime`, `GET /api/product/audit`,
+- **`ProductEvolutionRuntime.toJson/loadFromJson`**: persists `next_change_id` /
+  `next_audit_id` / `changes` / `audit`, recomputing next ids after restore;
+  `required_approvers` is re-derived from the current ProductIntent policy to avoid copying
+  stale policy.
+- **State wiring**: `ui_server --product-intent PATH` explicitly enables product mode;
+  `saveState` writes the `"product_runtime"` block, restoring changes/audit at startup. Old
+  behavior unchanged when the flag is absent.
+- **Product HTTP API**: `GET /api/product/runtime`, `GET /api/product/audit`,
   `POST /api/product/propose-crm-followup`, `POST /api/product/approve`,
-  `POST /api/product/apply`, `POST /api/product/rollback`。
-- **错误可用性**: 产品 runtime 未启用返回 503 JSON; 非法状态转换返回 400 JSON,
-  不让连接级错误代替产品语义错误。
-- 单测: `ProductEvolutionRuntime` changes+audit roundtrip; 全量 `zig build test` / `zig build`。
+  `POST /api/product/apply`, `POST /api/product/rollback`.
+- **Error usability**: product runtime not enabled returns 503 JSON; illegal state transitions
+  return 400 JSON — connection-level errors must not replace product-semantic errors.
+- Unit tests: `ProductEvolutionRuntime` changes+audit roundtrip; full `zig build test` /
+  `zig build`.
 
-### 产品可用级主干 (2026-06, P19-P25)
+### Production-grade product backbone (2026-06, P19-P25)
 
-P18 仍是"可审计控制面"; P19-P25 把它推进到能被宿主产品安全接入的最小生产主干:
+P18 was still an "auditable control plane"; P19-P25 advances it to a minimal production backbone
+that host products can safely integrate:
 
-- **P19 ProductAdapter**: `ProductRuntime` 支持可选 `ProductAdapter` vtable
-  (`validate/apply/verify/rollback`); `product_adapter.zig` 提供 `FileConfigAdapter`,
-  `ui_server --product-config PATH` 后 `applyApproved` 会真实写配置文件并 verify,
-  `rollbackApplied` 写回 `rolled_back`。
-- **P20 HTTP 鉴权**: `ui_server --admin-token-env ENV` 读取 token; 产品写接口要求
-  `X-GHW-Admin-Token`。环境变量未设置时保持本地开发兼容。
-- **P21 审计可信化**: `AuditEntry` 增加 `previous_hash/current_hash` hash chain;
-  adapter apply/rollback 失败也写 `change_apply_failed` / `change_rollback_failed` audit。
-- **P22 ProductIntent 治理**: parse 层拒绝空 `product_id/version/approved_by` 与
-  `update_epoch=0`; `GET /api/product/intent` 暴露 manifest hash / update_epoch /
-  adapter 状态 / KPI 最近 feed 时间。
-- **P23 审批台数据面**: `GET /api/product/approvals` 返回 pending/approved changes
-  (tier/target/summary/expected_delta_k/required_approvers), 前端可直接挂审批台。
-- **P24 KPI HTTP feed**: `POST /api/product/kpi` 接收 CRM KPI + 可选 `csat` /
-  `incident_rate`, 经 `ProductRuntime.feedKpi` 限频写 E 并返回 `refreshed`。
-- **P25 验收脚本**: `scripts/product_runtime_acceptance.sh` 构建测试 + 启动 product mode
-  + 走 propose→approve→apply→rollback, 验证文件 adapter 与 audit hash 字段。
+- **P19 ProductAdapter**: `ProductRuntime` supports an optional `ProductAdapter` vtable
+  (`validate/apply/verify/rollback`); `product_adapter.zig` provides `FileConfigAdapter`; with
+  `ui_server --product-config PATH`, `applyApproved` actually writes the config file and
+  verifies, and `rollbackApplied` writes back `rolled_back`.
+- **P20 HTTP auth**: `ui_server --admin-token-env ENV` reads the token; product write endpoints
+  require `X-GHW-Admin-Token`. When the env var is unset, local-dev compatibility is preserved.
+- **P21 audit trustworthiness**: `AuditEntry` gains `previous_hash/current_hash` hash chain;
+  adapter apply/rollback failures also write `change_apply_failed` /
+  `change_rollback_failed` audit entries.
+- **P22 ProductIntent governance**: the parse layer rejects empty `product_id/version/
+  approved_by` and `update_epoch=0`; `GET /api/product/intent` exposes manifest hash /
+  update_epoch / adapter status / last KPI feed time.
+- **P23 approval-desk data plane**: `GET /api/product/approvals` returns pending/approved changes
+  (tier/target/summary/expected_delta_k/required_approvers); the frontend can attach an
+  approval console directly.
+- **P24 KPI HTTP feed**: `POST /api/product/kpi` accepts CRM KPI + optional `csat` /
+  `incident_rate`, writes E via `ProductRuntime.feedKpi` rate limiting, and returns `refreshed`.
+- **P25 acceptance script**: `scripts/product_runtime_acceptance.sh` builds tests + starts
+  product mode + runs propose→approve→apply→rollback, verifying the file adapter and audit hash
+  fields.
 
-### 一产品一 GHW + 分布式共同进化 (2026-06, P26-P28)
+### One GHW per product + distributed co-evolution (2026-06, P26-P28)
 
-P25 之后仍是「单进程产品 runtime」; P26-P28 加固部署契约并探索多 GHW 互联:
+After P25 it was still a "single-process product runtime"; P26-P28 harden the deployment
+contract and explore multi-GHW interconnection:
 
-- **P26 一产品一 GHW**: `ProductInstanceIdentity` 绑定 `product_id` + `instance_id` + `node_id`;
-  `ProductRuntime.toJson/loadFromJson` 嵌入/校验 `product_id`, 快照 product_id 不匹配则拒绝加载;
-  `ui_server --ghw-instance-id` / `--ghw-node-id`; `GET /api/product/identity`。
-- **P27 分布式 Link**: `ui_server --cross-link-port` + `--cross-link-secret` + `--cross-link-peers`
-  启用 TCP+HMAC CrossLink (复用 daemon 同款); GHW Link 新增 `query_product_identity` /
-  `query_product_evolution` / `share_evolution_insight`。
-- **P28 共同进化**: `CoEvolutionRegistry` 缓存 peer 已验证变更洞察 (同 product_id 优先);
-  peer health 周期拉取 `query_product_evolution`; `GET /api/product/co-evolution`;
-  state.json 持久化 `co_evolution` 块。
-
----
-
-## 4. 部署准则
-
-- **零依赖**: 不允许在 `build.zig.zon` 加外部 dep
-- **真实 LLM**: 通过 `HttpLLM.anthropic(model, api_key)` 或 `.openai(model, api_key, base_url)`
-- **API key 绝不写死在源码里** — 用 env var (`--api-key-env`)
-- **状态持久化**: L3 JSON, 路径可配
-- **daemon 模式**: 长跑进程, `std.Io.Threaded` + `std.Io.File` 处理 I/O, 不要 `std.fs` (Zig 0.17 已废弃)
-- **错误**: daemon 失败要 print 到 stderr (不静默 swallow), 退出码非 0
+- **P26 one GHW per product**: `ProductInstanceIdentity` binds `product_id` + `instance_id` +
+  `node_id`; `ProductRuntime.toJson/loadFromJson` embeds/validates `product_id` and refuses to
+  load when the snapshot's product_id doesn't match; `ui_server --ghw-instance-id` /
+  `--ghw-node-id`; `GET /api/product/identity`.
+- **P27 distributed Link**: `ui_server --cross-link-port` + `--cross-link-secret` +
+  `--cross-link-peers` enable the TCP+HMAC CrossLink (reusing the daemon's implementation);
+  GHW Link gains `query_product_identity` / `query_product_evolution` /
+  `share_evolution_insight`.
+- **P28 co-evolution**: `CoEvolutionRegistry` caches peer-validated change insights (same
+  product_id preferred); peer health periodically pulls `query_product_evolution`;
+  `GET /api/product/co-evolution`; state.json persists the `co_evolution` block.
 
 ---
 
-## 5. 存在度公理 v3 (2026-06 重写)
+## 4. Deployment Guidelines
 
-- E 的三源聚合改为**加权幂平均 (Hölder/CES)**, 取代旧的
-  `αM+βR+γN − μ·Var + ν·min`。"失衡惩罚 / 短板优先 / 缺一不可"
-  现在是幂平均凹性的**可证明涌现性质**, 不再是手调的外挂补丁。
-- μ/ν 从加性系数变为曲率参数 (`p = 1 − 1.5ν − 0.5(μ−0.5)`),
-  L1/L4 自适应闭环 (adaptEFormula/Proposed) 全部保留。
-- σ·S (共生)、λ·D (关系涌现) 仍为有界加性调制项。
-- **ρ·K (KPI 产品对齐项) 已并入主公式** (`ExistenceDegree.recordKpi/e/eBreakdown`),
-  默认 `kpi_enabled=false` 中性, 接入产品 KPI 后才生效;ρ 是公理常量不可自调。
-  原并行实验文件 `world/existence_degree.zig` 已合并删除。
-- 完整推导与 8 条性质证明见 `docs/math.md` 与 `src/world/coappropriation.zig`。
+- **Zero dependencies**: no external deps allowed in `build.zig.zon`
+- **Real LLM**: via `HttpLLM.anthropic(model, api_key)` or `.openai(model, api_key, base_url)`
+- **Never hardcode API keys in source** — use an env var (`--api-key-env`)
+- **State persistence**: L3 JSON, configurable path
+- **daemon mode**: long-running process; use `std.Io.Threaded` + `std.Io.File` for I/O, not
+  `std.fs` (deprecated in Zig 0.17)
+- **Errors**: daemon failures must print to stderr (no silent swallowing) with a non-zero exit
+  code
 
-## 6. 安全守门 (2026-06 加固)
+---
 
-- **单一黑名单事实源**: 危险构造 (`@panic`/`unreachable`/...) 与伦理红线
-  集中在 `self_evolution_guard.zig` 的 `DANGEROUS_CONSTRUCTS` /
-  `ETHICAL_REDLINES`, Guard 与 `SelfEncoder.verify` 共用同一份。
-- `RuleProposer` 现在审查候选的**全文** (name+desc+condition+action+rationale),
-  含 `@panic` 的规则会被拒 (旧实现只审 description 且黑名单漏了 @panic)。
-- `Guard.deinitOwned` 用 `owns_config` 标记, 对静态默认配置安全 no-op。
-- `Guard.strict_invariants` 开启后, 缺失不变量的代码被拒 (旧实现是空转循环)。
+## 5. Existence Degree Axiom v3 (2026-06 rewrite)
 
-## 7. 已知限制 + TODO
+- E's three-source aggregation switched to a **weighted power mean (Hölder/CES)**, replacing
+  the old `αM+βR+γN − μ·Var + ν·min`. "Imbalance penalty / weakest-link-first /
+  all-three-indispensable" are now **provable emergent properties** of the power mean's
+  concavity, no longer hand-tuned bolt-on patches.
+- μ/ν changed from additive coefficients to curvature parameters
+  (`p = 1 − 1.5ν − 0.5(μ−0.5)`); the L1/L4 adaptive loops (adaptEFormula/Proposed) are all
+  preserved.
+- σ·S (symbiosis) and λ·D (relational emergence) remain bounded additive modulation terms.
+- **ρ·K (KPI product-alignment term) merged into the main formula**
+  (`ExistenceDegree.recordKpi/e/eBreakdown`); neutral by default with `kpi_enabled=false`,
+  taking effect only once product KPIs are connected; ρ is an axiom constant and cannot
+  self-tune. The old parallel experiment file `world/existence_degree.zig` was merged and
+  deleted.
+- Full derivation and proofs of the 8 properties: see `docs/math.md` and
+  `src/world/coappropriation.zig`.
 
-- 自演化/自迁移落盘链路 **已全部做实** (2026-06):
-  - `compile_verifier.zig`: 真 `std.process.spawn` 调 `zig build` 编译候选代码, 收
-    stdout/stderr/exit_code, 失败把错误摘要回喂 LLM (有真编译通过/失败的单测)。
-  - `state_serializer.zig`: `writeToFile` 真落盘且**原子** (写 `<path>.tmp` 后
-    `renameAbsolute` 覆盖), 崩溃不留半截 state.json; `readFromFile` 真读盘 (roundtrip 单测)。
-  - `self_migration.zig`: `spawnSelfNewVersion` 真 spawn 新版本进程并存 `pending_child`,
-    `waitNewProcess` 真 `wait` 回收退出码 (防僵尸); `writeNewCode` 真写 `next_dir/main_v2.zig`,
-    `rollback` 真删工件。`migrate()` 只"准备好可交接版本", 进程替换需显式调
-    `spawnSelfNewVersion` (避免库使用者在 migrate() 里意外 fork)。
-  - `self_evolution_guard.loadFromFile(io, path)`: 真读 `.ghw_guard.json` 并 `loadFromJson`
-    热加载白名单/黑名单/不变量; 文件缺失返回 `false` 不报错 (单测覆盖)。
-  - `self_migrate_cli.handleMigrateFromArg(alloc, io, path)`: 真读 state.json + parseMinimal
-    打印接管报告 (旧版是伪造 state 的桩, 且 `ss.deinit()` 是未分析的死代码, 已修)。
-  - **端到端真自迁移示例**: `examples/self_migrate_e2e.zig` (`zig build run-self_migrate_e2e`)。
-    同一二进制靠 `--migrate-from` 区分 v1/v2: v1 原子落盘状态 → `spawnSelfNewVersion(args[0])`
-    → `waitNewProcess` 回收; v2 真读状态 → 重建 agent → 继续 runCycle → exit 0 交回。
-    生产形态只需把 `args[0]` 换成 `zig build` 产出的新二进制路径。
-- KPI 喂入: **已接线**。`harness/kpi_bridge.zig` 的 `KpiBridge` 按
-  `kpi_refresh_interval_hours` 限频 (`feed` 高频 / `maybeRefresh` 节流) 调
-  `ed.recordKpi(crm_kpi.composite(...))`;SDK 经 `ghw_kpi_configure` +
-  `ghw_kpi_feed(..., now_unix)` 暴露给产品后端 (见 `lib.zig` / `ghw.h`)。
-- KPI **趋势**驱动: `ExistenceDegree.kpiTrend()` 经 `RuleProposer.setKpiTrend` /
-  `shouldPropose` 接入 L4-1 触发 — KPI 持续下滑即使 E 未跌穿也会主动提议补救。
-- SDK 返回的字符串统一用 c_allocator 分配, `ghw_free_string` 用 `free(3)` 回收
-  (修掉了旧的 no-op 泄漏); 长跑嵌入不再无界增长。
-- SDK 错误可诊断: 各失败路径写入静态描述, C 端经 `ghw_last_error(g)` 区分
-  "没设 key" / "未配置" / "解析失败" 等 (不再只有 -1)。
-- `crm_kpi` 的 `user_satisfaction` / `safety` 两轴不再是硬编码占位: `RawKpi.csat` /
-  `RawKpi.incident_rate` 为**可选**真实来源 (null ⇒ 回退旧代理行为, 不破坏既有语义);
-  SDK 经 `ghw_kpi_feed(..., csat, incident_rate, ...)` 传入 (NaN = 无来源)。
+## 6. Security Guard (2026-06 hardening)
+
+- **Single source of truth for blacklists**: dangerous constructs (`@panic`/`unreachable`/...)
+  and ethical red lines are centralized in `self_evolution_guard.zig`'s `DANGEROUS_CONSTRUCTS` /
+  `ETHICAL_REDLINES`, shared by the Guard and `SelfEncoder.verify`.
+- `RuleProposer` now reviews the candidate's **full text** (name+desc+condition+action+
+  rationale); rules containing `@panic` are rejected (the old implementation only reviewed
+  description and the blacklist missed @panic).
+- `Guard.deinitOwned` uses the `owns_config` flag, safely no-op'ing on the static default
+  config.
+- With `Guard.strict_invariants` enabled, code missing invariants is rejected (the old
+  implementation was a no-op loop).
+
+## 7. Known Limitations + TODO
+
+- The self-evolution/self-migration disk-persistence chain is **now fully real** (2026-06):
+  - `compile_verifier.zig`: really calls `std.process.spawn` to run `zig build` on candidate
+    code, captures stdout/stderr/exit_code, and feeds error summaries back to the LLM on
+    failure (unit tests with real compile pass/fail).
+  - `state_serializer.zig`: `writeToFile` really persists, **atomically** (write `<path>.tmp`
+    then `renameAbsolute` over), so a crash never leaves a half-written state.json;
+    `readFromFile` really reads from disk (roundtrip unit test).
+  - `self_migration.zig`: `spawnSelfNewVersion` really spawns the new-version process and
+    stores `pending_child`; `waitNewProcess` really waits and reaps the exit code (no
+    zombies); `writeNewCode` really writes `next_dir/main_v2.zig`; `rollback` really deletes
+    artifacts. `migrate()` only "prepares a handover-ready version"; process replacement
+    requires an explicit `spawnSelfNewVersion` call (avoiding accidental forks for library
+    users inside migrate()).
+  - `self_evolution_guard.loadFromFile(io, path)`: really reads `.ghw_guard.json` and
+    hot-reloads whitelist/blacklist/invariants via `loadFromJson`; a missing file returns
+    `false` without error (unit test coverage).
+  - `self_migrate_cli.handleMigrateFromArg(alloc, io, path)`: really reads state.json +
+    parseMinimal and prints a handover report (the old version was a stub that faked state,
+    and `ss.deinit()` was unanalyzed dead code — fixed).
+  - **End-to-end real self-migration example**: `examples/self_migrate_e2e.zig`
+    (`zig build run-self_migrate_e2e`). The same binary distinguishes v1/v2 via
+    `--migrate-from`: v1 atomically persists state → `spawnSelfNewVersion(args[0])` →
+    `waitNewProcess` reaps; v2 really reads the state → rebuilds the agent → continues
+    runCycle → exits 0 to hand back. Production form only needs to replace `args[0]` with the
+    new binary path produced by `zig build`.
+- KPI feed: **wired**. `KpiBridge` in `harness/kpi_bridge.zig` rate-limits by
+  `kpi_refresh_interval_hours` (`feed` high-frequency / `maybeRefresh` throttled) and calls
+  `ed.recordKpi(crm_kpi.composite(...))`; the SDK exposes it to product backends via
+  `ghw_kpi_configure` + `ghw_kpi_feed(..., now_unix)` (see `lib.zig` / `ghw.h`).
+- KPI **trend-driven**: `ExistenceDegree.kpiTrend()` feeds the L4-1 trigger via
+  `RuleProposer.setKpiTrend` / `shouldPropose` — a sustained KPI decline proactively triggers
+  remediation proposals even if E hasn't dropped through the floor.
+- Strings returned by the SDK are uniformly allocated with c_allocator and reclaimed via
+  `ghw_free_string` using `free(3)` (fixed the old no-op leak); long-running embedding no
+  longer grows unboundedly.
+- SDK errors are diagnosable: each failure path writes a static description, so the C side can
+  distinguish "key not set" / "not configured" / "parse failed" etc. via `ghw_last_error(g)`
+  (no longer just -1).
+- `crm_kpi`'s `user_satisfaction` / `safety` axes are no longer hardcoded placeholders:
+  `RawKpi.csat` / `RawKpi.incident_rate` are **optional** real sources (null ⇒ falls back to
+  old proxy behavior without breaking existing semantics); the SDK passes them via
+  `ghw_kpi_feed(..., csat, incident_rate, ...)` (NaN = no source).
 
 ## Learned User Preferences
 
-- 存在度公理、三源合恰等核心数学必须扎实落地（可证明性质 + 测试），不接受「加权和 + clamp + 外挂补丁」式实现
-- 收到品质/架构建议后，期望 agent 直接实施改进而非仅出方案（「按照你的建议来」「继续推进」）
-- 代码审查只要阻塞或高风险问题，按 path:line 简洁列出；无阻塞时明确说明并最多列 1–2 个可选改进
-- 长期目标是 GHW 作为可嵌入商城、CRM、研发工具等宿主产品的生产级数字生命底座，而非停留在研究 demo
-- UI/前端修复须实测验证（重启 ui_server + 浏览器硬刷新）后再声称修好，避免只改模板就报完成
+- The core math — the existence degree axiom, 「三源合恰」 (three-source coappropriation), etc.
+  — must be solidly grounded (provable properties + tests); "weighted sum + clamp + bolt-on
+  patch" implementations are not acceptable
+- After receiving quality/architecture suggestions, the user expects the agent to implement
+  improvements directly rather than just propose plans ("go with your suggestion" / "keep
+  pushing forward")
+- Code reviews should list only blocking or high-risk issues, concisely at path:line; when
+  there are no blockers, say so explicitly and list at most 1–2 optional improvements
+- The long-term goal is GHW as a production-grade digital-life substrate embeddable in host
+  products like marketplaces, CRM, and dev tools — not a research demo
+- UI/frontend fixes must be verified live (restart ui_server + hard browser refresh) before
+  claiming they're fixed; don't report done after only editing templates
 
 ## Learned Workspace Facts
 
-- 本地 Zig 工具链（**2026-10 已适配 0.17.0 正式版**）：工程现在 **0.17.0 正式版与 0.17.0-dev.2151+2ec5523d5 双兼容**（`zig build` / `zig build test` / decision0 验收两链均绿）。关键差异已收拢进 `src/util/net_read.zig`：正式版 `NetRead.Result = Error!Stream.ReadResult`（取 `.data_len`；且正式版 std 自带的 `Stream.read` 内部位置解构 ReadResult、被正式版编译器拒绝，**禁止直接调用**），dev.2151 为 `Error!usize`；统一走 `net_read.readChunk`。其余踩坑：正式版 `IpAddress.connect` 必须传 `.{ .mode = .stream }`、`std.mem.trimRight` 已移除、`ghw_link.zig` 因跨目录 import 不再独立 addTest（走 ghw.zig root 链）。验收脚本默认 `zig`（PATH）
-- **跨平台 std.c 陷阱（2026-10 CI 定案）**：macOS 默认可过、`zig build` Linux 必炸的三类 — ① `std.c.Stat` 形状跨平台不兼容（`st.size` 在 linux-gnu 不可用）→ 用增量读到 EOF 取代 stat-then-read；② `dirent.d_namlen` 是 BSD/Darwin 扩展、Linux 没有 → d_name 两平台都 NUL 结尾，统一 `std.mem.span`；③ 独立 test module 不显式 `link_libc` 时 Linux 报 "dependency on libc must be explicitly specified"（Darwin 默认链 libSystem 所以本地不炸）。另：`std.Thread.sleep` 已移除，用 `std.c.nanosleep`（见 `cross_host_test.zig`）。回归防护：`.github/workflows/ci.yml`（ubuntu + Zig 0.17.0）已覆盖，本地改 std.c 直调后必看 CI
-- **System-0 决策核 (zjev, 2026-10 P0)**：`harness/decision_bridge.zig` 把危机状态（M/R/N/E + 宿主传感）发给 [zjev-serve](https://github.com/chy3xyz/zjev)（同工具链 Zig sidecar，`../zjev`），取回温度校准的 choice + confidence/abstention。Gate 三义：`.above` 直通 / `.below` 追加人类移交任务 / `.abstain` 本轮跳过生存任务入队。红线：只偏置不夺权、E/Guard 无写路径、sidecar 失败必直通（绝不阻塞求存）、未启用零行为变化。`--zjev-endpoint URL`（ui/daemon 同名）启用；provenance `survival.decision0`（未启用无此块）；节流 `CONSULT_INTERVAL_TICKS=8`。验收 `scripts/decision0_acceptance.sh`（自动跳过无 zjev 环境）。**时序陷阱**：refreshLifecycle 里咨询点在 assessWithProfile **之前**（用上一轮 shortfall），危机注入后需再推一个 tick；无 LLM 部署推 tick 用 `POST /api/tick`（chat 仅在有 LLM 时走 cycle worker）。P1 已落地（校准资产闭环）：`decision0_log` 表（每次咨询落库，outcome 由 16-tick 后危机翻转回填 resolved/persisted）+ `scripts/export_decision0_dataset.py`（真实导出：resolved→label=当时 action、persisted→label=handoff；`--synthetic N` 合成种子=可辩护规则+10% 标签噪声）+ zjev-fit 实测（300 条种子 → T=16.3 压平 mock 虚高置信，诚实的无信号行为）+ `--profiles-dir` 起 serve 后 GHW 侧 `decision0.calibration=matched`；验收 `decision0_acceptance.sh` 已含 P1 段。**注意**：合成种子只是管道验证 — 真校准需真实咨询积累（resolved/persisted 回填后导出）；架构陷阱已修：咨询点必须在 refreshLifecycle（assess 后、每 cycle），放采样节流块内会几乎不执行
-- **测试接线约定**: Zig 0.17 只收集**被分析文件**的 test 块——新增 harness 模块必须同时 (a) `src/harness/mod.zig` 导出 (b) `src/ghw.zig` comptime 引用块 `_ = harness.xxx;`，否则其测试**静默不运行**、且 `zig build` 产物可能编译失败；曾因此积压 57 个暗测试（2026-09 已清零，382/382 可达）。回归防护：`bash scripts/check_dark_tests.sh`（独立 cache 全量普查，任一声明 test 未运行即非零退出），新增模块后建议跑一次
-- 本地 UI 开发：`scripts/start_ui_servers.sh` 启动 8765（DeepSeek 主实例）、8766（bravo）、8767（alpha）；主 state 在 `~/.local/share/ghw/ui_state.json`
-- UI 静态资源：`ui/vendor/` 提供本地化 Alpine/HTMX；ui_server 通过 `/vendor/*` 服务，不依赖外网 CDN
-- ui_server 启动时将 `ui/index.html` 与 `ui/app.js` 读入内存；修改 UI 后必须重启对应 ui_server 进程并硬刷新浏览器
-- Alpine 前端约定：`app.js` 先于 `alpine.min.js` 加载；根组件必须 `x-data="ghwApp()"`（带括号）；中间路径用 `?.`（`??` 只护最后一级）；`x-show` 为 false 时子表达式仍会求值；SVG 内禁止 Alpine `x-for`，图表用 JS 拼 SVG 再 `x-html`；**UI 测量陷阱（2026-09 定案）**：① 调查面板可见性必须等首次 /api/state 轮询落地（重载机器 ≥12s），state=null 时深链门控隐藏是**正确行为**非 bug；② 测试驱动 Alpine 状态必须走页面事件（@click），`evaluate` 里 `_x_dataStack[0].x=...` 原生赋值不能可靠触发 x-show（x-text 仍更新，会造成「选择性失效」假象）；③ `innerText` 排除隐藏元素且受 CSS uppercase 变换，判断可见性用 `getComputedStyle().display`。诊断结论：vendored Alpine 3.13.5 与官方逐字节一致、功能完好（最小复现 + A/B 验证）
-- 项目文档站位于 `/site`（VitePress）；Node 依赖仅存在于 `/site/package.json`，主 Zig 工程保持零依赖
-- Sandbox/CI 中 `zig build test` 若遇 Zig 全局 cache 权限错误，可用工作区内 `ZIG_GLOBAL_CACHE_DIR`（或 `ZIG_LOCAL_CACHE_DIR`）重跑
-- 负载危机语义: `isHostCrisis` 按**每核负载**判定（load_1m ≥ n_cpus × LOAD_EPS_PER_CORE=1.0，全核饱和才危机）——旧绝对值 8.0 在 12 核机 70% 忙即误判、4 核机又漏报；`SystemCollector` 采集 `n_cpus`（macOS hw.ncpu / Linux getCpuCount）；world_sensor/host_shortfall/survival_learn 全部走同一语义
-- macOS 内存语义: `SystemCollector` 的 mem_pct = (wired+active+compressor)/total —— inactive/speculative 是可回收储备**不计入**（旧公式计入则 macOS 常年 ~95% 假危机、物质基底被永久误压）；页大小从 vm_stat 头解析（Intel 4096）；判据与实测见 `system_collector.zig` VmStatPages 测试
-- ui_server 优雅退出（2026-09）：SIGTERM/INT handler 设 flag + **自连本机端口唤醒 accept**（std.Io 的 accept 对 EINTR 无限重试，只设 flag 解不了阻）+ accept 后查 flag + 退出前存盘；autocli 线程 1s 粒度可中断睡眠。实测 TERM 4–5s 干净退出。验收脚本 trap 仍用 `kill -9`（对一次性实例确定性强）；手动清理 `pkill -9 -f zig-out/bin/ui_server`。次要 flake 因素：并行 `zig build` 竞写 zig-out、重载下启动超窗（脚本已放宽 120×0.5s）
-- 外网主路径: AutoCLI → Memory.world_fetch → world_bridge 入队；`WorldCollector`（autocli ask 子进程）为遗留实验通道，勿与周期 AutoCLI 混用
-- 求存 P8: ActionRunner 在生存任务 pending 时让路 TaskExecutor；query_peer（含手动 API）统一走 `peer_symbiosis`；危机下采纳规则后经 `survival_feedback` 对照 disk/mem/load 是否真降并强化 `[survive:*]` 信念
-- 第一性先验: `harness/primordial_laws.zig` 为 15 条硬公理/生命规律/评估契约的单一事实源（阈值、Bias 上限、ρ、Guard 保护标记）；LLM 不可改写；经 `GET /api/laws` 与 UI「第一性原理」面板只读暴露；消费者必须引用该模块常量
-- 觉醒/求存理想生命周期与缺口评估见 `docs/AWAKENING_LIFECYCLE.md`（合理版：觉醒状态机、宿主短板→M/R/N、TaskQueue 为持久目标、有界求存；与自我进化内环融合：求存提供「为何进化」、L1–L5/规则过 Guard 提供「如何更会求存」；与产品 runtime 分轨）。**P0 已落地**：`awaken` / `host_shortfall` / `existence_phase`；ui_server 危机锁 + `POST /api/awaken`；daemon AutoCLI/world_bridge 默认对齐。**P1 已落地**：`evolution_acceptance` provenance + UI 验收面板；`state_contract` 防 ui/daemon 双写；任务维度台账 `by_dimension`。**P2 已落地**：`host_profile`（desktop/mobile 推送）+ `peer_inbox` + Link `query_shortfall`/`share_shortfall`；daemon CrossLink 对齐；验收脚本 `scripts/awakening_lifecycle_acceptance.sh`。**P2c**：`POST /api/peer-inbox/share` + Status UI inbox 详情 + RuleProposer peer digest；`scripts/peer_shortfall_link_acceptance.sh`
-- **三源供源闭环 (2026-09)**：物象性按存在论归因——宿主物质压力→M（`applyHostPressure`，`HOST_DRAIN_MAX=0.02/次`）；象存量（episodes+2·beliefs+3·rules+world_fetch，1−e^(−s/120) 饱和水位）→R（`applyRepresentationStock`，双向 ±0.02/次）；价值承认+已验证 `[survive:*]` 信念→N（`applyNatureRecognition`）。任务增益经 `applyDim` 70% 归 `required_dimension` 本源、30% 协同溢出；预测误差记 R（象的损耗）。失衡损失（AM−M_p ≥ 0.08）成为规则提议第六触发分支；provenance `survival.existence` + UI「三源合恰」面板只读暴露。常量单一事实源在 `world/coappropriation.zig` 的 `SourceBackflow`（primordial_laws alias）；判据与数学见 `docs/math.md` §6。E 聚合公理未动。**动力学校准 (soak 实测)**：旧直连通道 ×0.1（物取消白吃补给）、err 损耗 ∝R 且 ≤0.01/cycle（防死亡螺旋）、性衰减 0.002·N + 成功加成自限（平衡点 ~0.67，高 N 只能靠意义承认）、价值→N 用独立节流变量（共享会被饿死）；判据与数学见 `docs/math.md` §6。
+- Local Zig toolchain (adapted to Zig 0.17.0 stable in 2026-10): the project now supports both
+  0.17.0 stable and 0.17.0-dev.2151+2ec5523d5 (both `zig build` / `zig build test` / decision0
+  acceptance chains are green). Key differences are centralized in `src/util/net_read.zig`: on
+  stable, `NetRead.Result = Error!Stream.ReadResult` (take `.data_len`; and stable std's own
+  `Stream.read` destructures ReadResult internally, which the stable compiler rejects — **never
+  call it directly**); dev.2151 has `Error!usize`; uniformly go through `net_read.readChunk`.
+  Other gotchas: on stable, `IpAddress.connect` must be passed `.{ .mode = .stream }`;
+  `std.mem.trimRight` has been removed; `ghw_link.zig` no longer has a standalone addTest due to
+  cross-directory imports (goes through the ghw.zig root chain instead). Acceptance scripts
+  default to `zig` (PATH)
+- **Cross-platform std.c pitfalls (settled in CI, 2026-10)**: three categories that pass by
+  default on macOS but always break `zig build` on Linux — ① `std.c.Stat` shapes are
+  cross-platform incompatible (`st.size` unavailable on linux-gnu) → use incremental read-to-EOF
+  instead of stat-then-read; ② `dirent.d_namlen` is a BSD/Darwin extension, absent on Linux →
+  d_name is NUL-terminated on both platforms; uniformly use `std.mem.span`; ③ standalone test
+  modules without explicit `link_libc` fail on Linux with "dependency on libc must be explicitly
+  specified" (Darwin links libSystem by default, so it doesn't blow up locally). Also:
+  `std.Thread.sleep` has been removed — use `std.c.nanosleep` (see `cross_host_test.zig`).
+  Regression guard: `.github/workflows/ci.yml` (ubuntu + Zig 0.17.0) covers this; after locally
+  touching direct std.c calls, always check CI
+- **System-0 decision core (zjev, 2026-10 P0)**: `harness/decision_bridge.zig` sends crisis
+  state (M/R/N/E + host sensors) to [zjev-serve](https://github.com/chy3xyz/zjev)
+  (same-toolchain Zig sidecar, `../zjev`) and gets back a temperature-calibrated choice +
+  confidence/abstention. Gate semantics: `.above` passes through / `.below` appends a human
+  handoff task / `.abstain` skips survival-task enqueueing this cycle. Red lines: bias only,
+  never seizes power; no write path to E/Guard; sidecar failure must pass through (never block
+  survival); zero behavior change when not enabled. Enabled via `--zjev-endpoint URL` (same flag
+  name for ui/daemon); provenance `survival.decision0` (absent when not enabled); throttling
+  `CONSULT_INTERVAL_TICKS=8`. Acceptance: `scripts/decision0_acceptance.sh` (auto-skips when no
+  zjev environment). **Timing trap**: in refreshLifecycle the consultation point is before
+  assessWithProfile (uses the previous round's shortfall); after injecting a crisis you must
+  push one more tick; without an LLM deployment, push ticks with `POST /api/tick` (chat only
+  goes through the cycle worker when an LLM is present). P1 landed (calibration-asset loop):
+  the `decision0_log` table (every consultation persisted; outcome backfilled by crisis flip 16
+  ticks later into resolved/persisted) + `scripts/export_decision0_dataset.py` (real export:
+  resolved→label=action at the time, persisted→label=handoff; `--synthetic N` synthetic seeds =
+  defensible rules + 10% label noise) + zjev-fit measured (300 seeds → T=16.3 flattens mock's
+  inflated confidence — honest no-signal behavior) + after starting serve with
+  `--profiles-dir`, GHW side shows `decision0.calibration=matched`; decision0_acceptance.sh
+  already includes the P1 section. **Note**: synthetic seeds only validate the pipeline — real
+  calibration needs real consultations to accumulate (export after resolved/persisted backfill);
+  architecture trap fixed: the consultation point must be in refreshLifecycle (after assess,
+  every cycle); placing it inside the sampling-throttle block makes it almost never run
+- **Test wiring convention**: Zig 0.17 only collects test blocks from **analyzed files** — a new
+  harness module must both (a) be exported from `src/harness/mod.zig` and (b) be
+  comptime-referenced in `src/ghw.zig` with `_ = harness.xxx;`, otherwise its tests **silently
+  don't run** and `zig build` products may fail to compile; 57 dark tests once piled up this way
+  (cleared in 2026-09, 382/382 reachable). Regression guard: `bash scripts/check_dark_tests.sh`
+  (full census with an isolated cache; any declared-but-unrun test exits non-zero); run it once
+  after adding a module
+- Local UI development: `scripts/start_ui_servers.sh` starts 8765 (DeepSeek main instance),
+  8766 (bravo), 8767 (alpha); the main state lives at `~/.local/share/ghw/ui_state.json`
+- UI static assets: `ui/vendor/` provides localized Alpine/HTMX; ui_server serves them via
+  `/vendor/*` with no external-CDN dependency
+- ui_server loads `ui/index.html` and `ui/app.js` into memory at startup; after UI changes you
+  must restart the corresponding ui_server process and hard-refresh the browser
+- Alpine frontend conventions: `app.js` loads before `alpine.min.js`; the root component must be
+  `x-data="ghwApp()"` (with parentheses); use `?.` for intermediate paths (`??` only guards the
+  last segment); child expressions still evaluate when `x-show` is false; Alpine `x-for` is
+  forbidden inside SVG — build chart SVG in JS and inject via `x-html`; **UI measurement pitfalls
+  (settled 2026-09)**: ① survey-panel visibility must wait for the first /api/state poll to land
+  (≥12s on loaded machines); deep-link gating hidden when state=null is **correct behavior**,
+  not a bug; ② to drive Alpine state in tests, use page events (@click) — native assignment like
+  `_x_dataStack[0].x=...` in `evaluate` does not reliably trigger x-show (x-text still updates,
+  creating a "selective failure" illusion); ③ `innerText` excludes hidden elements and is
+  affected by CSS uppercase transforms — use `getComputedStyle().display` for visibility checks.
+  Diagnosis: the vendored Alpine 3.13.5 is byte-identical to upstream and fully functional
+  (minimal repro + A/B verified)
+- Project docs site lives at `/site` (VitePress); Node dependencies exist only in
+  `/site/package.json` — the main Zig project stays zero-dependency
+- If `zig build test` hits Zig global-cache permission errors in sandbox/CI, rerun with the
+  workspace-local `ZIG_GLOBAL_CACHE_DIR` (or `ZIG_LOCAL_CACHE_DIR`)
+- Load crisis semantics: `isHostCrisis` judges by **per-core load** (load_1m ≥ n_cpus ×
+  LOAD_EPS_PER_CORE=1.0 — crisis only when all cores saturate) — the old absolute value 8.0
+  false-alarms at 70% busy on a 12-core machine and misses on a 4-core machine;
+  `SystemCollector` collects n_cpus (macOS hw.ncpu / Linux getCpuCount);
+  world_sensor/host_shortfall/survival_learn all share the same semantics
+- macOS memory semantics: SystemCollector's mem_pct = (wired+active+compressor)/total ——
+  inactive/speculative are reclaimable reserves and are **not** counted (the old formula counted
+  them, so macOS showed a permanent ~95% false crisis and materiality was permanently
+  mis-suppressed); page size is parsed from the vm_stat header (4096 on Intel); criteria and
+  measurements in the `system_collector.zig` VmStatPages test
+- ui_server graceful shutdown (2026-09): SIGTERM/INT handler sets a flag + **self-connects to
+  the local port to wake accept** (std.Io's accept retries EINTR forever — just setting a flag
+  can't unblock it) + checks the flag after accept + saves state before exit; the autocli
+  thread has a 1s-granularity interruptible sleep. Measured: TERM exits cleanly in 4–5s.
+  Acceptance-script traps still use `kill -9` (deterministic for one-shot instances); manual
+  cleanup: `pkill -9 -f zig-out/bin/ui_server`. Secondary flake factors: parallel `zig build`
+  racing writes to zig-out, startup exceeding the window under load (script widened to 120×0.5s)
+- External-network main path: AutoCLI → Memory.world_fetch → world_bridge enqueueing;
+  `WorldCollector` (autocli ask subprocess) is a legacy experimental channel — don't mix it with
+  the periodic AutoCLI
+- Survival P8: ActionRunner yields to TaskExecutor while survival tasks are pending; query_peer
+  (including the manual API) uniformly goes through `peer_symbiosis`; after adopting rules under
+  crisis, `survival_feedback` checks whether disk/mem/load actually dropped and reinforces
+  `[survive:*]` beliefs
+- First-principles priors: `harness/primordial_laws.zig` is the single source of truth for 15
+  hard axioms/life laws/evaluation contracts (thresholds, Bias caps, ρ, Guard protection flags);
+  the LLM must not rewrite it; exposed read-only via `GET /api/laws` and the UI "First
+  Principles" panel; consumers must reference this module's constants
+- The ideal awakening/survival lifecycle and gap assessment are in
+  `docs/AWAKENING_LIFECYCLE.md` (reasonable version: awakening state machine, host shortfall→
+  M/R/N, TaskQueue as persistent goals, bounded survival; fusion with the self-evolution inner
+  loop: survival provides "why evolve", L1–L5/rules passing the Guard provide "how to survive
+  better"; separate track from the product runtime). **P0 landed**: `awaken` / `host_shortfall` /
+  `existence_phase`; ui_server crisis lock + `POST /api/awaken`; daemon AutoCLI/world_bridge
+  aligned by default. **P1 landed**: `evolution_acceptance` provenance + UI acceptance panel;
+  `state_contract` prevents ui/daemon double-writes; task dimension ledger `by_dimension`.
+  **P2 landed**: `host_profile` (desktop/mobile push) + `peer_inbox` + Link
+  `query_shortfall`/`share_shortfall`; daemon CrossLink aligned; acceptance script
+  `scripts/awakening_lifecycle_acceptance.sh`. **P2c**: `POST /api/peer-inbox/share` + Status UI
+  inbox details + RuleProposer peer digest; `scripts/peer_shortfall_link_acceptance.sh`
+- **Three-source backflow loop (2026-09)**: materiality is attributed ontologically — host
+  material pressure → M (`applyHostPressure`, `HOST_DRAIN_MAX=0.02/apply`); representation stock
+  (episodes+2·beliefs+3·rules+world_fetch, saturating level 1−e^(−s/120)) → R
+  (`applyRepresentationStock`, bidirectional ±0.02/apply); value recognition + verified
+  `[survive:*]` beliefs → N (`applyNatureRecognition`). Task gains go through `applyDim`: 70% to
+  the `required_dimension` source, 30% synergistic spillover; prediction error is recorded in R
+  (representation loss). Imbalance loss (AM−M_p ≥ 0.08) became the sixth trigger branch for rule
+  proposals; provenance `survival.existence` + read-only exposure in the UI 「三源合恰」 panel.
+  Constants' single source of truth is `SourceBackflow` in `world/coappropriation.zig`
+  (primordial_laws alias); criteria and math in `docs/math.md` §6. The E aggregation axiom is
+  untouched. **Dynamics calibration (soak-measured)**: old direct channels ×0.1 (materiality no
+  longer receives unearned free supply), err loss ∝R and ≤0.01/cycle (prevents death spirals),
+  nature decay 0.002·N + self-limiting success bonus (equilibrium ~0.67 — high N only comes from
+  meaning recognition), value→N uses an independent throttle variable (sharing it would starve);
+  criteria and math in `docs/math.md` §6.
