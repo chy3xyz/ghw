@@ -326,23 +326,24 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) LoadError!ProductInt
     if (fd < 0) return error.FileNotFound; // coarse-grained; refine in v0.5
     defer _ = std.c.close(fd);
 
-    // Stat the file for size. stat() also needs sentinel-terminated path.
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(path_z, &st) != 0) return error.FileNotFound;
-    const size: usize = @intCast(@as(u64, @bitCast(st.size)));
-    if (size == 0) return error.InvalidJson;
-    if (size > 1 * 1024 * 1024) return error.InvalidJson; // 1 MB hard cap
+    // Read incrementally up to the 1 MB cap (+1 byte to detect overflow).
+    // No std.c.Stat: its linux-gnu shape differs from darwin and we don't
+    // need the size up front — read-to-EOF also removes the stat/read TOCTOU.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        if (buf.items.len > 1 * 1024 * 1024) return error.InvalidJson; // 1 MB hard cap
+        const remaining = 1 * 1024 * 1024 + 1 - buf.items.len;
+        const n = std.c.read(fd, &chunk, @min(chunk.len, remaining));
+        if (n < 0) return error.InvalidJson;
+        if (n == 0) break; // EOF
+        try buf.appendSlice(allocator, chunk[0..@intCast(n)]);
+    }
+    if (buf.items.len == 0) return error.InvalidJson;
+    if (buf.items.len > 1 * 1024 * 1024) return error.InvalidJson;
 
-    const buf = try allocator.alloc(u8, size);
-    defer allocator.free(buf);
-
-    // Read the whole file in one syscall.
-    const n = std.c.read(fd, buf.ptr, size);
-    if (n < 0) return error.InvalidJson;
-    const n_usize: usize = @intCast(n);
-    if (n_usize != size) return error.InvalidJson;
-
-    return parse(allocator, buf);
+    return parse(allocator, buf.items);
 }
 
 /// Parse a ProductIntent from an in-memory JSON buffer.

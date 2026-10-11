@@ -5972,15 +5972,21 @@ fn readSmallFilePosix(alloc: Allocator, path: []const u8, max_bytes: usize) ![]u
     const fd = std.c.open(path_z, oflag, @as(c_uint, 0));
     if (fd < 0) return error.FileNotFound;
     defer _ = std.c.close(fd);
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(path_z, &st) != 0) return error.FileNotFound;
-    const size: usize = @intCast(@as(u64, @bitCast(st.size)));
-    if (size > max_bytes) return error.FileTooLarge;
-    const buf = try alloc.alloc(u8, size);
-    errdefer alloc.free(buf);
-    const n = std.c.read(fd, buf.ptr, size);
-    if (n < 0 or @as(usize, @intCast(n)) != size) return error.ReadFailed;
-    return buf;
+    // Read incrementally up to max_bytes (+1 to detect overflow). No
+    // std.c.Stat — its linux-gnu shape differs from darwin; read-to-EOF
+    // also removes the stat/read TOCTOU.
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        if (buf.items.len > max_bytes) return error.FileTooLarge;
+        const remaining = max_bytes + 1 - buf.items.len;
+        const n = std.c.read(fd, &chunk, @min(chunk.len, remaining));
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break; // EOF
+        try buf.appendSlice(alloc, chunk[0..@intCast(n)]);
+    }
+    return buf.toOwnedSlice(alloc);
 }
 
 fn sha256HexAlloc(alloc: Allocator, bytes: []const u8) ![]u8 {
