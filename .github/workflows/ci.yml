@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install sqlite3 (dev headers)
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Cache zig global cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-global-${{ runner.os }}-${{ hashFiles('build.zig.zon', 'build.zig', 'src/**/*.zig') }}
+          restore-keys: zig-global-${{ runner.os }}-
+
+      - name: Build all artifacts
+        run: zig build
+
+      - name: Unit tests (zig build test)
+        run: zig build test
+
+      - name: Dark-test census (every declared test must run)
+        run: bash scripts/check_dark_tests.sh
+
+      - name: Self-evolution A/B benchmark
+        run: bash scripts/self_evolution_bench.sh
+
+      - name: Product runtime acceptance (propose → approve → apply → rollback)
+        run: bash scripts/product_runtime_acceptance.sh

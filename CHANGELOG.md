@@ -4,6 +4,8 @@ All notable changes to the project. Version numbers follow [Semantic Versioning]
 
 ## [Unreleased]
 
+- **GitHub Actions CI** — `.github/workflows/ci.yml` (ubuntu, Zig 0.17.0): `zig build`, `zig build test`, dark-test census, self-evolution A/B benchmark, product-runtime acceptance — runs on push to `main` and every PR; CI badge in readme
+
 - **Reproducible self-evolution A/B benchmark** — deterministic evidence that the closed loop (LLM-proposed rule → SelfEvolutionGuard → SelfEncoder adoption → RuleBias → ΔE) raises existence degree E in an R-deficient world
   - New module `src/harness/self_evolution_bench.zig` (4 unit tests: determinism, guard-in-the-loop, mechanism, JSON contract), runner `examples/bench_self_evolution.zig`, acceptance wrapper `scripts/self_evolution_bench.sh`, methodology `docs/BENCHMARK.md`
   - Two arms identical except the rule library (same seed, frozen L4 auto flags, constant zero-feature world, MockChatLLM — no network/API keys); pass bar `AUC_IMPROVE_MIN = 1.02` as a named, documented constant

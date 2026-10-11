@@ -10,7 +10,8 @@
 
 [![Zig](https://img.shields.io/badge/zig-0.17.0-orange)](https://ziglang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-396%2F396-green)]()
+[![CI](https://github.com/chy3xyz/ghw/actions/workflows/ci.yml/badge.svg)](https://github.com/chy3xyz/ghw/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-400%2F400-green)]()
 [![Daemon](https://img.shields.io/badge/daemon-22h_RSS_8MB-green)]()
 [![SDK](https://img.shields.io/badge/C%20ABI-v0.3-blue)]()
 
