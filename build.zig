@@ -66,6 +66,9 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(src_path),
                 .target = target,
                 .optimize = optimize,
+                // product_intent/autocli 等用 std.c.* (libc extern);
+                // macOS 默认链 libSystem 故本地不报错, Linux 必须显式声明。
+                .link_libc = true,
                 .imports = &.{
                     .{ .name = "ghw", .module = ghw_mod },
                 },
