@@ -1,3 +1,7 @@
+---
+order: 1
+---
+
 # Quick Start
 
 This page is for developers running GHW for the first time. You can treat it as three entry points: local build, starting the UI, and running in product runtime mode.

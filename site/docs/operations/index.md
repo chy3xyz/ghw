@@ -1,3 +1,7 @@
+---
+order: 4
+---
+
 # Deployment and Operations
 
 GHW can run in three ways:

@@ -1,3 +1,7 @@
+---
+order: 2
+---
+
 # Product Digital Life Foundation
 
 GHW's product foundation goal: give a software product an evolution kernel that is auditable, approval-gated, rollback-capable, and continuously learning.

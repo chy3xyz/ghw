@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/site/public}"
 URL_PREFIX="${2:-/ghw/}"
-ZDOC_VERSION="v0.16.0"
+ZDOC_VERSION="v0.16.1"
 TOOLS="$ROOT/.tools"
 
 case "$(uname -sm)" in

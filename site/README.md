@@ -28,6 +28,8 @@ frontmatter for its hero and feature cards.
 - `docs/operations/` — deployment and operations
 
 The sidebar is derived from the directory tree; section labels come from each
-directory's index page H1 and page titles from the first `#` heading. Internal
-links use GitHub-style `.md` references and zdoc rewrites them to site URLs at
-build time.
+directory's index page H1 and page titles from the first `#` heading. Each
+section index page sets `order` in frontmatter (1 = Guide, 2 = Product Runtime,
+3 = API, 4 = Operations) so the sidebar reads in that order without renaming any
+directory — the URLs stay `/guide/`, `/api/`, and so on. Internal links use
+GitHub-style `.md` references and zdoc rewrites them to site URLs at build time.
