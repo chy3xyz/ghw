@@ -20,7 +20,7 @@ Status: minimal execution surface completed.
 
 `ProductRuntime` supports an optional adapter vtable:
 
-```text
+```
 validate(change)
 apply(change)
 verify(change)

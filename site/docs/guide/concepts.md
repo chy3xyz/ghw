@@ -54,7 +54,7 @@ These signals do not directly "command" the agent; instead, they change subseque
 
 The product foundation adds one more closed loop:
 
-```text
+```
 ProductIntent
   -> KPI Bridge
   -> ProductEvolutionRuntime

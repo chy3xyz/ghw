@@ -4,7 +4,7 @@ GHW is divided into four layers: World, Goal, Harness, and Agent. The product ru
 
 ## Four-Layer Structure
 
-```text
+```
 External World
   |
   v
@@ -58,7 +58,7 @@ Harness is the execution and governance layer:
 
 Agent is the loop itself:
 
-```text
+```
 collect world
   -> update E
   -> select top goal

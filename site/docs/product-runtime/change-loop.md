@@ -4,7 +4,7 @@ The core of the product runtime is turning "I want to change the product" into a
 
 ## State Machine
 
-```text
+```
 proposed / pending_consent
   -> approved
   -> applied
@@ -87,7 +87,7 @@ Each record contains the timestamp, tenant, change id, and detail.
 
 `applyApproved` currently only changes GHW internal state and writes an audit entry. In production a ProductAdapter must be wired in:
 
-```text
+```
 ChangeProposal
   -> ProductAdapter.validate
   -> ProductAdapter.apply

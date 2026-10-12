@@ -4,7 +4,7 @@ GHW's product foundation goal: give a software product an evolution kernel that 
 
 It does not let an agent directly modify a production system. Instead, it enforces a closed loop:
 
-```text
+```
 ProductIntent
   -> KPI
   -> ChangeProposal

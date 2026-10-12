@@ -15,7 +15,7 @@ Let the digital life inside the CRM product focus on:
 
 The canonical proposal currently built in:
 
-```text
+```
 Tighten follow-up cadence from 7d to 5d
 ```
 

@@ -10,7 +10,7 @@ zig build install-sdk
 
 Artifacts:
 
-```text
+```
 zig-out/include/ghw.h
 zig-out/lib/libghw.a
 ```
