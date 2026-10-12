@@ -1,11 +1,32 @@
-# GHW
+---
+layout: home
+title: GHW
 
-**Goal-Harness-World** — a digital life framework that closes the loop across math, rules, memory, feedback, and product KPIs.
+hero:
+  name: GHW
+  text: Goal-Harness-World
+  tagline: A digital life framework that closes the loop across math, rules, memory, feedback, and product KPIs
+  actions:
+    - theme: brand
+      text: Get Started
+      link: /guide/
+    - theme: alt
+      text: Product Runtime
+      link: /product-runtime/
+    - theme: alt
+      text: C SDK
+      link: /api/sdk/
 
-- **LLM is fuel, not the brain**: the LLM parses, proposes, and generates candidates; decisions, guard, verification, and adoption are completed by GHW's existence degree, rules, and feedback loops.
-- **Auditable self-evolution**: the L1-L5 self-evolution chain passes SelfEvolutionGuard, CompileVerifier, SelfEncoder, and ΔE feedback, so proposals never bypass the rules.
-- **Product digital life runtime**: ProductIntent, KPI Bridge, ChangeProposal, Consent, Audit, and the SDK/API let GHW embed into real products.
-- **Human symbiosis loop**: TaskQueue, HumanSignal, HumanGSP, ValueTrendTracker, and chat memory bring human tasks and feedback into the long-term trajectory of E.
+features:
+  - title: LLM is fuel, not the brain
+    details: The LLM parses, proposes, and generates candidates; decisions, guard, verification, and adoption are carried out by GHW's existence degree, rules, and feedback loops.
+  - title: Auditable self-evolution
+    details: The L1-L5 self-evolution chain passes SelfEvolutionGuard, CompileVerifier, SelfEncoder, and delta-E feedback, so proposals never bypass the rules.
+  - title: Product digital life runtime
+    details: ProductIntent, KPI Bridge, ChangeProposal, Consent, Audit, and the SDK/API let GHW embed into real products.
+  - title: Human symbiosis loop
+    details: TaskQueue, HumanSignal, HumanGSP, ValueTrendTracker, and chat memory bring human tasks and feedback into the long-term trajectory of E.
+---
 
 ## What is GHW
 

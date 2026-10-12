@@ -5,13 +5,13 @@
 #   bash scripts/build_docs.sh [output-dir] [url-prefix]
 #
 # Defaults: output-dir=site/public, url-prefix=/ghw/ (GitHub Pages project site).
-# A url-prefix of "/" produces root-absolute links with no rewrite.
+# The prefix is passed straight to zdoc's --url-prefix.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/site/public}"
 URL_PREFIX="${2:-/ghw/}"
-ZDOC_VERSION="v0.15.0"
+ZDOC_VERSION="v0.16.0"
 TOOLS="$ROOT/.tools"
 
 case "$(uname -sm)" in
@@ -40,16 +40,6 @@ if [ ! -x "$ZDOC_BIN" ] || ! "$ZDOC_BIN" version 2>/dev/null | grep -q "${ZDOC_V
 fi
 
 rm -rf "$OUT"
-"$ZDOC_BIN" docs "$ROOT/site/docs" --output "$OUT" --title "GHW"
+"$ZDOC_BIN" docs "$ROOT/site/docs" --output "$OUT" --title "GHW" --url-prefix "$URL_PREFIX"
 
-# zdoc emits root-absolute URLs; rewrite them under the Pages project path.
-if [ "$URL_PREFIX" != "/" ]; then
-  prefix="${URL_PREFIX%/}"
-  find "$OUT" -name '*.html' -exec sed -i.bak \
-    -e "s|href=\"/|href=\"$prefix/|g" \
-    -e "s|src=\"/|src=\"$prefix/|g" {} +
-  find "$OUT" -name '*.html.bak' -delete
-  echo "url prefix applied: $prefix/"
-fi
-
-echo "docs site written to $OUT"
+echo "docs site written to $OUT (url prefix: $URL_PREFIX)"
