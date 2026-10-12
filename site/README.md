@@ -1,23 +1,28 @@
 # GHW Documentation Site
 
-VitePress documentation for GHW.
+Static documentation for GHW, built with [zdoc](https://github.com/chy3xyz/zdoc)
+from the plain Markdown files in `docs/`. No config file, no Node.js, no
+dependencies beyond the zdoc binary.
 
-## Commands
+## Build
 
 ```bash
-npm install
-npm run docs:dev
-npm run docs:build
-npm run docs:preview
+bash scripts/build_docs.sh
 ```
 
-The site source lives in `docs/`. Build output goes to `docs/.vitepress/dist/`
-and is ignored by git.
+This downloads a pinned zdoc release into `.tools/` (cached, gitignored),
+builds the site into `site/public/`, and rewrites root-absolute URLs under
+`/ghw/` so the site works as a GitHub Pages project page. Pass a second
+argument to override the prefix (use `/` when serving from a domain root).
 
-## Security Note
+## Source layout
 
-`npm audit --omit=dev` currently reports 0 production vulnerabilities. Full
-`npm audit` reports a Vite/VitePress development-server advisory in the
-VitePress dependency chain with no available fix at the time this site was
-added. Treat `docs:dev` as a local-only development server; do not expose it
-publicly.
+- `docs/index.md` — landing page
+- `docs/guide/` — getting started, concepts, architecture
+- `docs/product-runtime/` — product digital life runtime
+- `docs/api/` — HTTP API, C SDK, state persistence
+- `docs/operations/` — deployment and operations
+
+The sidebar is derived from the directory tree; a page's title comes from its
+first `#` heading. Internal links use GitHub-style `.md` references and zdoc
+rewrites them to site URLs at build time.

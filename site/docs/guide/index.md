@@ -96,7 +96,7 @@ cc -O2 -I zig-out/include -L zig-out/lib \
   examples/embed_demo_v3.c -lghw -lsqlite3 -o embed_demo_v3
 ```
 
-For more details, see the [C SDK](/api/sdk).
+For more details, see the [C SDK](/api/sdk.md).
 
 ## Awakening and Survival
 

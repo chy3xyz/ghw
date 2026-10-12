@@ -98,7 +98,7 @@ Not in the short term:
 - Letting the LLM modify ProductIntent directly.
 - Automated product changes that skip Consent.
 - Binding the product runtime to a single SaaS.
-- Introducing Node/VitePress dependencies into the main Zig project.
+- Introducing Node.js/npm dependencies into the main Zig project.
 
 ## Awakening / Survival Lifecycle (Parallel Track)
 

@@ -661,8 +661,9 @@ contract and explore multi-GHW interconnection:
   affected by CSS uppercase transforms — use `getComputedStyle().display` for visibility checks.
   Diagnosis: the vendored Alpine 3.13.5 is byte-identical to upstream and fully functional
   (minimal repro + A/B verified)
-- Project docs site lives at `/site` (VitePress); Node dependencies exist only in
-  `/site/package.json` — the main Zig project stays zero-dependency
+- Project docs site lives at `/site` and is built by [zdoc](https://github.com/chy3xyz/zdoc)
+  (`bash scripts/build_docs.sh`) — plain Markdown in, static HTML out; the whole repo,
+  docs included, stays zero-Node/zero-npm
 - If `zig build test` hits Zig global-cache permission errors in sandbox/CI, rerun with the
   workspace-local `ZIG_GLOBAL_CACHE_DIR` (or `ZIG_LOCAL_CACHE_DIR`)
 - Load crisis semantics: `isHostCrisis` judges by **per-core load** (load_1m ≥ n_cpus ×

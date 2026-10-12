@@ -1,31 +1,11 @@
----
-layout: home
+# GHW
 
-hero:
-  name: GHW
-  text: Goal-Harness-World
-  tagline: A digital life framework that closes the loop across math, rules, memory, feedback, and product KPIs
-  actions:
-    - theme: brand
-      text: Get Started
-      link: /guide/
-    - theme: alt
-      text: Product Runtime
-      link: /product-runtime/
-    - theme: alt
-      text: C SDK
-      link: /api/sdk
+**Goal-Harness-World** — a digital life framework that closes the loop across math, rules, memory, feedback, and product KPIs.
 
-features:
-  - title: LLM is fuel, not the brain
-    details: The LLM parses, proposes, and generates candidates; decisions, guard, verification, and adoption are completed by GHW's existence degree, rules, and feedback loops.
-  - title: Auditable self-evolution
-    details: The L1-L5 self-evolution chain passes SelfEvolutionGuard, CompileVerifier, SelfEncoder, and ΔE feedback, so proposals never bypass the rules.
-  - title: Product digital life runtime
-    details: ProductIntent, KPI Bridge, ChangeProposal, Consent, Audit, and the SDK/API let GHW embed into real products.
-  - title: Human symbiosis loop
-    details: TaskQueue, HumanSignal, HumanGSP, ValueTrendTracker, and chat memory bring human tasks and feedback into the long-term trajectory of E.
----
+- **LLM is fuel, not the brain**: the LLM parses, proposes, and generates candidates; decisions, guard, verification, and adoption are completed by GHW's existence degree, rules, and feedback loops.
+- **Auditable self-evolution**: the L1-L5 self-evolution chain passes SelfEvolutionGuard, CompileVerifier, SelfEncoder, and ΔE feedback, so proposals never bypass the rules.
+- **Product digital life runtime**: ProductIntent, KPI Bridge, ChangeProposal, Consent, Audit, and the SDK/API let GHW embed into real products.
+- **Human symbiosis loop**: TaskQueue, HumanSignal, HumanGSP, ValueTrendTracker, and chat memory bring human tasks and feedback into the long-term trajectory of E.
 
 ## What is GHW
 
@@ -47,27 +27,21 @@ The project already has the core loops of a research framework and a product run
 - ProductRuntime supports ProductIntent → KPI → Proposal → Consent → Apply/Rollback → Audit.
 - The C SDK and the `ui_server` HTTP API expose the product runtime capabilities.
 
-Parts still being engineered include real product Adapters, signed audits, role permissions, more deployment templates, and a long-term stress-test matrix. See the [Roadmap](/roadmap).
+Parts still being engineered include real product Adapters, signed audits, role permissions, more deployment templates, and a long-term stress-test matrix. See the [Roadmap](roadmap.md).
 
 ## Who This Is For
 
-- To understand the GHW architecture: start with [Core Concepts](/guide/concepts) and [Architecture Overview](/guide/architecture).
-- To embed GHW into a product: start with [Product Digital Life Runtime](/product-runtime/).
-- To call the APIs: see [HTTP API](/api/http) and [C SDK](/api/sdk).
-- To deploy and operate: see [Deployment & Operations](/operations/).
+- To understand the GHW architecture: start with [Core Concepts](guide/concepts.md) and [Architecture Overview](guide/architecture.md).
+- To embed GHW into a product: start with [Product Digital Life Runtime](product-runtime/index.md).
+- To call the APIs: see [HTTP API](api/http.md) and [C SDK](api/sdk.md).
+- To deploy and operate: see [Deployment & Operations](operations/index.md).
 
 ## Build the Docs Site
 
-```bash
-cd site
-npm install
-npm run docs:dev
-```
-
-Production build:
+The docs are plain Markdown built with [zdoc](https://github.com/chy3xyz/zdoc) — no config file, no Node.js:
 
 ```bash
-cd site
-npm run docs:build
-npm run docs:preview
+zdoc docs site/docs --output site/public --title "GHW"
 ```
+
+The output in `site/public/` is a static site ready for any web server or GitHub Pages.

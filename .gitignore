@@ -118,7 +118,12 @@ __pycache__/
 .cursor/
 .worktrees/
 .zig-cache-global/
+.tools/
 reasonix.toml
+
+# Docs build output (regenerate via scripts/build_docs.sh)
+/site/public/
+/.zdoc-theme/
 
 # Stray runtime sqlite at repo root
 /.db

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'site/**'
+      - 'scripts/build_docs.sh'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -22,23 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: site/package-lock.json
-
-      - name: Install dependencies
-        working-directory: site
-        run: npm ci
-
-      - name: VitePress build
-        working-directory: site
-        run: npm run docs:build
+      - name: Build docs with zdoc
+        run: bash scripts/build_docs.sh
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site/docs/.vitepress/dist
+          path: site/public
 
   deploy:
     needs: build
