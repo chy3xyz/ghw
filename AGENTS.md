@@ -643,8 +643,14 @@ contract and explore multi-GHW interconnection:
   (cleared in 2026-09, 382/382 reachable). Regression guard: `bash scripts/check_dark_tests.sh`
   (full census with an isolated cache; any declared-but-unrun test exits non-zero); run it once
   after adding a module
-- Local UI development: `scripts/start_ui_servers.sh` starts 8765 (DeepSeek main instance),
-  8766 (bravo), 8767 (alpha); the main state lives at `~/.local/share/ghw/ui_state.json`
+- Local UI development: `scripts/start_ui_servers.sh` starts 8765 (DeepSeek main instance,
+  30s heartbeat), 8766 (bravo, 2s fast heartbeat), 8767 (alpha, 2s + **System-0 pilot**: if
+  `../zjev/zig-out/bin/zjev-serve` exists the script boots it and pins alpha via
+  `--zjev-endpoint`); the main state lives at `~/.local/share/ghw/ui_state.json`. Tiered
+  heartbeat keeps the LLM API from flooding; **starting a server manually without
+  `--auto-tick-ms` = hibernation** (no input → no cycles; tick is a historical counter).
+  Restarting from tools: a timeout kill takes the nohup'd children down with the process
+  group — detach via `subprocess.Popen(..., start_new_session=True)`
 - UI static assets: `ui/vendor/` provides localized Alpine/HTMX; ui_server serves them via
   `/vendor/*` with no external-CDN dependency
 - ui_server loads `ui/index.html` and `ui/app.js` into memory at startup; after UI changes you
