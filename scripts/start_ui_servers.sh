@@ -10,6 +10,15 @@ UIDIR="$ROOT/ui"
 GHW_DIR="${GHW_STATE_DIR:-$HOME/.local/share/ghw}"
 PEERS="$GHW_DIR/peers.txt"
 AUTO_TICK_MS="${GHW_AUTO_TICK_MS:-30000}"
+# 无 LLM 实例的快心跳 (免费, 供源/任务/校准全链路可见呼吸)
+AUTO_TICK_MS_FAST="${GHW_AUTO_TICK_MS_FAST:-2000}"
+# System-0 决策核 (zjev sidecar): 二进制存在即起服并挂到 alpha (试点实例)
+ZJEV_SERVE="$ROOT/../zjev/zig-out/bin/zjev-serve"
+ZJEV_PORT="${GHW_ZJEV_PORT:-19377}"
+ZJEV_ARGS=""
+if [[ -x "$ZJEV_SERVE" ]]; then
+  ZJEV_ARGS="--zjev-endpoint http://127.0.0.1:$ZJEV_PORT"
+fi
 
 if [[ ! -x "$UI" ]]; then
   echo "构建 ui_server..."
@@ -21,6 +30,7 @@ if [[ ! -x "$UI" ]]; then
 fi
 
 pkill -9 -f "$ROOT/zig-out/bin/ui_server" 2>/dev/null || true
+pkill -9 -f "zjev-serve --port" 2>/dev/null || true
 sleep 1
 
 mkdir -p "$GHW_DIR"
@@ -41,14 +51,20 @@ nohup "$UI" --port 8765 --id ghw-ui \
   >>/tmp/ui_server_8765.log 2>&1 &
 nohup "$UI" --port 8766 --id bravo \
   --state /tmp/state_bravo.json --ui-dir "$UIDIR" \
-  --auto-tick-ms "$AUTO_TICK_MS" \
+  --auto-tick-ms "$AUTO_TICK_MS_FAST" \
   --peers-file "$PEERS" --llm none \
   >>/tmp/ui_server_8766.log 2>&1 &
 nohup "$UI" --port 8767 --id alpha \
   --state /tmp/state_alpha.json --ui-dir "$UIDIR" \
-  --auto-tick-ms "$AUTO_TICK_MS" \
-  --peers-file "$PEERS" --llm none \
+  --auto-tick-ms "$AUTO_TICK_MS_FAST" \
+  --peers-file "$PEERS" --llm none $ZJEV_ARGS \
   >>/tmp/ui_server_8767.log 2>&1 &
+if [[ -x "$ZJEV_SERVE" ]]; then
+  (cd "$ROOT/../zjev" && nohup ./zig-out/bin/zjev-serve --port "$ZJEV_PORT" \
+    --mock-mode peaked --profiles-dir model/calibration \
+    >>/tmp/zjev_serve.log 2>&1 &)
+  echo "System-0 决策核: zjev-serve :$ZJEV_PORT → alpha"
+fi
 
 sleep 4
 for p in 8765 8766 8767; do
@@ -57,5 +73,5 @@ for p in 8765 8766 8767; do
   echo "  :$p  HTTP=$code  tick=$tick"
 done
 echo "打开 http://127.0.0.1:8765/  (日志: /tmp/ui_server_8765.log)"
-echo "peers: $PEERS  auto-tick: ${AUTO_TICK_MS}ms"
+echo "peers: $PEERS  auto-tick: 8765=${AUTO_TICK_MS}ms bravo/alpha=${AUTO_TICK_MS_FAST}ms"
 echo "守护: nohup scripts/watch_ui_servers.sh >>/tmp/ui_watchdog.log 2>&1 &"
