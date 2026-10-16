@@ -54,6 +54,7 @@ pub const Task = struct {
         metabolism,
         world_fetch,
         peer_symbiosis,
+        self_knowing,
     };
 
     pub fn sourceLabel(s: Source) []const u8 {
@@ -70,6 +71,7 @@ pub const Task = struct {
             .metabolism => "meta",
             .world_fetch => "fetch",
             .peer_symbiosis => "peer",
+            .self_knowing => "about",
         };
     }
 

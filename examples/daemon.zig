@@ -68,9 +68,10 @@ const Config = struct {
     stdout_jsonl: bool = false,
     /// 每 N tick 打一次进度日志 (默认 256, 0=完全静默)
     log_every: u64 = 256,
-    /// 每 cycle 之间 sleep 多少 ms (默认 100ms = 10 cycle/sec; 0 = 不 sleep, 调试用)
-    /// 设置合理值避免 busy-wait 把 CPU 烧到 100%
-    tick_interval_ms: u64 = 100,
+    /// 每 cycle 之间 sleep 多少 ms (默认 30s，与 ui_server 主实例同级; 0 = 不 sleep)
+    tick_interval_ms: u64 = 30_000,
+    /// 进程 RSS 高水位。超过则停，避免泄漏把交换区撑满。
+    rss_stop_bytes: u64 = 1024 * 1024 * 1024,
     verbose: bool = false,
     id: []const u8 = "daemon-001",
     dim: usize = 4,
@@ -291,7 +292,7 @@ fn printHelp() void {
         \\  --outbox <path>         写 cycle 报告到 JSONL 文件
         \\  --stdout-jsonl          也把 cycle 报告打 stdout (生产不要开, 会爆 log)
         \\  --log-every N           进度日志间隔 (默认 256, 0=静默)
-        \\  --tick-interval-ms N    每 cycle sleep 多少 ms (默认 100, 0=不 sleep)
+        \\  --tick-interval-ms N    每 cycle sleep 多少 ms (默认 30000, 0=不 sleep)
         \\  --max-agent-tick N      agent.tick 上限; 超限或像 Unix 时间戳则启动重置 (默认 10^9)
         \\  --no-autocli            禁用 AutoCLI 外网拉取 (默认启用)
         \\  --autocli-interval-s N  AutoCLI 间隔秒 (默认 300)
@@ -872,6 +873,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // 收到 SIGTERM/SIGINT/SIGHUP → graceful shutdown
         if (should_stop.load(.acquire)) {
             std.debug.print("[daemon] 收到停止信号, 进入 graceful shutdown\n", .{});
+            break;
+        }
+        const rss_bytes = rssHighWaterBytes();
+        if (rss_bytes > cfg.rss_stop_bytes) {
+            std.debug.print("[daemon] RSS 高水位 {d} MiB 超过 {d} MiB, 停止以免换出撑满内存\n", .{
+                rss_bytes / (1024 * 1024),
+                cfg.rss_stop_bytes / (1024 * 1024),
+            });
             break;
         }
 
@@ -1496,9 +1505,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
         }
 
-        // === Phase 1.10: 节流 (避免 busy-wait 烧 100% CPU) ===
-        // 默认 100ms = 10 cycle/sec, 生产够用且不烧 CPU
-        // 调试 / 性能测试时传 --tick-interval-ms 0 关闭
+        // 默认 30s 一拍，与 ui_server 主实例一致。调试可传 --tick-interval-ms 0。
         if (cfg.tick_interval_ms > 0) {
             const req = std.c.timespec{
                 .sec = @intCast(cfg.tick_interval_ms / 1000),
@@ -1782,4 +1789,14 @@ fn mergeJsonBlockIntoSnapshot(alloc: std.mem.Allocator, base_json: []const u8, f
     try buf.appendSlice(alloc, block_json);
     try buf.appendSlice(alloc, "\n}\n");
     return buf.toOwnedSlice(alloc);
+}
+
+/// RUSAGE_SELF = 0. ru_maxrss: macOS 为字节，Linux 为 KiB。这是高水位，泄漏只会升不会降。
+fn rssHighWaterBytes() u64 {
+    const usage = std.posix.getrusage(0);
+    const peak: u64 = @intCast(@max(usage.maxrss, 0));
+    return switch (builtin.os.tag) {
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => peak,
+        else => peak * 1024,
+    };
 }

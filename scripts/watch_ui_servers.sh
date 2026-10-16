@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Watchdog: 检测 8765/8766/8767 ui_server, 不可达则重启.
+# Watchdog: 检测 ui_server, 不可达则重启. 默认只看 8765; GHW_MULTI=1 时也看 8766/8767.
 # 用法: scripts/watch_ui_servers.sh
 # 后台: nohup scripts/watch_ui_servers.sh >>/tmp/ui_watchdog.log 2>&1 &
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 START="$ROOT/scripts/start_ui_servers.sh"
-PORTS=(8765 8766 8767)
+PORTS=(8765)
+if [[ "${GHW_MULTI:-0}" == "1" ]]; then
+  PORTS+=(8766 8767)
+fi
 INTERVAL="${GHW_UI_WATCH_INTERVAL:-30}"
 
 check_port() {

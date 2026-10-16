@@ -85,10 +85,14 @@ pub const HttpLLM = struct {
         };
     }
 
+    /// DeepSeek 当前模型。官方名 `deepseek-flash`，对应 V4.1-Flash。
+    /// 密钥不在这里，调用方只传环境变量里读到的值。
+    pub const DEEPSEEK_MODEL = "deepseek-flash";
+    pub const DEEPSEEK_BASE = "https://api.deepseek.com";
+
     /// DeepSeek 快捷构造 (OpenAI 兼容, base_url 写死)
-    /// 默认模型: deepseek-chat (官方 = v4-flash, 便宜快速)
     pub fn deepseek(alloc: std.mem.Allocator, io: std.Io, model: []const u8, api_key: []const u8) !HttpLLM {
-        return .openai(alloc, io, model, api_key, "https://api.deepseek.com");
+        return .openai(alloc, io, model, api_key, DEEPSEEK_BASE);
     }
 
     pub fn deinit(self: *HttpLLM) void {
@@ -292,7 +296,14 @@ pub const HttpLLM = struct {
             }
             try body.print(alloc, "}}", .{});
         }
-        try body.print(alloc, "]}}", .{});
+        try body.print(alloc, "]", .{});
+        // Flash 默认会先想再答，容易把额度花在思考上。这台生命要的是直接回答。
+        if (std.mem.indexOf(u8, self.base_url, "api.deepseek.com") != null) {
+            try body.appendSlice(alloc, ",\"thinking\":{");
+            try body.appendSlice(alloc, "\"type\":\"disabled\"");
+            try body.appendSlice(alloc, "}");
+        }
+        try body.appendSlice(alloc, "}");
         return body.toOwnedSlice(alloc);
     }
 

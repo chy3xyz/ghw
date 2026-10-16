@@ -32,7 +32,7 @@ BIN="$BIN_DIR/ghw-daemon"
 # 例: DEEPSEEK_API_KEY=sk-... ./install.sh
 # 例: UI_LLM_PROVIDER=openai UI_LLM_MODEL=gpt-4o-mini UI_LLM_KEY_ENV=OPENAI_API_KEY ./install.sh
 : "${UI_LLM_PROVIDER:=deepseek}"
-: "${UI_LLM_MODEL:=deepseek-chat}"
+: "${UI_LLM_MODEL:=deepseek-flash}"
 : "${UI_LLM_KEY_ENV:=DEEPSEEK_API_KEY}"
 if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
     log "DeepSeek API key 检测到 (前 8 字符: ${DEEPSEEK_API_KEY:0:8}...)"
@@ -185,7 +185,7 @@ NE
         <string>--llm</string>
         <string>${UI_LLM_PROVIDER:-deepseek}</string>
         <string>--llm-model</string>
-        <string>${UI_LLM_MODEL:-deepseek-chat}</string>
+        <string>${UI_LLM_MODEL:-deepseek-flash}</string>
         <string>--llm-key-env</string>
         <string>${UI_LLM_KEY_ENV:-DEEPSEEK_API_KEY}</string>
     </array>

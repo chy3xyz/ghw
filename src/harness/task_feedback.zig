@@ -12,11 +12,14 @@ const HumanSignal = @import("human_symbiosis/human_signal.zig").HumanSignal;
 const HumanFeedback = @import("human_symbiosis/human_signal.zig").HumanFeedback;
 const task_runner = @import("task_runner.zig");
 const task_executor = @import("task_executor.zig");
+const value_metric = @import("human_symbiosis/value_metric.zig");
 
 pub const Context = struct {
     queue: *TaskQueue,
     gsp: *HumanGSP,
     signal: *HumanSignal,
+    /// 真人名单。名单里的人交的任务不替他打分，留给他自己评。
+    humans: []const []const u8 = &.{},
 };
 
 /// 无人类显式评分时, 用内部 ΔE 映射到 -5..+5 (跟 live_loop 模拟反馈同量级)
@@ -59,6 +62,8 @@ pub fn applyHeuristicIfMissing(
 ) !?F {
     const t = ctx.queue.find(task_id) orelse return null;
     if (t.feedback != null) return null;
+    if (value_metric.isHumanId(t.from_human, ctx.humans)) return null;
+    if (t.source == .self_knowing) return null;
     const score = heuristicScore(actual_delta_e);
     return try applyFeedback(ctx, t, score, "", timestamp);
 }
@@ -117,4 +122,26 @@ test "task_feedback: applyFeedback 更新 Signal/GSP/Queue" {
     try testing.expectEqual(@as(u32, 1), signal.total_count);
     try testing.expect(queue.find(id).?.feedback != null);
     try testing.expectApproxEqAbs(@as(F, 0.70), gsp.peers.get("alice").?.trust, 0.001);
+}
+
+test "task_feedback: heuristic never rates a task on behalf of a listed human" {
+    const alloc = testing.allocator;
+    var queue = TaskQueue.init(alloc);
+    defer queue.deinit();
+    var gsp = HumanGSP.init(alloc);
+    defer gsp.deinit();
+    var signal = HumanSignal.init(alloc);
+    defer signal.deinit();
+    const human_task = try queue.submit("帮我看看", "d", "n0x", 7, .nature, 2);
+    const auto_task = try queue.submit("[world] load", "d", "world_sensor", 8, .material, 2);
+    try queue.complete(human_task, "out", 0.2, 1);
+    try queue.complete(auto_task, "out", 0.2, 1);
+
+    const humans = [_][]const u8{"n0x"};
+    const ctx = Context{ .queue = &queue, .gsp = &gsp, .signal = &signal, .humans = &humans };
+    try testing.expect((try applyHeuristicIfMissing(&ctx, human_task, 0.2, 1)) == null);
+    try testing.expect(queue.find(human_task).?.feedback == null);
+    try testing.expect((try applyHeuristicIfMissing(&ctx, auto_task, 0.2, 1)) != null);
+    try testing.expectEqual(@as(u32, 1), signal.total_count);
+    try testing.expect(gsp.peers.get("n0x") == null);
 }

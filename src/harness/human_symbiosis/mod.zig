@@ -24,4 +24,5 @@ pub const HumanGSP = human_gsp.HumanGSP;
 pub const ValueMetric = value_metric.ValueMetric;
 pub const ValueTrendTracker = value_metric.ValueTrendTracker;
 pub const computeScore = value_metric.computeScore;
+pub const computeHumanScore = value_metric.computeHumanScore;
 pub const ChatTask = chat_task;

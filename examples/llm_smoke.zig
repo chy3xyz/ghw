@@ -16,7 +16,7 @@ const Role = ghw.harness.llm.Role;
 
 const Config = struct {
     provider: []const u8 = "deepseek",
-    model: []const u8 = "deepseek-chat",
+    model: []const u8 = "deepseek-flash",
     base_url: []const u8 = "https://api.deepseek.com",
     api_key_env: []const u8 = "DEEPSEEK_API_KEY",
     max_tokens: u32 = 128,
@@ -35,7 +35,7 @@ fn parseArgs(alloc: Allocator, args: []const []const u8) !Config {
             cfg.provider = args[i];
             // 调默认 model + base_url
             if (std.mem.eql(u8, args[i], "deepseek")) {
-                cfg.model = "deepseek-chat";
+                cfg.model = "deepseek-flash";
                 cfg.base_url = "https://api.deepseek.com";
                 cfg.api_key_env = "DEEPSEEK_API_KEY";
             } else if (std.mem.eql(u8, args[i], "anthropic")) {

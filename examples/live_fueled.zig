@@ -25,7 +25,7 @@ const F = f32;
 
 const Config = struct {
     provider: []const u8 = "deepseek",
-    model: []const u8 = "deepseek-chat",
+    model: []const u8 = "deepseek-flash",
     base_url: []const u8 = "https://api.deepseek.com",
     api_key_env: []const u8 = "DEEPSEEK_API_KEY",
     cycles: u32 = 4,
@@ -44,7 +44,7 @@ fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) !Config {
             if (i >= args.len) return error.MissingArg;
             cfg.provider = args[i];
             if (std.mem.eql(u8, args[i], "deepseek")) {
-                cfg.model = "deepseek-chat";
+                cfg.model = "deepseek-flash";
                 cfg.base_url = "https://api.deepseek.com";
                 cfg.api_key_env = "DEEPSEEK_API_KEY";
             } else if (std.mem.eql(u8, args[i], "anthropic")) {

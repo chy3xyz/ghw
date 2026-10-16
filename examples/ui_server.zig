@@ -138,13 +138,13 @@ const ChatWorkerCtx = struct {
             const r = buildLLMReply(app, lc, self.user_text, report, sys_snap, goal_name) catch |err| {
                 std.debug.print("[chat-worker] LLM 失败: {t}, 降级到模板\n", .{err});
                 break :blk LLMReplyResult{
-                    .text = fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return,
+                    .text = fallbackTemplate(app.alloc, app, self.user_text, sys_snap) catch return,
                     .memory_injected = false,
                 };
             };
             break :blk r;
         } else LLMReplyResult{
-            .text = fallbackTemplate(app.alloc, self.user_text, report.e_after, sys_snap, goal_name) catch return,
+            .text = fallbackTemplate(app.alloc, app, self.user_text, sys_snap) catch return,
             .memory_injected = false,
         };
         defer app.alloc.free(reply.text);
@@ -195,16 +195,12 @@ fn buildLLMReply(
     app: *App,
     lc: *LLMChat,
     user_text: []const u8,
-    report: CycleReport,
+    _: CycleReport,
     sys_snap: SystemSnapshot,
     goal_name: []const u8,
 ) !LLMReplyResult {
     const alloc = app.alloc;
-    const value_score = ghw_harness.human_symbiosis.computeScore(
-        &app.human_signal,
-        &app.task_queue,
-        &app.human_gsp,
-    );
+    const value_score = humanValueScore(app);
     const built = try ghw_harness.human_symbiosis.chat_reply.buildChatReply(
         alloc,
         &app.memory,
@@ -218,6 +214,14 @@ fn buildLLMReply(
         sys_snap.load_1m,
     );
     defer alloc.free(built.prompt);
+    var brief = try ghw_harness.desk_brief.compose(alloc, deskFacts(app, sys_snap));
+    defer brief.deinit(alloc);
+    const sys_prompt = try std.fmt.allocPrint(alloc, "你是这台电脑上的 GHW 数字生命助手。只根据下面的事实说话。不杀进程，不删文件。关系：{s} 现状：{s}{s}", .{
+        if (app.life.with_line.len > 0) app.life.with_line else "还没有一份共生配置。",
+        brief.line,
+        brief.ask,
+    });
+    defer alloc.free(sys_prompt);
 
     var req = LLMChatRequest{
         .model = app.llm_model,
@@ -225,7 +229,7 @@ fn buildLLMReply(
         .max_tokens = 256,
     };
     const messages = [_]LLMMessage{
-        .{ .role = .system, .content = "你是 GHW 数字生命, 一对一与用户对话, 真实可信, 不假装." },
+        .{ .role = .system, .content = sys_prompt },
         .{ .role = .user, .content = built.prompt },
     };
     req.messages = &messages;
@@ -234,7 +238,7 @@ fn buildLLMReply(
     const llm_text = llm_resp.content orelse "";
     if (llm_text.len == 0) {
         return .{
-            .text = try fallbackTemplate(alloc, user_text, report.e_after, sys_snap, goal_name),
+            .text = try fallbackTemplate(alloc, app, user_text, sys_snap),
             .memory_injected = false,
         };
     }
@@ -309,6 +313,13 @@ const App = struct {
     existence_phase: ghw_harness.existence_phase.Phase = .awakening,
     /// P2: 宿主画像 (desktop 采样 / mobile 推送)
     host_profile: ghw_harness.host_profile.Profile = .{},
+    /// 人机共生配置 (--life)。未加载时 enabled=false。
+    life: ghw_harness.life_bond.LifeBond,
+    /// 真人名单 ("human" + 配置里的人)。空 = 沿用旧的 value_score。
+    human_ids_buf: [2][]const u8 = undefined,
+    human_ids_len: usize = 0,
+    /// 必须先问的事 (改代码等) 挂在这里等人批准。
+    ask_first: ghw_harness.ask_first.AskFirst,
     /// P2: 同伴短板收件箱
     peer_inbox: ghw_harness.peer_inbox.Inbox = .{},
     peer_shortfall_ingest_total: u32 = 0,
@@ -626,6 +637,22 @@ fn handleGetEvolved(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app:
 // ctx: *App (用 @ptrCast 注入)
 // 返: log 字符串 (写到 sqlite action.log)
 
+/// 共生配置要求改代码前先问时，只挂请求；否则沿用直接采纳。
+fn adoptOrAsk(app: *App, sub_path: []const u8, what: []const u8) !void {
+    if (app.life.mustAskCode()) {
+        const now: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
+        const summary = try std.fmt.allocPrint(app.alloc, "{s}：想写入 {s}", .{ what, sub_path });
+        defer app.alloc.free(summary);
+        const id = try app.ask_first.ask(.code, sub_path, summary, app.agent.tick, now);
+        std.debug.print("[ask] #{d} 等 {s} 批准: {s}\n", .{ id, app.life.human_id, sub_path });
+        return;
+    }
+    if (try adoptIntoGhwSource(app, sub_path)) |ghw_path| {
+        std.debug.print("[adopt] {s}: {s}\n", .{ what, ghw_path });
+        app.alloc.free(ghw_path);
+    }
+}
+
 /// Adopt 一个 L3/L4/L5 落盘文件到 ghw 源码树
 /// - src_path: 相对 ghw_root 的路径 (e.g. "src/goal/methods/l3_64.zig")
 /// - 行为: 读 /tmp/ghw_evolved/<basename(src_path)> → mkdir parent → 写到 ghw_root/src_path
@@ -823,10 +850,7 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
                 if (landed_path) |_| {
                     const sub_path = try std.fmt.allocPrint(alloc, "src/goal/methods/l3_{d}.zig", .{app.agent.tick});
                     defer alloc.free(sub_path);
-                    if (try adoptIntoGhwSource(app, sub_path)) |ghw_path| {
-                        std.debug.print("[L3] adopted: {s}\n", .{ghw_path});
-                        alloc.free(ghw_path);
-                    }
+                    try adoptOrAsk(app, sub_path, "L3 方法");
                 }
             }
 
@@ -898,10 +922,7 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
                 if (landed_path) |_| {
                     const sub_path = try std.fmt.allocPrint(alloc, "src/agent/auto_eps/l4_{d}.zig", .{app.agent.tick});
                     defer alloc.free(sub_path);
-                    if (try adoptIntoGhwSource(app, sub_path)) |ghw_path| {
-                        std.debug.print("[L4] adopted: {s}\n", .{ghw_path});
-                        alloc.free(ghw_path);
-                    }
+                    try adoptOrAsk(app, sub_path, "L4 参数");
                 }
             }
 
@@ -965,10 +986,7 @@ fn onSelfEvolveCallback(level: u8, ctx: *anyopaque) anyerror![]u8 {
             {
                 const sub_path = try std.fmt.allocPrint(alloc, "src/harness/auto_eps/l5_{d}.zig", .{app.agent.tick});
                 defer alloc.free(sub_path);
-                if (try adoptIntoGhwSource(app, sub_path)) |ghw_path| {
-                    std.debug.print("[L5] adopted: {s}\n", .{ghw_path});
-                    alloc.free(ghw_path);
-                }
+                try adoptOrAsk(app, sub_path, "L5 自编码");
             }
             encoded.deinit();
             std.debug.print("[self-evolve] {s}\n", .{log});
@@ -1240,7 +1258,7 @@ const Args = struct {
     /// LLM provider: "none" | "deepseek" | "openai" | "anthropic" | "mock"
     llm_provider: []const u8 = "none",
     /// LLM model name
-    llm_model: []const u8 = "deepseek-chat",
+    llm_model: []const u8 = "deepseek-flash",
     /// env var name with API key (e.g. DEEPSEEK_API_KEY)
     llm_api_key_env: []const u8 = "DEEPSEEK_API_KEY",
     /// Peer registry path (one socket path per line, # for comments)
@@ -1270,6 +1288,8 @@ const Args = struct {
     no_autocli: bool = false,
     /// AutoCLI 拉取间隔秒 (默认 300 = 5min)
     autocli_interval_s: u64 = 300,
+    /// 人机共生 JSON。空 = 不建立偏好关系。
+    life_path: []const u8 = "",
 };
 
 fn parseArgs(raw: []const []const u8) Args {
@@ -1340,6 +1360,9 @@ fn parseArgs(raw: []const []const u8) Args {
         } else if (std.mem.eql(u8, arg, "--cross-link-peers")) {
             i += 1;
             if (i < raw.len) a.cross_link_peers_file = raw[i];
+        } else if (std.mem.eql(u8, arg, "--life")) {
+            i += 1;
+            if (i < raw.len) a.life_path = raw[i];
         } else if (std.mem.eql(u8, arg, "--no-autocli")) {
             a.no_autocli = true;
         } else if (std.mem.eql(u8, arg, "--autocli-interval-s")) {
@@ -1364,6 +1387,7 @@ fn printHelp() void {
         \\  --port N              HTTP port (default 8080)
         \\  --host ADDR           bind host (default 127.0.0.1)
         \\  --state PATH          state.json path (default state.json)
+        \\  --life PATH           共生配置 JSON (人、偏好、必须先问的事)
         \\  --ui-dir PATH         UI static dir (default ui)
         \\  --auto-tick-ms N      auto-tick interval, 0=manual only (default 0)
         \\  --no-autocli          disable AutoCLI world fetch thread
@@ -1465,6 +1489,7 @@ fn maybeRunPendingTask(app: *App) void {
         .queue = &app.task_queue,
         .gsp = &app.human_gsp,
         .signal = &app.human_signal,
+        .humans = humanIds(app),
     };
 
     var peer_refs_buf: [16]ghw_harness.task_executor.PeerRef = undefined;
@@ -1550,6 +1575,53 @@ fn maybeRunPendingTask(app: *App) void {
     }
 }
 
+/// 主动认识：每 64 拍从这台电脑的路径里归纳一个主题，自己写入信念和使命。
+fn maybeSelfKnow(app: *App) void {
+    if (app.agent.tick % 64 != 0) return;
+    runSelfKnow(app);
+}
+
+fn runSelfKnow(app: *App) void {
+    var paths: [20][]const u8 = undefined;
+    var path_n: usize = 0;
+    var comms: [8][]const u8 = undefined;
+    var comm_n: usize = 0;
+    if (app.world.last) |snap| {
+        for (snap.recent_files) |file| {
+            if (path_n >= paths.len) break;
+            paths[path_n] = file.path;
+            path_n += 1;
+        }
+        for (snap.top_procs) |proc| {
+            if (comm_n >= comms.len) break;
+            comms[comm_n] = proc.comm;
+            comm_n += 1;
+        }
+    }
+    var ran = ghw_harness.self_knowing.step(
+        app.alloc,
+        &app.memory,
+        &app.task_queue,
+        app.io,
+        app.agent.tick,
+        paths[0..path_n],
+        comms[0..comm_n],
+    ) catch |err| {
+        std.debug.print("[ui] 主动认识失败: {t}\n", .{err});
+        return;
+    };
+    defer ran.deinit(app.alloc);
+    std.debug.print("[ui] tick={d} 主动认识 paths={d} theme={s} adopted={} reinforced={} mission={d} guarded={d}\n", .{
+        app.agent.tick,
+        path_n,
+        ran.theme,
+        ran.adopted,
+        ran.reinforced,
+        ran.mission_id,
+        ran.guarded,
+    });
+}
+
 /// P9: 三源失衡时, 用 GSP 信任选伙伴投递 balance 任务
 fn maybeAutoBalanceTask(app: *App) void {
     if (app.agent.tick == 0 or app.agent.tick % 128 != 0) return;
@@ -1624,12 +1696,20 @@ fn storeProposeResult(app: *App, result: *const ghw.harness.goal_proposer.Propos
 }
 
 /// P11: 采样人类 value_score 写入趋势缓冲
+fn humanIds(app: *const App) []const []const u8 {
+    return app.human_ids_buf[0..app.human_ids_len];
+}
+
+/// 有共生配置时只数真人；没有时沿用旧算法。
+fn humanValueScore(app: *App) F {
+    if (app.human_ids_len > 0) {
+        return ghw_harness.human_symbiosis.computeHumanScore(&app.human_signal, &app.task_queue, &app.human_gsp, humanIds(app));
+    }
+    return ghw_harness.human_symbiosis.computeScore(&app.human_signal, &app.task_queue, &app.human_gsp);
+}
+
 fn recordValueTrend(app: *App) void {
-    const score = ghw_harness.human_symbiosis.computeScore(
-        &app.human_signal,
-        &app.task_queue,
-        &app.human_gsp,
-    );
+    const score = humanValueScore(app);
     app.value_tracker.record(score);
     // P0-2 供源回流: 人类价值承认 ⇒ 性 (N) 有界增益; 独立节流 (勿与
     // last_backflow_tick 共享 — 会饿死, 见字段注释)
@@ -1777,16 +1857,14 @@ fn maybeAutoReflect(app: *App) void {
         const top_goal = if (app.growth_log.items.len > 0)
             if (app.growth_log.items[app.growth_log.items.len - 1].goal) |g| g else "observe"
         else "observe";
-        const narr = std.fmt.allocPrint(alloc,
-            \\[no-LLM 模板] 我跑到了 tick={d}, E={d:.3} (M={d:.3} R={d:.3} N={d:.3}), 主要在 {s}. 自我演化累计 {d} 次. 信念数 {d}.
-        , .{
+        const narr = std.fmt.allocPrint(alloc, ghw_harness.life_bond.TEMPLATE_NARRATIVE_PREFIX ++ " 我跑到了 tick={d}, E={d:.3} (M={d:.3} R={d:.3} N={d:.3}), 主要在 {s}. 自我演化累计 {d} 次. 信念数 {d}.", .{
             app.agent.tick, E,
             app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
             top_goal, app.self_evolve_total, app.memory.beliefs.items.len,
         }) catch return;
         defer alloc.free(narr);
-        alloc.free(app.memory.self_narrative);
-        app.memory.self_narrative = alloc.dupe(u8, narr) catch return;
+        // 状态行进记忆，不改自述：自述只由共生配置或 LLM 反思改写。
+        app.memory.recordAt(app.io, .reflection, app.agent.tick, narr, null, 0, 0) catch {};
         app.memory.reflection_count += 1;
         app.last_template_reflect_tick = app.agent.tick;
         if (app.sqlite) |*db| {
@@ -2087,16 +2165,20 @@ fn runPostCyclePipeline(app: *App, report: CycleReport) !void {
             app.agent.ed.v.material, app.agent.ed.v.representation, app.agent.ed.v.nature,
         });
         defer app.alloc.free(cycle_data);
-        _ = db.insertEpisode(@intCast(report.tick), "cycle", cycle_data, 0.3, "system") catch |err| {
-            std.debug.print("[ui] sqlite insertEpisode 失败: {t}\n", .{err});
-        };
-        app.sqlite_episodes_written += 1;
+        // cycle 行只抽样落库。记忆环仍每拍 recordAt，上限 200。
+        if (report.tick == 0 or report.tick % 32 == 0) {
+            _ = db.insertEpisode(@intCast(report.tick), "cycle", cycle_data, 0.3, "system") catch |err| {
+                std.debug.print("[ui] sqlite insertEpisode 失败: {t}\n", .{err});
+            };
+            app.sqlite_episodes_written += 1;
+        }
     }
     maybeWorldSensorTasks(app);
     maybeMetabolismInject(app);
     maybeAutoReflect(app);
     try maybeAutoProposeGoals(app);
     maybeAutoProposeRules(app);
+    maybeSelfKnow(app);
     maybeAutoBalanceTask(app);
     maybeRunPendingTask(app);
     recordValueTrend(app);
@@ -2132,8 +2214,11 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     vm.pullFromQueue(&app.task_queue);
     vm.pullFromGSP(&app.human_gsp);
     try body.appendSlice(alloc, "},\"human_symbiosis\":{");
-    try body.print(alloc, "\"value_score\":{d:.3},\"value_trend\":{d:.4},", .{
-        vm.valueScore(), app.value_tracker.trend(),
+    try body.print(alloc, "\"value_score\":{d:.3},\"self_rated_score\":{d:.3},\"humans_only\":{s},\"value_trend\":{d:.4},", .{
+        humanValueScore(app),
+        vm.valueScore(),
+        if (app.human_ids_len > 0) "true" else "false",
+        app.value_tracker.trend(),
     });
     try app.value_tracker.appendRecentSamplesJson(alloc, body);
     try body.print(alloc, ",\"feedback_count\":{d},\"human_e_uplift\":{d:.3},\"peers\":[", .{
@@ -2145,8 +2230,11 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
         if (!first_peer) try body.append(alloc, ',');
         first_peer = false;
         const p = entry.value_ptr.*;
-        try body.print(alloc, "{{\"id\":\"{s}\",\"trust\":{d:.3},\"trust_level\":\"{s}\"}}", .{
-            p.id, p.trust, p.trustLevel(),
+        try body.print(alloc, "{{\"id\":\"{s}\",\"trust\":{d:.3},\"trust_level\":\"{s}\",\"human\":{s}}}", .{
+            p.id,
+            p.trust,
+            p.trustLevel(),
+            if (ghw_harness.human_symbiosis.value_metric.isHumanId(p.id, humanIds(app))) "true" else "false",
         });
     }
     try body.appendSlice(alloc, "]},\"rule_propose\":{");
@@ -2301,57 +2389,39 @@ fn appendProvenanceJson(alloc: Allocator, body: *std.ArrayList(u8), app: *App) !
     try body.appendSlice(alloc, "}}"); // state_contract + provenance (root 由 buildStateJson 关)
 }
 
-/// LLM 不可用时的回退模板 (4 套根据 E)
+/// 无 LLM 时仍用本机事实回答，不编造能量叙事。
 fn fallbackTemplate(
     alloc: Allocator,
+    app: *App,
     user_text: []const u8,
-    e: F,
     sys_snap: SystemSnapshot,
-    goal_name: []const u8,
 ) ![]u8 {
-    const msg_summary = if (user_text.len > 30) user_text[0..30] ++ "..." else user_text;
-    if (e > 0.85) {
-        return try std.fmt.allocPrint(alloc,
-            \\收到「{s}」。系统状态良好: CPU {d:.0}%, 内存 {d:.1}G/{d:.1}G, 负载 {d:.1}。当前精力充沛 (E={d:.3}), 正在执行 {s} 任务。
-        , .{
-            msg_summary,
-            sys_snap.cpu_user_pct + sys_snap.cpu_sys_pct,
-            sys_snap.mem_used_gb, sys_snap.mem_total_gb,
-            sys_snap.load_1m,
-            e,
-            goal_name,
-        });
+    return ghw_harness.desk_brief.replyTo(alloc, deskFacts(app, sys_snap), user_text);
+}
+
+fn deskFacts(app: *App, snap: SystemSnapshot) ghw_harness.desk_brief.Facts {
+    var top_comm: []const u8 = "";
+    var top_cpu: F = 0;
+    if (app.world.last) |world| {
+        if (world.top_procs.len > 0) {
+            top_comm = world.top_procs[0].comm;
+            top_cpu = world.top_procs[0].cpu_pct;
+        }
     }
-    if (e > 0.6) {
-        return try std.fmt.allocPrint(alloc,
-            \\听到「{s}」。机器 CPU {d:.0}%, 负载 {d:.1}, 内存用 {d:.0}%。我状态还行 (E={d:.3}), {s} 中。
-        , .{
-            msg_summary,
-            sys_snap.cpu_user_pct + sys_snap.cpu_sys_pct,
-            sys_snap.load_1m,
-            sys_snap.mem_pct,
-            e,
-            goal_name,
-        });
-    }
-    if (e > 0.4) {
-        return try std.fmt.allocPrint(alloc,
-            \\「{s}」— 嗯... CPU {d:.0}%, 系统有点忙。我能量偏低 (E={d:.3}), {s} 着。
-        , .{
-            msg_summary,
-            sys_snap.cpu_user_pct + sys_snap.cpu_sys_pct,
-            e,
-            goal_name,
-        });
-    }
-    return try std.fmt.allocPrint(alloc,
-        \\「{s}」— 抱歉, 能量很低 (E={d:.3})。机器也累 (CPU {d:.0}%, 负载 {d:.1})。能给我点简单任务吗?
-    , .{
-        msg_summary,
-        e,
-        sys_snap.cpu_user_pct + sys_snap.cpu_sys_pct,
-        sys_snap.load_1m,
-    });
+    return .{
+        .mem_pct = snap.mem_pct,
+        .mem_used_gb = snap.mem_used_gb,
+        .mem_total_gb = snap.mem_total_gb,
+        .disk_pct = snap.disk_used_pct,
+        .load_1m = snap.load_1m,
+        .n_cpus = snap.n_cpus,
+        .cpu_pct = snap.cpu_user_pct + snap.cpu_sys_pct,
+        .top_comm = top_comm,
+        .top_cpu = top_cpu,
+        .pending = app.task_queue.pending_count,
+        .with_you = app.life.with_line,
+        .known = ghw_harness.self_knowing.dominant(app.memory.beliefs.items),
+    };
 }
 
 fn appendGrowth(app: *App, report: CycleReport) !void {
@@ -2537,6 +2607,8 @@ fn saveState(app: *App) !void {
     defer app.alloc.free(inbox_json);
     try buf.appendSlice(app.alloc, ",\"peer_inbox\":");
     try buf.appendSlice(app.alloc, inbox_json);
+    try buf.appendSlice(app.alloc, ",\"ask_first\":");
+    try app.ask_first.appendJson(app.alloc, &buf);
 
     const now_unix: i64 = @intCast(std.Io.Clock.real.now(app.io).toSeconds());
     app.state_meta.writer = .ui_server;
@@ -3628,6 +3700,10 @@ fn buildStateJson(alloc: Allocator, app: *App, report_opt: ?CycleReport) ![]u8 {
         proposed_json.items,
         app.action_count,
     });
+    try body.appendSlice(alloc, ",\"assistant\":");
+    try ghw_harness.desk_brief.appendJson(alloc, &body, deskFacts(app, sys_snap));
+    try body.appendSlice(alloc, ",\"ask_first\":");
+    try app.ask_first.appendJson(alloc, &body);
     // provenance + task_queue + peer_influence + 关闭外层对象
     try appendProvenanceJson(alloc, &body, app);
     try body.append(alloc, '}'); // close root state object
@@ -5730,6 +5806,63 @@ fn handleGetPeerInbox(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, ap
 
 /// POST /api/peer-inbox/share — 本地注入同伴 shortfall (模拟 Link share_shortfall / 联调)
 /// body: {"peer_id":"...", "host_crisis":true, "favored_dim":0, "material":0.4, ...}
+/// POST /api/ask/decide  form: id=N&decision=approve|deny
+/// 只有人能在这里放行。批准后才写入源码树，拒绝则什么都不写。
+fn handlePostAskDecide(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body_text: []const u8) !void {
+    const id_owned = try formValue(alloc, body_text, "id");
+    defer if (id_owned) |v| alloc.free(v);
+    const decision_owned = try formValue(alloc, body_text, "decision");
+    defer if (decision_owned) |v| alloc.free(v);
+    const id: u32 = if (id_owned) |v| std.fmt.parseInt(u32, v, 10) catch 0 else 0;
+    const decision = decision_owned orelse "";
+    const approve = std.mem.eql(u8, decision, "approve");
+    if (id == 0 or (!approve and !std.mem.eql(u8, decision, "deny"))) {
+        const resp = try makeHttpResponse(alloc, 400, "Bad Request", "application/json", "{\"error\":\"need id and decision=approve|deny\"}");
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    }
+
+    app.cycle_mutex.lockUncancelable(app.io);
+    defer app.cycle_mutex.unlock(app.io);
+    const req = app.ask_first.decide(id, if (approve) .approved else .denied) catch |err| {
+        const out = try std.fmt.allocPrint(alloc, "{{\"error\":\"{t}\"}}", .{err});
+        defer alloc.free(out);
+        const code: u16 = if (err == error.NotFound) 404 else 409;
+        const resp = try makeHttpResponse(alloc, code, if (code == 404) "Not Found" else "Conflict", "application/json", out);
+        defer alloc.free(resp);
+        try writeResponse(conn, io, resp);
+        return;
+    };
+    var written = false;
+    if (approve) {
+        if (try adoptIntoGhwSource(app, req.path)) |ghw_path| {
+            app.alloc.free(ghw_path);
+            written = true;
+        } else {
+            req.status = .missing;
+        }
+    }
+    const who = if (app.life.enabled) app.life.human_id else "human";
+    const verdict: []const u8 = if (!approve) "拒绝了" else if (written) "批准并写入了" else "批准了但文件已不在";
+    const ep = try std.fmt.allocPrint(alloc, "{s} {s} {s}", .{ who, verdict, req.path });
+    defer alloc.free(ep);
+    app.memory.recordAt(app.io, .self_evolution, app.agent.tick, ep, null, 3, 0) catch {};
+    saveState(app) catch {};
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.print(alloc, "{{\"ok\":true,\"id\":{d},\"status\":\"{s}\",\"written\":{s},\"pending\":{d}}}", .{
+        id,
+        req.status.label(),
+        if (written) "true" else "false",
+        app.ask_first.pendingCount(),
+    });
+    const resp = try makeHttpResponse(alloc, 200, "OK", "application/json", out.items);
+    defer alloc.free(resp);
+    try writeResponse(conn, io, resp);
+}
+
 fn handlePostPeerInboxShare(alloc: Allocator, conn: *std.Io.net.Stream, io: std.Io, app: *App, body: []const u8) !void {
     const peer_id = extractJsonStringField(body, "peer_id") orelse "demo-peer";
     const report = ghw_harness.host_shortfall.parseJson(body) orelse {
@@ -5929,6 +6062,8 @@ fn runServer(alloc: Allocator, io: std.Io, app: *App, host: []const u8, port: u1
                 try handlePostHostProfile(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/peer-inbox/share")) {
                 try handlePostPeerInboxShare(alloc, &stream, io, app, req.body);
+            } else if (std.mem.eql(u8, req.path, "/api/ask/decide")) {
+                try handlePostAskDecide(alloc, &stream, io, app, req.body);
             } else if (std.mem.eql(u8, req.path, "/api/tick")) {
                 try handlePostTick(alloc, &stream, io, app);
             } else if (std.mem.eql(u8, req.path, "/api/task/feedback")) {
@@ -6073,6 +6208,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .human_signal = HumanSignal.init(alloc),
         .reflection = null,
         .personality = Personality.init(alloc),
+        .life = ghw_harness.life_bond.LifeBond.init(alloc),
+        .ask_first = ghw_harness.ask_first.AskFirst.init(alloc),
         .state_path = args.state,
         .ui_dir = args.ui_dir,
         .port = args.port,
@@ -6333,6 +6470,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer app.human_gsp.deinit();
     defer app.human_signal.deinit();
     defer app.personality.deinit();
+    defer app.life.deinit();
+    defer app.ask_first.deinit();
     defer if (app.product_intent) |*intent| intent.deinit();
     defer if (app.product_runtime) |*rt| rt.deinit();
     defer if (app.co_evolution) |*reg| reg.deinit();
@@ -6522,6 +6661,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (try app.peer_inbox.loadFromJson(json)) {
                 std.debug.print("[ui] peer_inbox 恢复: count={d}\n", .{app.peer_inbox.count()});
             }
+            if (app.ask_first.loadFromJson(json)) |loaded| {
+                if (loaded) std.debug.print("[ui] 待批请求恢复: pending={d}\n", .{app.ask_first.pendingCount()});
+            } else |err| {
+                std.debug.print("[ui] ask_first 恢复失败: {t}\n", .{err});
+            }
             // host_profile: 从块恢复 kind/battery (桌面字段下次 refresh 覆盖)
             if (std.mem.indexOf(u8, json, "\"host_profile\":")) |_| {
                 if (std.mem.indexOf(u8, json, "\"kind\":\"mobile\"")) |_| {
@@ -6534,6 +6678,50 @@ pub fn main(init: std.process.Init.Minimal) !void {
             refreshLifecycle(&app);
         } else |_| {}
     } else |_| {}
+
+    if (args.life_path.len > 0) {
+        const life_abs = if (std.fs.path.isAbsolute(args.life_path))
+            try alloc.dupe(u8, args.life_path)
+        else blk: {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd_len = try std.process.currentPath(io, &cwd_buf);
+            break :blk try std.fs.path.join(alloc, &[_][]const u8{ cwd_buf[0..cwd_len], args.life_path });
+        };
+        defer alloc.free(life_abs);
+        if (readFile(alloc, io, life_abs)) |life_json| {
+            defer alloc.free(life_json);
+            app.life.deinit();
+            app.life = ghw_harness.life_bond.load(alloc, life_json) catch |err| blk: {
+                std.debug.print("[ui] 共生配置加载失败 {s}: {t}\n", .{ args.life_path, err });
+                break :blk ghw_harness.life_bond.LifeBond.init(alloc);
+            };
+            if (app.life.enabled) {
+                app.human_ids_buf = .{ "human", app.life.human_id };
+                app.human_ids_len = 2;
+                if (app.life.bind(&app.memory, &app.human_gsp)) |bound| {
+                    std.debug.print("[ui] 共生: human={s} narrative_set={s} prefs={d}\n", .{
+                        app.life.human_id,
+                        if (bound.narrative_set) "yes" else "kept",
+                        bound.beliefs_written,
+                    });
+                } else |err| {
+                    std.debug.print("[ui] 共生绑定失败: {t}\n", .{err});
+                }
+            }
+        } else |err| {
+            std.debug.print("[ui] 读共生配置失败 {s}: {t}\n", .{ args.life_path, err });
+        }
+    }
+
+    _ = app.sys_collector.collect() catch |err| {
+        std.debug.print("[ui] 启动采样失败: {t}\n", .{err});
+    };
+    if (app.world.collect()) |snap| {
+        _ = snap;
+    } else |err| {
+        std.debug.print("[ui] 启动进程采样失败: {t}\n", .{err});
+    }
+    runSelfKnow(&app);
 
     // === L3/L4 approved count bootstrap (after loadState so it doesn't get overwritten) ===
     // 数 /tmp/ghw_evolved/l3_*.zig 和 l4_*.zig 真实落盘数

@@ -160,7 +160,7 @@ const Args = struct {
     out_path: []const u8 = "data/im_results.jsonl",
     use_llm: bool = false,
     llm_provider: []const u8 = "deepseek",
-    llm_model: []const u8 = "deepseek-chat",
+    llm_model: []const u8 = "deepseek-flash",
 };
 
 fn parseArgs(alloc: Allocator, raw: []const []const u8) !Args {

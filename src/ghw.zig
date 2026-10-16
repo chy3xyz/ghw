@@ -147,6 +147,7 @@ comptime {
     _ = harness.rule_proposer;
     _ = harness.world_collector;
     _ = harness.world_sensor;
+    _ = harness.desk_brief;
     _ = harness.world_bridge;
     _ = harness.survival_remedy;
     _ = harness.survival_learn;
@@ -158,6 +159,9 @@ comptime {
     _ = harness.awaken;
     _ = harness.host_shortfall;
     _ = harness.host_profile;
+    _ = harness.life_bond;
+    _ = harness.ask_first;
+    _ = harness.self_knowing;
     _ = harness.peer_inbox;
     _ = harness.existence_phase;
     _ = harness.state_contract;

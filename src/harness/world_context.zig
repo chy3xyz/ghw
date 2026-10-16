@@ -227,6 +227,48 @@ pub const WorldContext = struct {
         return snap;
     }
 
+    fn currentDir(self: *WorldContext) ?[]u8 {
+        var buf: [4096]u8 = undefined;
+        const ptr = std.c.getcwd(&buf, buf.len) orelse return null;
+        var n: usize = 0;
+        while (n < buf.len and ptr[n] != 0) n += 1;
+        return self.alloc.dupe(u8, ptr[0..n]) catch null;
+    }
+
+    /// 只读前 max_lines 行就停。整段输出可能很大，读完再截会直接失败。
+    fn readFirstLines(self: *WorldContext, argv: []const []const u8, max_lines: usize) ![]u8 {
+        var child = std.process.spawn(self.io, .{
+            .argv = argv,
+            .stdout = .pipe,
+            .stderr = .ignore,
+            .stdin = .close,
+        }) catch return self.alloc.dupe(u8, "");
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.alloc);
+        var lines: usize = 0;
+        if (child.stdout) |file| {
+            var buf: [1024]u8 = undefined;
+            while (lines < max_lines) {
+                const n = std.Io.File.readStreaming(file, self.io, &.{&buf}) catch break;
+                if (n == 0) break;
+                var take: usize = n;
+                for (buf[0..n], 0..) |c, i| {
+                    if (c == '\n') {
+                        lines += 1;
+                        if (lines >= max_lines) {
+                            take = i + 1;
+                            break;
+                        }
+                    }
+                }
+                out.appendSlice(self.alloc, buf[0..take]) catch break;
+                if (lines >= max_lines) break;
+            }
+        }
+        child.kill(self.io);
+        return out.toOwnedSlice(self.alloc);
+    }
+
     fn runCmd(self: *WorldContext, argv: []const []const u8) ![]u8 {
         const result = std.process.run(self.alloc, self.io, .{
             .argv = argv,
@@ -289,8 +331,18 @@ pub const WorldContext = struct {
         find_args_buf[6] = "-not";
         find_args_buf[7] = "-path";
         // 简化: 不排除 hidden, find 在 home 经常太慢, 改用 mdfind
-        const mdfind_out = try self.runCmd(&[_][]const u8{ "/usr/bin/mdfind", "-onlyin", self.home_dir, "(kMDItemFSContentChangeDate > $time.today(-1))" });
+        const here = self.currentDir();
+        defer if (here) |p| self.alloc.free(p);
+        const work = if (here) |p| p else self.home_dir;
+        var mdfind_out = try self.readFirstLines(&[_][]const u8{ "/usr/bin/mdfind", "-onlyin", work, "(kMDItemFSContentChangeDate > $time.today(-1))" }, 40);
         defer self.alloc.free(mdfind_out);
+        if (!std.mem.eql(u8, work, self.home_dir)) {
+            const home_out = try self.readFirstLines(&[_][]const u8{ "/usr/bin/mdfind", "-onlyin", self.home_dir, "(kMDItemFSContentChangeDate > $time.today(-1))" }, 80);
+            defer self.alloc.free(home_out);
+            const merged = try std.fmt.allocPrint(self.alloc, "{s}\n{s}", .{ mdfind_out, home_out });
+            self.alloc.free(mdfind_out);
+            mdfind_out = merged;
+        }
         snap.recent_files = try parseMdfind(self.alloc, mdfind_out, 20);
 
         // 7) 检测是否 GHW 进程
@@ -501,10 +553,9 @@ fn parseMdfind(alloc: Allocator, out: []const u8, max: usize) ![]RecentFile {
     var files: std.ArrayList(RecentFile) = .empty;
     errdefer files.deinit(alloc);
     var lines = std.mem.splitScalar(u8, out, '\n');
-    var count: usize = 0;
-    while (lines.next()) |line| : (count += 1) {
-        if (count >= max) break;
-        if (line.len == 0) continue;
+    while (lines.next()) |line| {
+        if (files.items.len >= max) break;
+        if (line.len == 0 or lineIsNoise(line)) continue;
         try files.append(alloc, .{
             .path = try alloc.dupe(u8, line),
             .mtime = 0,
@@ -512,6 +563,17 @@ fn parseMdfind(alloc: Allocator, out: []const u8, max: usize) ![]RecentFile {
         });
     }
     return files.toOwnedSlice(alloc);
+}
+
+fn lineIsNoise(line: []const u8) bool {
+    const noise = [_][]const u8{
+        "/Library/", "/.Trash/", "/zig-cache/", "/.zig-cache/",
+        "/node_modules/", "/Caches/",
+    };
+    for (noise) |part| {
+        if (std.mem.indexOf(u8, line, part) != null) return true;
+    }
+    return false;
 }
 
 fn parseFindRecent(alloc: Allocator, out: []const u8, max: usize) ![]RecentFile {

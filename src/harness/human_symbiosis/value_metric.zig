@@ -246,12 +246,76 @@ pub fn computeScore(signal: *const HumanSignal, queue: *const TaskQueue, gsp: *c
     return vm.valueScore();
 }
 
+pub fn isHumanId(id: []const u8, humans: []const []const u8) bool {
+    for (humans) |h| {
+        if (std.mem.eql(u8, id, h)) return true;
+    }
+    return false;
+}
+
+/// 只数真人：反馈、任务、信任都按 humans 名单过滤。内部来源的自评不算人类价值。
+pub fn computeHumanScore(
+    signal: *const HumanSignal,
+    queue: *const TaskQueue,
+    gsp: *const HumanGSP,
+    humans: []const []const u8,
+) F {
+    var vm = ValueMetric{};
+    for (signal.feedbacks.items) |fb| {
+        if (!isHumanId(fb.from_human, humans)) continue;
+        vm.feedback_count += 1;
+        vm.feedback_total_score += fb.score;
+        vm.human_e_uplift += fb.toDeltaE();
+    }
+    for (queue.tasks.items) |t| {
+        if (!isHumanId(t.from_human, humans)) continue;
+        switch (t.status) {
+            .completed => vm.tasks_completed += 1,
+            .failed => vm.tasks_failed += 1,
+            else => {},
+        }
+    }
+    for (humans) |h| {
+        const peer = gsp.peers.get(h) orelse continue;
+        vm.current_trust_sum += peer.trust;
+        vm.unique_humans += 1;
+    }
+    return vm.valueScore();
+}
+
 // ===== Tests =====
 
 const testing = std.testing;
 const HumanSignalMod = @import("human_signal.zig");
 const HumanGSPMod = @import("human_gsp.zig");
 const TaskQueueMod = @import("task_queue.zig");
+
+test "ValueMetric: human score ignores internal sources rating themselves" {
+    const alloc = testing.allocator;
+    var sig = HumanSignalMod.HumanSignal.init(alloc);
+    defer sig.deinit();
+    try sig.receive(.{ .from_human = "world_sensor", .task_id = 1, .score = 5 });
+    try sig.receive(.{ .from_human = "world_sensor", .task_id = 2, .score = 5 });
+    var q = TaskQueueMod.TaskQueue.init(alloc);
+    defer q.deinit();
+    _ = try q.submit("auto", "d", "world_sensor", 5, .material, 4);
+    try q.complete(1, "out", 0.1, 4);
+    var gsp = HumanGSPMod.HumanGSP.init(alloc);
+    defer gsp.deinit();
+    try gsp.register("world_sensor");
+    try gsp.recordInteraction("world_sensor", true, 5, .material, 0);
+    try gsp.register("n0x");
+
+    const humans = [_][]const u8{"n0x"};
+    const self_rated = computeScore(&sig, &q, &gsp);
+    const human_only = computeHumanScore(&sig, &q, &gsp, &humans);
+    try testing.expect(self_rated > 0.5);
+    // 只剩默认信任 0.5 × 0.2 + 触及 0.1 × 0.2
+    try testing.expectApproxEqAbs(@as(F, 0.12), human_only, 0.001);
+
+    try sig.receive(.{ .from_human = "n0x", .task_id = 3, .score = 5 });
+    try testing.expect(computeHumanScore(&sig, &q, &gsp, &humans) > human_only);
+}
 
 test "ValueMetric: pulls data from Signal + Queue + GSP" {
     const alloc = testing.allocator;

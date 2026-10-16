@@ -31,8 +31,29 @@ function ghwApp() {
     peerInbox: { total_received: 0, entries: [] },
     hostProfileBusy: false,
     peerShareBusy: false,
+    askBusy: false,
 
     // ===== Tab 配置 =====
+    primaryTabs: [
+      { id: 'status', label: '生命', icon: '🜂' },
+      { id: 'tasks', label: '任务', icon: '📋' },
+      { id: 'chat', label: '对话', icon: '💬' },
+      { id: 'reflect', label: '记忆', icon: '🪞' },
+      { id: 'more', label: '更多', icon: '⋯' },
+    ],
+    moreTabs: [
+      { id: 'capabilities', label: '能力地图', icon: '🗺️' },
+      { id: 'evolved', label: '落盘代码', icon: '📝' },
+      { id: 'goals', label: '提议目标', icon: '🎯' },
+      { id: 'actions', label: '动作历史', icon: '⚡' },
+      { id: 'memory', label: '记忆搜索', icon: '🔍' },
+      { id: 'log', label: '成长日志', icon: '📜' },
+    ],
+    tabBarOn(id) {
+      const primary = ['status', 'tasks', 'chat', 'reflect'];
+      if (id === 'more') return this.tab === 'more' || primary.indexOf(this.tab) < 0;
+      return this.tab === id;
+    },
     tabs: [
       { id: 'status',       label: '生命信息',   icon: '🜂' },
       { id: 'capabilities', label: '能力地图',   icon: '🗺️' },
@@ -186,6 +207,30 @@ function ghwApp() {
         this.error = String(e);
       } finally {
         this.awakenBusy = false;
+      }
+    },
+
+    askPending() {
+      const items = this.state?.ask_first?.items || [];
+      return items.filter((r) => r.status === 'pending');
+    },
+
+    async decideAsk(id, decision) {
+      this.askBusy = true;
+      try {
+        const r = await fetch('/api/ask/decide', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `id=${encodeURIComponent(id)}&decision=${encodeURIComponent(decision)}`,
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.error = d.error || '决定没有提交成功';
+        else if (d.status === 'missing') this.error = `#${id} 批准了，但要写入的文件已经不在`;
+        await this.refreshState();
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.askBusy = false;
       }
     },
 
@@ -441,6 +486,7 @@ function ghwApp() {
         balance: 'balance',
         human: 'human',
         world_sensor: 'world',
+        self_knowing: 'about',
         survival_remedy: 'remedy',
         survival_act: 'act',
         metabolism: 'meta',
@@ -457,6 +503,7 @@ function ghwApp() {
       if (source === 'balance') return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
       if (source === 'human') return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
       if (source === 'world_sensor') return 'bg-orange-500/20 text-orange-300 border-orange-500/30';
+      if (source === 'self_knowing') return 'bg-amber-500/20 text-amber-200 border-amber-500/30';
       if (source === 'survival_remedy') return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
       if (source === 'survival_act') return 'bg-red-500/20 text-red-300 border-red-500/30';
       if (source === 'metabolism') return 'bg-lime-500/20 text-lime-300 border-lime-500/30';
@@ -473,6 +520,7 @@ function ghwApp() {
         { id: 'llm_proposer', label: 'llm' },
         { id: 'balance', label: 'balance' },
         { id: 'world_sensor', label: 'world' },
+        { id: 'self_knowing', label: 'about' },
         { id: 'survival_remedy', label: 'remedy' },
         { id: 'survival_act', label: 'act' },
         { id: 'metabolism', label: 'meta' },

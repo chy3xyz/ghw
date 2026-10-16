@@ -74,6 +74,11 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        t.root_module.linkSystemLibrary("sqlite3", .{});
+        if (target.result.os.tag == .macos) {
+            const path = sqlite_path orelse "/opt/homebrew/opt/sqlite/lib";
+            t.root_module.addLibraryPath(.{ .cwd_relative = path });
+        }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
     }

@@ -487,7 +487,7 @@ export fn ghw_version() [*:0]const u8 {
 /// 设置 LLM (env var 给 key, 避免 key 出现在源码里)
 /// @param provider: "deepseek" | "openai" | "anthropic" | "mock" | "none"
 /// @param api_key_env: 环境变量名 (e.g. "DEEPSEEK_API_KEY") — ghw 读 $env_var 取 key
-/// @param model: 模型名 (e.g. "deepseek-chat")
+/// @param model: 模型名 (e.g. "deepseek-flash")
 /// @return 0 = ok, -1 = 失败
 export fn ghw_setup_llm(g: ?*GhW, provider: [*:0]const u8, api_key_env: [*:0]const u8, model: [*:0]const u8) i32 {
     const g_ptr = g orelse return -1;

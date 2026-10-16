@@ -44,7 +44,7 @@ extern "c" fn sqlite3_prepare_v2(db: *sqlite3, zSql: [*]const u8, nByte: c_int, 
 extern "c" fn sqlite3_step(stmt: *sqlite3_stmt) c_int;
 extern "c" fn sqlite3_finalize(stmt: *sqlite3_stmt) c_int;
 extern "c" fn sqlite3_reset(stmt: *sqlite3_stmt) c_int;
-extern "c" fn sqlite3_bind_text(stmt: *sqlite3_stmt, idx: c_int, text: [*]const u8, nByte: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
+extern "c" fn sqlite3_bind_text(stmt: *sqlite3_stmt, idx: c_int, text: [*]const u8, nByte: c_int, destructor: ?*anyopaque) c_int;
 extern "c" fn sqlite3_bind_int64(stmt: *sqlite3_stmt, idx: c_int, value: i64) c_int;
 extern "c" fn sqlite3_bind_double(stmt: *sqlite3_stmt, idx: c_int, value: f64) c_int;
 extern "c" fn sqlite3_bind_null(stmt: *sqlite3_stmt, idx: c_int) c_int;
@@ -72,7 +72,14 @@ pub const SqliteError = error{
 pub const SqliteDb = struct {
     alloc: Allocator,
     db: *sqlite3,
-    path: []u8,
+    path: [:0]u8,
+
+    /// 情节表总量上限。超过后删最旧的 id。
+    pub const EPISODE_CAP: i64 = 2000;
+    /// 单个 autocli_* 来源只留最近这么多条，避免四路抓取把表撑满。
+    pub const AUTOCLI_KIND_CAP: i64 = 200;
+    /// 信念表上限。
+    pub const BELIEF_CAP: i64 = 500;
 
     pub fn open(alloc: Allocator, path: []const u8) !SqliteDb {
         var db: ?*sqlite3 = null;
@@ -211,6 +218,49 @@ pub const SqliteDb = struct {
             \\);
         );
         try self.exec("CREATE INDEX IF NOT EXISTS idx_evolved_kind ON evolved_adopted(kind);");
+        // 启动时裁掉历史无上限写入，避免 10 万级 episodes 一直占盘。
+        const episodes_before = try self.countRows("episodes");
+        const beliefs_before = try self.countRows("beliefs");
+        try self.pruneEpisodes();
+        try self.pruneBeliefs();
+        if (episodes_before > EPISODE_CAP or beliefs_before > BELIEF_CAP) {
+            try self.exec("VACUUM");
+        }
+    }
+
+    pub fn countRows(self: *const SqliteDb, comptime table: []const u8) !i64 {
+        const stmt = try self.prepare("SELECT COUNT(*) FROM " ++ table);
+        defer _ = sqlite3_finalize(stmt);
+        if (sqlite3_step(stmt) != SQLITE_ROW) return SqliteError.StepFailed;
+        return sqlite3_column_int64(stmt, 0);
+    }
+
+    pub fn pruneEpisodes(self: *const SqliteDb) !void {
+        try self.pruneTable("episodes", EPISODE_CAP);
+    }
+
+    pub fn pruneBeliefs(self: *const SqliteDb) !void {
+        try self.pruneTable("beliefs", BELIEF_CAP);
+    }
+
+    fn pruneTable(self: *const SqliteDb, comptime table: []const u8, comptime cap: i64) !void {
+        const sql = std.fmt.comptimePrint(
+            "DELETE FROM {s} WHERE id NOT IN (SELECT id FROM {s} ORDER BY id DESC LIMIT {d})",
+            .{ table, table, cap },
+        );
+        try self.exec(sql);
+    }
+
+    fn pruneAutocliKind(self: *const SqliteDb, kind: []const u8) !void {
+        const stmt = try self.prepare(
+            \\DELETE FROM episodes WHERE kind = ?1 AND id NOT IN (
+            \\  SELECT id FROM episodes WHERE kind = ?1 ORDER BY id DESC LIMIT ?2
+            \\);
+        );
+        defer _ = sqlite3_finalize(stmt);
+        try bindText(stmt, 1, kind);
+        _ = sqlite3_bind_int64(stmt, 2, AUTOCLI_KIND_CAP);
+        if (sqlite3_step(stmt) != SQLITE_DONE) return SqliteError.StepFailed;
     }
 
     // ===== Episodes =====
@@ -228,14 +278,17 @@ pub const SqliteDb = struct {
             \\VALUES (?, ?, ?, ?, strftime('%s','now'), ?);
         );
         defer _ = sqlite3_finalize(stmt);
-        try bindText(stmt, 1, &[_]u8{}, ""); // unused
         _ = sqlite3_bind_int64(stmt, 1, tick);
-        try bindTextAlloc(self.alloc, stmt, 2, kind);
-        try bindTextAlloc(self.alloc, stmt, 3, data);
+        try bindText(stmt, 2, kind);
+        try bindText(stmt, 3, data);
         _ = sqlite3_bind_double(stmt, 4, importance);
-        try bindTextAlloc(self.alloc, stmt, 5, source);
+        try bindText(stmt, 5, source);
         const rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE) return SqliteError.StepFailed;
+        if (std.mem.startsWith(u8, kind, "autocli_")) {
+            try self.pruneAutocliKind(kind);
+        }
+        try self.pruneEpisodes();
         return sqlite3_last_insert_rowid(self.db);
     }
 
@@ -254,11 +307,12 @@ pub const SqliteDb = struct {
         );
         defer _ = sqlite3_finalize(stmt);
         _ = sqlite3_bind_int64(stmt, 1, tick);
-        try bindTextAlloc(self.alloc, stmt, 2, source);
-        try bindTextAlloc(self.alloc, stmt, 3, text);
+        try bindText(stmt, 2, source);
+        try bindText(stmt, 3, text);
         _ = sqlite3_bind_double(stmt, 4, confidence);
         const rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE) return SqliteError.StepFailed;
+        try self.pruneBeliefs();
         return sqlite3_last_insert_rowid(self.db);
     }
 
@@ -339,13 +393,13 @@ pub const SqliteDb = struct {
         );
         defer _ = sqlite3_finalize(stmt);
         _ = sqlite3_bind_int64(stmt, 1, tick);
-        try bindTextAlloc(self.alloc, stmt, 2, title);
-        try bindTextAlloc(self.alloc, stmt, 3, description);
-        try bindTextAlloc(self.alloc, stmt, 4, dimension);
-        try bindTextAlloc(self.alloc, stmt, 5, reason);
+        try bindText(stmt, 2, title);
+        try bindText(stmt, 3, description);
+        try bindText(stmt, 4, dimension);
+        try bindText(stmt, 5, reason);
         _ = sqlite3_bind_double(stmt, 6, urgency);
         if (raw.len > 0) {
-            try bindTextAlloc(self.alloc, stmt, 7, raw);
+            try bindText(stmt, 7, raw);
         } else {
             _ = sqlite3_bind_null(stmt, 7);
         }
@@ -432,11 +486,11 @@ pub const SqliteDb = struct {
             _ = sqlite3_bind_null(stmt, 1);
         }
         _ = sqlite3_bind_int64(stmt, 2, tick);
-        try bindTextAlloc(self.alloc, stmt, 3, kind);
-        try bindTextAlloc(self.alloc, stmt, 4, source);
-        try bindTextAlloc(self.alloc, stmt, 5, input);
-        try bindTextAlloc(self.alloc, stmt, 6, output);
-        try bindTextAlloc(self.alloc, stmt, 7, result);
+        try bindText(stmt, 3, kind);
+        try bindText(stmt, 4, source);
+        try bindText(stmt, 5, input);
+        try bindText(stmt, 6, output);
+        try bindText(stmt, 7, result);
         _ = sqlite3_bind_int64(stmt, 8, duration_ms);
         const rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE) return SqliteError.StepFailed;
@@ -581,7 +635,7 @@ pub const SqliteDb = struct {
             try like_buf.append(self.alloc, '%');
             try like_buf.appendSlice(self.alloc, query);
             try like_buf.append(self.alloc, '%');
-            _ = sqlite3_bind_text(stmt, 1, like_buf.items.ptr, @intCast(like_buf.items.len), @ptrCast(&sqlTransientDestructor));
+            _ = sqlite3_bind_text(stmt, 1, like_buf.items.ptr, @intCast(like_buf.items.len), sqliteTransient());
             _ = sqlite3_bind_int64(stmt, 2, limit);
         } else {
             _ = sqlite3_bind_int64(stmt, 1, limit);
@@ -680,11 +734,11 @@ pub const SqliteDb = struct {
         ) catch return;
         defer _ = sqlite3_finalize(stmt);
         _ = sqlite3_bind_int64(stmt, 1, tick);
-        _ = sqlite3_bind_text(stmt, 2, request_text.ptr, @intCast(request_text.len), @ptrCast(&sqlTransientDestructor));
-        _ = sqlite3_bind_text(stmt, 3, action.ptr, @intCast(action.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_text(stmt, 2, request_text.ptr, @intCast(request_text.len), sqliteTransient());
+        _ = sqlite3_bind_text(stmt, 3, action.ptr, @intCast(action.len), sqliteTransient());
         _ = sqlite3_bind_double(stmt, 4, confidence);
         _ = sqlite3_bind_double(stmt, 5, abstention);
-        _ = sqlite3_bind_text(stmt, 6, gate.ptr, @intCast(gate.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_text(stmt, 6, gate.ptr, @intCast(gate.len), sqliteTransient());
         _ = sqlite3_bind_int64(stmt, 7, std.Io.Clock.real.now(io).toSeconds());
         _ = sqlite3_step(stmt);
     }
@@ -708,7 +762,7 @@ pub const SqliteDb = struct {
             \\WHERE id = (SELECT id FROM decision0_log WHERE outcome IS NULL AND tick <= ? ORDER BY id LIMIT 1)
         ) catch return;
         defer _ = sqlite3_finalize(stmt);
-        _ = sqlite3_bind_text(stmt, 1, outcome.ptr, @intCast(outcome.len), @ptrCast(&sqlTransientDestructor));
+        _ = sqlite3_bind_text(stmt, 1, outcome.ptr, @intCast(outcome.len), sqliteTransient());
         _ = sqlite3_bind_int64(stmt, 2, max_tick);
         _ = sqlite3_step(stmt);
     }
@@ -851,15 +905,16 @@ pub fn hashToHex(hash: u64) [16]u8 {
 // helpers
 // ============================================================
 
-fn bindTextAlloc(alloc: Allocator, stmt: *sqlite3_stmt, idx: c_int, s: []const u8) !void {
-    // 复制一份, 因为 sqlite 会在 step 时拿引用
-    // 用 SQLITE_STATIC (null destructor) — 我们保留字符串 alive 到 step 完
-    const dup = try alloc.dupe(u8, s);
-    _ = sqlite3_bind_text(stmt, idx, dup.ptr, @intCast(dup.len), null);
-    // 注意: dup 内存会泄漏. 用 SQLITE_TRANSIENT 应该更好, 但需要 cast to -1 ptr
+/// SQLITE_TRANSIENT = (destructor)-1. sqlite 在 bind 返回前复制字节。
+fn sqliteTransient() ?*anyopaque {
+    return @ptrFromInt(std.math.maxInt(usize));
 }
 
-fn bindText(_: *sqlite3_stmt, _: c_int, _: []const u8, _: []const u8) !void {}
+fn bindText(stmt: *sqlite3_stmt, idx: c_int, s: []const u8) !void {
+    const ptr: [*]const u8 = if (s.len == 0) "" else s.ptr;
+    const rc = sqlite3_bind_text(stmt, idx, ptr, @intCast(s.len), sqliteTransient());
+    if (rc != SQLITE_OK) return SqliteError.BindFailed;
+}
 
 fn dupColumnText(alloc: Allocator, stmt: *sqlite3_stmt, idx: c_int) []u8 {
     const ptr = sqlite3_column_text(stmt, idx);
@@ -875,6 +930,49 @@ fn cStrlen(s: [*]const u8) usize {
     return i;
 }
 
-/// SQLITE_TRANSIENT: 让 sqlite 复制字符串 (我们给的指针释放后仍可读)
-/// Zig 里用 fn (void) callconv(.c) 表示
-fn sqlTransientDestructor(_: ?*anyopaque) callconv(.c) void {}
+const testing = std.testing;
+
+fn deleteTestFile(alloc: Allocator, path: []const u8) void {
+    var io_t = std.Io.Threaded.init(alloc, .{});
+    defer io_t.deinit();
+    std.Io.Dir.deleteFileAbsolute(io_t.io(), path) catch {};
+}
+
+fn openTestDb(alloc: Allocator, name: []const u8) !SqliteDb {
+    var path_buf: [96]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/tmp/{s}-{d}.db", .{ name, std.c.getpid() }) catch unreachable;
+    deleteTestFile(alloc, path);
+    const db = try SqliteDb.open(alloc, path);
+    try db.initSchema();
+    return db;
+}
+
+fn finishTestDb(alloc: Allocator, db: *SqliteDb) void {
+    const path_copy = alloc.dupe(u8, db.path) catch return;
+    defer alloc.free(path_copy);
+    db.close();
+    deleteTestFile(alloc, path_copy);
+}
+
+test "sqlite: episode insert stays within cap and does not leak bindings" {
+    const alloc = testing.allocator;
+    var db = try openTestDb(alloc, "ghw-ep-cap");
+    defer finishTestDb(alloc, &db);
+    var i: i64 = 0;
+    while (i < SqliteDb.EPISODE_CAP + 30) : (i += 1) {
+        _ = try db.insertEpisode(i, "cycle", "tick sample", 0.2, "system");
+    }
+    try testing.expectEqual(SqliteDb.EPISODE_CAP, try db.countRows("episodes"));
+}
+
+test "sqlite: autocli kind cap keeps other kinds" {
+    const alloc = testing.allocator;
+    var db = try openTestDb(alloc, "ghw-ac-cap");
+    defer finishTestDb(alloc, &db);
+    _ = try db.insertEpisode(1, "cycle", "keep me", 0.4, "system");
+    var i: i64 = 0;
+    while (i < SqliteDb.AUTOCLI_KIND_CAP + 15) : (i += 1) {
+        _ = try db.insertEpisode(i, "autocli_wiki", "fetched", 0.3, "autocli");
+    }
+    try testing.expectEqual(SqliteDb.AUTOCLI_KIND_CAP + 1, try db.countRows("episodes"));
+}
